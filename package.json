@@ -1,0 +1,61 @@
+{
+  "name": "codearts-agent-proxy",
+  "version": "1.0.0",
+  "description": "A proxy service that wraps CodeArts Agent LLM interfaces into standard OpenAI-compatible API",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "node ./node_modules/typescript/bin/tsc",
+    "start": "node dist/index.js",
+    "dev": "node -r ts-node/register src/index.ts",
+    "test": "node -r ts-node/register src/upstream/huawei/chat.test.ts",
+    "lint": "node ./node_modules/eslint/bin/eslint.js src/**/*.ts",
+    "format": "node ./node_modules/prettier/bin/prettier.cjs --write src/**/*.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "codearts",
+    "openai",
+    "llm",
+    "proxy",
+    "api",
+    "chatgpt",
+    "codearts-agent"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.6.0",
+    "dotenv": "^16.3.0",
+    "express": "^4.18.2",
+    "uuid": "^9.0.0",
+    "ws": "^8.14.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.20",
+    "@types/node": "^20.9.0",
+    "@types/uuid": "^9.0.5",
+    "@types/ws": "^8.5.8",
+    "@typescript-eslint/eslint-plugin": "^6.10.0",
+    "@typescript-eslint/parser": "^6.10.0",
+    "better-sqlite3": "^12.9.0",
+    "eslint": "^8.53.0",
+    "jest": "^29.7.0",
+    "prettier": "^3.1.0",
+    "sql.js": "^1.14.1",
+    "ts-jest": "^29.1.1",
+    "ts-node": "^10.9.1",
+    "typescript": "^5.2.2"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": ""
+  },
+  "bugs": {
+    "url": ""
+  },
+  "homepage": ""
+}

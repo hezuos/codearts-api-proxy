@@ -1,0 +1,11 @@
+
+.opencode/
+node_modules/
+dist/
+.env
+.env.*
+scripts/*.bin
+scripts/session-*.json
+data/
+*.swp
+*.log
