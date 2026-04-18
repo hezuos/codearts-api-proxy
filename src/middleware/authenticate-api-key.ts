@@ -29,11 +29,11 @@ export function authenticateApiKey(
 export function getRequestAuth(req: Request): {
   apiKeyId: string;
   userId: string;
-  providerAccountId: string;
+  providerAccountId?: string;
 } {
   return Reflect.get(req, "auth") as {
     apiKeyId: string;
     userId: string;
-    providerAccountId: string;
+    providerAccountId?: string;
   };
 }

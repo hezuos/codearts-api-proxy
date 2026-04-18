@@ -4,7 +4,7 @@ import {
   refreshStoredSession,
   type StoredHuaweiSession,
 } from "../auth/huawei/session-store";
-import { getProviderAccount } from "../auth/store";
+import { getProviderAccount, listProviderAccounts } from "../auth/store";
 import { getRequestAuth } from "../middleware/authenticate-api-key";
 import { getTraceId } from "../middleware/request-context";
 import type { OpenAIChatCompletionRequest } from "../types/openai";
@@ -33,7 +33,16 @@ export function listModels(_req: Request, res: Response): void {
 
 export function createChatCompletion(req: Request, res: Response): void {
   const auth = getRequestAuth(req);
-  const providerAccount = getProviderAccount(auth.providerAccountId);
+
+  // Resolve provider account: use the one bound to the API key,
+  // or fall back to the user's default account
+  let providerAccount = auth.providerAccountId
+    ? getProviderAccount(auth.providerAccountId)
+    : undefined;
+  if (!providerAccount) {
+    const accounts = listProviderAccounts(auth.userId);
+    providerAccount = accounts.find((a) => a.isDefault) ?? accounts[0];
+  }
   if (!providerAccount) {
     res
       .status(400)

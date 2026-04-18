@@ -10,7 +10,7 @@ import { decryptString, encryptString } from "./crypto/encryption";
 export interface AuthContext {
   apiKeyId: string;
   userId: string;
-  providerAccountId: string;
+  providerAccountId?: string;
 }
 
 const users = new Map<string, User>();
@@ -177,7 +177,7 @@ export function deleteProviderAccount(
 
 export function issueApiKey(input: {
   userId: string;
-  providerAccountId: string;
+  providerAccountId?: string;
   name: string;
   rawKey: string;
 }): ApiKey {
@@ -211,6 +211,35 @@ export function validateApiKey(rawKey: string): AuthContext | null {
   };
 }
 
+export function getUserApiKey(userId: string): string | null {
+  for (const apiKey of apiKeys.values()) {
+    if (apiKey.userId === userId && !apiKey.revokedAt) {
+      return apiKey.keyHash;
+    }
+  }
+  return null;
+}
+
+export function revokeApiKey(apiKeyId: string): boolean {
+  const apiKey = apiKeys.get(apiKeyId);
+  if (!apiKey || apiKey.revokedAt) {
+    return false;
+  }
+  apiKey.revokedAt = new Date().toISOString();
+  apiKey.updatedAt = new Date().toISOString();
+  apiKeys.set(apiKeyId, apiKey);
+  persistAuthStore();
+  return true;
+}
+
+export function listApiKeysByUser(userId: string): ApiKey[] {
+  return Array.from(apiKeys.values()).filter((k) => k.userId === userId);
+}
+
+export function listAllUsers(): User[] {
+  return Array.from(users.values());
+}
+
 export function bootstrapDefaultAuth(rawApiKey: string): AuthContext {
   let user = getDefaultUser();
   if (!user) {
@@ -220,23 +249,13 @@ export function bootstrapDefaultAuth(rawApiKey: string): AuthContext {
     });
   }
 
-  let providerAccount = providerAccounts.get("default");
-  if (!providerAccount) {
-    providerAccount = upsertProviderAccount({
-      id: "default",
-      userId: user.id,
-      provider: "huawei-codearts",
-      displayName: "Default Huawei Account",
-      isDefault: true,
-      status: "pending",
-    });
-  }
-
   let apiKey = apiKeysByValue.get(rawApiKey);
   if (!apiKey) {
+    // Issue API key without binding to a specific provider account.
+    // It will be resolved to the user's default account at request time.
     apiKey = issueApiKey({
       userId: user.id,
-      providerAccountId: providerAccount.id,
+      providerAccountId: undefined,
       name: "default",
       rawKey: rawApiKey,
     });
@@ -245,6 +264,6 @@ export function bootstrapDefaultAuth(rawApiKey: string): AuthContext {
   return {
     apiKeyId: apiKey.id,
     userId: user.id,
-    providerAccountId: providerAccount.id,
+    providerAccountId: apiKey.providerAccountId,
   };
 }

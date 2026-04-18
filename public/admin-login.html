@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Admin Login - CodeArts Agent Proxy</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div class="container">
+      <h1>Admin Login</h1>
+
+      <form id="login-form" onsubmit="return loginAdmin(event);">
+        <div>
+          <label for="password">Password:</label>
+          <input type="password" id="password" name="password" required />
+        </div>
+
+        <div>
+          <button type="submit">Login</button>
+        </div>
+      </form>
+
+      <div id="error" class="error-message hidden"></div>
+    </div>
+
+    <script src="/app.js"></script>
+    <script>
+      async function loginAdmin(event) {
+        event.preventDefault();
+
+        const password = document.getElementById("password").value;
+
+        try {
+          await fetchJson("/admin/login", {
+            method: "POST",
+            body: JSON.stringify({ password }),
+          });
+
+          window.location.href = "/admin";
+        } catch (error) {
+          showError("Invalid password");
+        }
+
+        return false;
+      }
+    </script>
+  </body>
+</html>

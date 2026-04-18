@@ -11,6 +11,7 @@ export interface StoredHuaweiSession {
   secretKeyCiphertext?: string;
   securityToken?: string;
   expiresAt?: string;
+  lastRefreshedAt?: string;
 }
 
 const sessionCache = new Map<string, StoredHuaweiSession>();
@@ -148,6 +149,7 @@ async function refreshStoredSessionInternal(
     typeof credential.expires_at === "string"
       ? credential.expires_at
       : stored.expiresAt;
+  stored.lastRefreshedAt = new Date().toISOString();
   if (typeof credential.secret === "string") {
     const { encryptString } = await import("../crypto/encryption");
     stored.secretKeyCiphertext = encryptString(credential.secret);

@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Admin Panel - CodeArts Agent Proxy</title>
+    <link rel="stylesheet" href="/style.css" />
+    <style>
+      .modal-overlay {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.5);
+        z-index: 100;
+        align-items: center;
+        justify-content: center;
+      }
+      .modal-overlay.active {
+        display: flex;
+      }
+      .modal {
+        background: white;
+        border-radius: 8px;
+        padding: 2rem;
+        max-width: 600px;
+        width: 90%;
+        max-height: 80vh;
+        overflow-y: auto;
+      }
+      .modal h2 {
+        margin-top: 0;
+      }
+      .modal-close {
+        float: right;
+        cursor: pointer;
+        font-size: 1.5rem;
+        line-height: 1;
+      }
+      .key-cell {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .key-cell code {
+        font-size: 0.85em;
+      }
+      .key-cell button {
+        padding: 1px 6px;
+        font-size: 0.75em;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Admin Panel</h1>
+
+      <div class="nav">
+        <a href="/">Home</a>
+        <a
+          href="#"
+          onclick="
+            logout();
+            return false;
+          "
+          >Logout</a
+        >
+      </div>
+
+      <div id="loading" class="loading">
+        <p>Loading admin data...</p>
+      </div>
+
+      <div id="content" class="hidden">
+        <h2>System Statistics</h2>
+        <div class="stats">
+          <div class="stat-card">
+            <h3 id="total-users">0</h3>
+            <p>Total Users</p>
+          </div>
+          <div class="stat-card">
+            <h3 id="total-accounts">0</h3>
+            <p>Total Accounts</p>
+          </div>
+          <div class="stat-card">
+            <h3 id="total-keys">0</h3>
+            <p>API Keys</p>
+          </div>
+        </div>
+
+        <h2>Accounts</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>华为云用户名</th>
+              <th>Domain ID</th>
+              <th>Provider</th>
+              <th>Status</th>
+              <th>Token Status</th>
+              <th>API Key</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="accounts-table"></tbody>
+        </table>
+
+        <h2>Users</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>User ID</th>
+              <th>Email</th>
+              <th>Display Name</th>
+              <th>Created</th>
+              <th>Accounts</th>
+              <th>API Keys</th>
+            </tr>
+          </thead>
+          <tbody id="users-table"></tbody>
+        </table>
+      </div>
+
+      <div id="error" class="error-message hidden"></div>
+    </div>
+
+    <!-- Account details modal -->
+    <div id="account-modal" class="modal-overlay" onclick="closeModal(event)">
+      <div class="modal">
+        <span
+          class="modal-close"
+          onclick="
+            document.getElementById('account-modal').classList.remove('active')
+          "
+          >&times;</span
+        >
+        <h2>Account Details</h2>
+        <dl id="modal-details" class="account-info"></dl>
+      </div>
+    </div>
+
+    <script src="/app.js"></script>
+    <script>
+      // Track revealed keys to support toggle
+      const revealedKeys = new Set();
+
+      function keyCell(keyId, fullKey) {
+        const revealed = revealedKeys.has(keyId);
+        const display = revealed ? fullKey : maskApiKey(fullKey);
+        const toggleLabel = revealed ? "Hide" : "Show";
+        return `
+          <div class="key-cell">
+            <code>${display}</code>
+            <button onclick="toggleKey('${keyId}', '${fullKey}', this)">${toggleLabel}</button>
+            <button onclick="copyKey('${fullKey}', this)">Copy</button>
+          </div>
+        `;
+      }
+
+      function toggleKey(keyId, fullKey, btn) {
+        if (revealedKeys.has(keyId)) {
+          revealedKeys.delete(keyId);
+          btn.previousElementSibling.textContent = maskApiKey(fullKey);
+          btn.textContent = "Show";
+        } else {
+          revealedKeys.add(keyId);
+          btn.previousElementSibling.textContent = fullKey;
+          btn.textContent = "Hide";
+        }
+      }
+
+      function copyKey(fullKey, btn) {
+        copyToClipboard(fullKey, btn);
+      }
+
+      async function loadAdminData() {
+        try {
+          const [usersData, accountsData] = await Promise.all([
+            fetchJson("/admin/api/users"),
+            fetchJson("/admin/api/accounts"),
+          ]);
+
+          // Update statistics
+          document.getElementById("total-users").textContent =
+            usersData.users.length;
+          document.getElementById("total-accounts").textContent =
+            accountsData.accounts.length;
+          document.getElementById("total-keys").textContent =
+            usersData.users.reduce((sum, u) => sum + u.apiKeys.length, 0);
+
+          // Populate accounts table
+          const accountsTable = document.getElementById("accounts-table");
+          accountsTable.innerHTML = "";
+          accountsData.accounts.forEach((account) => {
+            const status = calculateAccountStatus(account.session?.expiresAt);
+            const apiKeyHtml =
+              account.apiKeys && account.apiKeys.length > 0
+                ? account.apiKeys.map((k) => keyCell(k.id, k.keyHash)).join("")
+                : "<em>None</em>";
+            const row = document.createElement("tr");
+            row.innerHTML = `
+            <td>${account.providerUserName || "N/A"}</td>
+            <td><code>${account.domainId || "N/A"}</code></td>
+            <td>${account.provider}</td>
+            <td class="${status.class}">${status.label}</td>
+            <td>
+              ${account.session ? formatRelativeTime(account.session.expiresAt) : "N/A"}
+            </td>
+            <td>${apiKeyHtml}</td>
+            <td>
+              <button onclick="viewAccount('${account.id}')">View</button>
+              <button onclick="forceRefresh('${account.id}')">Refresh</button>
+            </td>
+          `;
+            accountsTable.appendChild(row);
+          });
+
+          // Populate users table
+          const usersTable = document.getElementById("users-table");
+          usersTable.innerHTML = "";
+          usersData.users.forEach((user) => {
+            const row = document.createElement("tr");
+            row.innerHTML = `
+            <td><code>${user.id.slice(0, 8)}...</code></td>
+            <td>${user.email || "N/A"}</td>
+            <td>${user.displayName || "N/A"}</td>
+            <td>${user.createdAt ? formatTimestamp(user.createdAt) : "N/A"}</td>
+            <td>${user.accounts.length}</td>
+            <td>
+              ${user.apiKeys
+                .map(
+                  (key) => `
+                <div>
+                  ${keyCell(key.id, key.keyHash)}
+                  ${key.revokedAt ? '<span class="status-expired">(Revoked)</span>' : ""}
+                  ${!key.revokedAt ? `<button onclick="revokeKey('${key.id}')">Revoke</button>` : ""}
+                </div>
+              `,
+                )
+                .join("")}
+            </td>
+          `;
+            usersTable.appendChild(row);
+          });
+
+          document.getElementById("loading").classList.add("hidden");
+          document.getElementById("content").classList.remove("hidden");
+        } catch (error) {
+          document.getElementById("loading").classList.add("hidden");
+          document.getElementById("error").textContent =
+            "Failed to load admin data: " + error.message;
+          document.getElementById("error").classList.remove("hidden");
+        }
+      }
+
+      async function logout() {
+        await fetch("/admin/logout", {
+          method: "POST",
+          redirect: "manual",
+        }).catch(() => {});
+        window.location.href = "/";
+      }
+
+      async function revokeKey(keyId) {
+        if (!confirmAction("Are you sure you want to revoke this API key?")) {
+          return;
+        }
+
+        try {
+          await fetchJson(`/admin/api/keys/${keyId}/revoke`, {
+            method: "POST",
+          });
+          showSuccess("API key revoked");
+          loadAdminData();
+        } catch (error) {
+          showError("Failed to revoke key: " + error.message);
+        }
+      }
+
+      async function forceRefresh(accountId) {
+        try {
+          await fetchJson(`/admin/api/accounts/${accountId}/refresh`, {
+            method: "POST",
+          });
+          showSuccess("Force refresh initiated");
+          setTimeout(loadAdminData, 1000);
+        } catch (error) {
+          showError("Failed to force refresh: " + error.message);
+        }
+      }
+
+      async function viewAccount(accountId) {
+        try {
+          const account = await fetchJson(`/admin/api/accounts/${accountId}`);
+          const apiKeyDetails =
+            account.apiKeys && account.apiKeys.length > 0
+              ? account.apiKeys.map((k) => keyCell(k.id, k.keyHash)).join("")
+              : "<em>None</em>";
+          const dl = document.getElementById("modal-details");
+          dl.innerHTML = `
+            <dt>Account ID:</dt><dd><code>${account.id}</code></dd>
+            <dt>Provider:</dt><dd>${account.provider}</dd>
+            <dt>Display Name:</dt><dd>${account.displayName || "N/A"}</dd>
+            <dt>Provider User Name:</dt><dd>${account.providerUserName || "N/A"}</dd>
+            <dt>Provider User ID:</dt><dd>${account.providerUserId || "N/A"}</dd>
+            <dt>Domain ID:</dt><dd>${account.domainId || "N/A"}</dd>
+            <dt>Status:</dt><dd>${account.status || "N/A"}</dd>
+            <dt>Default:</dt><dd>${account.isDefault ? "Yes" : "No"}</dd>
+            <dt>API Key:</dt><dd>${apiKeyDetails}</dd>
+            ${
+              account.session
+                ? `
+            <dt>Token Expires:</dt><dd>${formatTimestamp(account.session.expiresAt)} (${formatRelativeTime(account.session.expiresAt)})</dd>
+            <dt>Last Refreshed:</dt><dd>${account.session.lastRefreshedAt ? formatTimestamp(account.session.lastRefreshedAt) : "Never"}</dd>
+            `
+                : "<dt>Session:</dt><dd>No active session</dd>"
+            }
+          `;
+          document.getElementById("account-modal").classList.add("active");
+        } catch (error) {
+          showError("Failed to load account details: " + error.message);
+        }
+      }
+
+      function closeModal(event) {
+        if (event.target === document.getElementById("account-modal")) {
+          document.getElementById("account-modal").classList.remove("active");
+        }
+      }
+
+      loadAdminData();
+    </script>
+  </body>
+</html>

@@ -1,4 +1,5 @@
 import express from "express";
+import cookieParser from "cookie-parser";
 import type { NextFunction, Request, Response } from "express";
 import { bootstrapDefaultAuth, loadPersistedAuthStore } from "./auth/store";
 import {
@@ -7,9 +8,12 @@ import {
   setRefreshTaskEnabled,
 } from "./auth/huawei/refresh-task";
 import { loadPersistedSessions } from "./auth/huawei/session-store";
+import { loadAdminConfig } from "./auth/admin";
 import { config } from "./config";
 import { authenticateApiKey } from "./middleware/authenticate-api-key";
 import { withRequestContext } from "./middleware/request-context";
+import { requireUiAuth } from "./middleware/authenticate-ui";
+import { requireAdminAuth } from "./middleware/authenticate-admin";
 import {
   authorizeHuaweiLogin,
   initiateHuaweiLogin,
@@ -22,32 +26,58 @@ import {
   unbindProviderAccount,
 } from "./routes/provider-accounts";
 import { createChatCompletion, listModels } from "./routes/openai";
+import {
+  successPage,
+  statusPage,
+  getAccountInfo,
+  getAccountStatus,
+  regenerateApiKey,
+  refreshAccountToken,
+  unbindAccount,
+  setDefaultAccount,
+} from "./routes/web-ui";
+import {
+  adminSetupPage,
+  adminSetup,
+  adminLoginPage,
+  adminLogin,
+  adminLogout,
+  adminPanel,
+  getAllUsers,
+  getAllAccounts,
+  getAccountDetails,
+  revokeApiKey,
+  forceRefreshAccount,
+} from "./routes/admin";
 import { createOpenAIError } from "./utils/openai-error";
 
 const app = express();
 
+app.use(cookieParser());
 app.use(express.json({ limit: config.requestBodyLimit }));
+app.use(express.static("public"));
 app.use(withRequestContext);
 
 loadPersistedAuthStore();
 bootstrapDefaultAuth(config.defaultApiKey);
 loadPersistedSessions();
+loadAdminConfig();
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
 });
 
 app.get("/", (_req, res) => {
-  res.setHeader("Content-Type", "text/html; charset=utf-8");
-  res.end(
-    `<!doctype html><html><body><h1>CodeArts Agent Proxy</h1><p>Open browser login entry:</p><p><a href="/auth/huawei/authorize">/auth/huawei/authorize</a></p><p>API: <code>POST /v1/chat/completions</code> | <code>GET /v1/models</code></p></body></html>`,
-  );
+  res.sendFile("index.html", { root: "public" });
 });
 
+// OAuth routes
 app.get("/auth/huawei/authorize", authorizeHuaweiLogin);
 app.post("/auth/huawei/login", authenticateApiKey, initiateHuaweiLogin);
 app.get("/callback", handleHuaweiCallback);
 app.get("/auth/callback", handleHuaweiCallback);
+
+// API routes
 app.get("/v1/models", authenticateApiKey, listModels);
 app.post("/v1/chat/completions", authenticateApiKey, createChatCompletion);
 app.get("/provider-accounts", authenticateApiKey, listBoundProviderAccounts);
@@ -65,6 +95,41 @@ app.post(
   "/provider-accounts/:providerAccountId/refresh",
   authenticateApiKey,
   triggerProviderAccountRefresh,
+);
+
+// Web UI routes
+app.get("/success", requireUiAuth, successPage);
+app.get("/status", requireUiAuth, statusPage);
+app.get("/api/ui/account", requireUiAuth, getAccountInfo);
+app.get("/api/ui/status", requireUiAuth, getAccountStatus);
+app.post("/api/ui/regenerate-key", requireUiAuth, regenerateApiKey);
+app.post(
+  "/api/ui/accounts/:accountId/refresh",
+  requireUiAuth,
+  refreshAccountToken,
+);
+app.delete("/api/ui/accounts/:accountId", requireUiAuth, unbindAccount);
+app.post(
+  "/api/ui/accounts/:accountId/default",
+  requireUiAuth,
+  setDefaultAccount,
+);
+
+// Admin routes
+app.get("/admin/setup", adminSetupPage);
+app.post("/admin/setup", adminSetup);
+app.get("/admin/login", adminLoginPage);
+app.post("/admin/login", adminLogin);
+app.post("/admin/logout", adminLogout);
+app.get("/admin", requireAdminAuth, adminPanel);
+app.get("/admin/api/users", requireAdminAuth, getAllUsers);
+app.get("/admin/api/accounts", requireAdminAuth, getAllAccounts);
+app.get("/admin/api/accounts/:id", requireAdminAuth, getAccountDetails);
+app.post("/admin/api/keys/:id/revoke", requireAdminAuth, revokeApiKey);
+app.post(
+  "/admin/api/accounts/:id/refresh",
+  requireAdminAuth,
+  forceRefreshAccount,
 );
 
 app.use(

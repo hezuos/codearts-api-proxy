@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CodeArts Agent Proxy</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div class="container">
+      <h1>CodeArts Agent Proxy</h1>
+
+      <div class="nav">
+        <h2>Welcome</h2>
+        <p>
+          This proxy allows you to use Huawei Cloud CodeArts as an
+          OpenAI-compatible API endpoint.
+        </p>
+      </div>
+
+      <h2>Quick Start</h2>
+
+      <div class="account-card">
+        <h3>User Login</h3>
+        <p>
+          Click the link below to login with your Huawei Cloud account and get
+          your API key.
+        </p>
+        <p><a href="/auth/huawei/authorize">Login with Huawei Cloud</a></p>
+      </div>
+
+      <div class="account-card">
+        <h3>Admin Panel</h3>
+        <p>Access the admin panel to manage users and accounts.</p>
+        <p><a href="/admin">Admin Panel</a></p>
+      </div>
+
+      <h2>API Endpoints</h2>
+      <p>Once you have your API key, you can use the following endpoints:</p>
+
+      <pre><code>POST /v1/chat/completions
+GET  /v1/models</code></pre>
+
+      <h2>Usage Example</h2>
+      <pre><code>export OPENAI_API_KEY="your-api-key"
+export OPENAI_BASE_URL="http://localhost:3000"
+
+openai chat.completions.create \
+  --model "codearts-model" \
+  --messages '[{"role": "user", "content": "Hello!"}]'</code></pre>
+    </div>
+  </body>
+</html>

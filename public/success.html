@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Login Success - CodeArts Agent Proxy</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div class="container">
+      <h1>Login Successful!</h1>
+
+      <div class="nav">
+        <a href="/">Home</a>
+        <a href="/status">View Status</a>
+        <a href="/auth/huawei/authorize">Bind Another Account</a>
+      </div>
+
+      <div id="loading" class="loading">
+        <p>Loading account information...</p>
+      </div>
+
+      <div id="content" class="hidden">
+        <h2>Your API Key</h2>
+        <div class="api-key">
+          <span id="api-key-display"></span>
+          <button id="show-btn" onclick="toggleKey()">Show</button>
+          <button id="copy-btn" onclick="copyKey()">Copy</button>
+        </div>
+
+        <h2>Account Information</h2>
+        <div class="account-card">
+          <dl class="account-info">
+            <dt>User Name:</dt>
+            <dd id="user-name">-</dd>
+
+            <dt>Domain ID:</dt>
+            <dd id="domain-id">-</dd>
+
+            <dt>Account ID:</dt>
+            <dd id="account-id">-</dd>
+          </dl>
+        </div>
+
+        <h2>Usage Examples</h2>
+
+        <h3>Environment Variables</h3>
+        <pre><code>export OPENAI_API_KEY="<span id="api-key-env"></span>"
+export OPENAI_BASE_URL="<span id="base-url"></span>"</code></pre>
+
+        <h3>Python (OpenAI SDK)</h3>
+        <pre><code>from openai import OpenAI
+
+client = OpenAI(
+    api_key="<span id="api-key-python"></span>",
+    base_url="<span id="base-url-python"></span>"
+)
+
+response = client.chat.completions.create(
+    model="codearts-model",
+    messages=[{"role": "user", "content": "Hello!"}]
+)</code></pre>
+
+        <h3>cURL</h3>
+        <pre><code>curl <span id="base-url-curl"></span>/v1/chat/completions \
+  -H "Authorization: Bearer <span id="api-key-curl"></span>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "codearts-model",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'</code></pre>
+      </div>
+
+      <div id="error" class="error-message hidden"></div>
+    </div>
+
+    <script src="/app.js"></script>
+    <script>
+      let fullApiKey = "";
+      let isMasked = true;
+
+      async function loadAccountInfo() {
+        try {
+          const response = await fetchJson("/api/ui/account");
+
+          fullApiKey = response.apiKey;
+          const maskedKey = maskApiKey(fullApiKey);
+
+          document.getElementById("api-key-display").textContent = maskedKey;
+          document.getElementById("api-key-env").textContent = fullApiKey;
+          document.getElementById("api-key-python").textContent = fullApiKey;
+          document.getElementById("api-key-curl").textContent = fullApiKey;
+
+          const baseUrl = window.location.origin;
+          document.getElementById("base-url").textContent = baseUrl;
+          document.getElementById("base-url-python").textContent = baseUrl;
+          document.getElementById("base-url-curl").textContent = baseUrl;
+
+          document.getElementById("user-name").textContent =
+            response.userName || "N/A";
+          document.getElementById("domain-id").textContent =
+            response.domainId || "N/A";
+          document.getElementById("account-id").textContent =
+            response.accountId || "N/A";
+
+          document.getElementById("loading").classList.add("hidden");
+          document.getElementById("content").classList.remove("hidden");
+        } catch (error) {
+          document.getElementById("loading").classList.add("hidden");
+          document.getElementById("error").textContent =
+            "Failed to load account information: " + error.message;
+          document.getElementById("error").classList.remove("hidden");
+        }
+      }
+
+      function toggleKey() {
+        const display = document.getElementById("api-key-display");
+        const btn = document.getElementById("show-btn");
+
+        if (isMasked) {
+          display.textContent = fullApiKey;
+          btn.textContent = "Hide";
+          isMasked = false;
+        } else {
+          display.textContent = maskApiKey(fullApiKey);
+          btn.textContent = "Show";
+          isMasked = true;
+        }
+      }
+
+      function copyKey() {
+        copyToClipboard(fullApiKey, document.getElementById("copy-btn"));
+      }
+
+      loadAccountInfo();
+    </script>
+  </body>
+</html>

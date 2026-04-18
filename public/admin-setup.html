@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Admin Setup - CodeArts Agent Proxy</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div class="container">
+      <h1>Admin Setup</h1>
+
+      <p>Set up the admin password for the first time.</p>
+
+      <form id="setup-form" onsubmit="return setupAdmin(event);">
+        <div>
+          <label for="password">Password:</label>
+          <input
+            type="password"
+            id="password"
+            name="password"
+            required
+            minlength="8"
+          />
+          <small id="password-strength"></small>
+        </div>
+
+        <div>
+          <label for="confirm-password">Confirm Password:</label>
+          <input
+            type="password"
+            id="confirm-password"
+            name="confirm-password"
+            required
+          />
+        </div>
+
+        <div>
+          <button type="submit">Set Password</button>
+        </div>
+      </form>
+
+      <div id="error" class="error-message hidden"></div>
+      <div id="success" class="success-message hidden"></div>
+    </div>
+
+    <script src="/app.js"></script>
+    <script>
+      const passwordInput = document.getElementById("password");
+      const strengthDisplay = document.getElementById("password-strength");
+
+      passwordInput.addEventListener("input", function () {
+        const password = this.value;
+        const strength = calculatePasswordStrength(password);
+
+        if (password.length === 0) {
+          strengthDisplay.textContent = "";
+        } else if (strength < 2) {
+          strengthDisplay.textContent = "Weak";
+          strengthDisplay.style.color = "#e74c3c";
+        } else if (strength < 4) {
+          strengthDisplay.textContent = "Medium";
+          strengthDisplay.style.color = "#f39c12";
+        } else {
+          strengthDisplay.textContent = "Strong";
+          strengthDisplay.style.color = "#27ae60";
+        }
+      });
+
+      function calculatePasswordStrength(password) {
+        let strength = 0;
+
+        if (password.length >= 8) strength++;
+        if (password.length >= 12) strength++;
+        if (/[a-z]/.test(password) && /[A-Z]/.test(password)) strength++;
+        if (/\d/.test(password)) strength++;
+        if (/[^a-zA-Z0-9]/.test(password)) strength++;
+
+        return strength;
+      }
+
+      async function setupAdmin(event) {
+        event.preventDefault();
+
+        const password = document.getElementById("password").value;
+        const confirmPassword =
+          document.getElementById("confirm-password").value;
+
+        if (password !== confirmPassword) {
+          showError("Passwords do not match");
+          return false;
+        }
+
+        if (password.length < 8) {
+          showError("Password must be at least 8 characters");
+          return false;
+        }
+
+        try {
+          await fetchJson("/admin/setup", {
+            method: "POST",
+            body: JSON.stringify({ password }),
+          });
+
+          showSuccess("Admin password set successfully! Redirecting...");
+          setTimeout(() => {
+            window.location.href = "/admin";
+          }, 2000);
+        } catch (error) {
+          showError("Failed to set admin password: " + error.message);
+        }
+
+        return false;
+      }
+    </script>
+  </body>
+</html>
