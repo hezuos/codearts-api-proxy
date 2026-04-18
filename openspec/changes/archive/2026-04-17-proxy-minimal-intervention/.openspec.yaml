@@ -1,0 +1,8 @@
+schema: spec-driven
+created: 2026-04-16
+updated: 2026-04-17
+change: proxy-minimal-intervention
+status: implemented
+description: Minimal intervention proxy behavior with context passthrough
+specs:
+  - specs/proxy-context-passthrough/spec.md

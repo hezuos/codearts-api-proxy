@@ -1,0 +1,8 @@
+schema: spec-driven
+created: 2026-04-16
+updated: 2026-04-17
+change: complete-codearts-request-forwarding
+status: implemented
+description: Complete CodeArts request forwarding with conversation continuity
+specs:
+  - specs/codearts-request-forwarding/spec.md

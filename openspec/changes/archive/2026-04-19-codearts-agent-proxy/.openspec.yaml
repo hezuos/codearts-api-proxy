@@ -1,0 +1,13 @@
+schema: spec-driven
+created: 2026-04-14
+updated: 2026-04-17
+change: codearts-agent-proxy
+status: implemented
+description: OpenAI-compatible proxy for Huawei Cloud CodeArts Agent
+specs:
+  - specs/user-auth/spec.md
+  - specs/account-binding/spec.md
+  - specs/huawei-auth/spec.md
+  - specs/openai-api/spec.md
+  - specs/request-translation/spec.md
+  - specs/sse-streaming/spec.md
