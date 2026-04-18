@@ -89,14 +89,13 @@ export function adminPanel(_req: Request, res: Response): void {
 }
 
 /**
- * GET /admin/api/users - Get all users with their accounts and API keys
+ * GET /admin/api/users - Get all users with their accounts (no API keys)
  */
 export function getAllUsers(_req: Request, res: Response): void {
   const users = listAllUsers();
 
   const result = users.map((user) => {
     const accounts = listProviderAccounts(user.id);
-    const apiKeys = listApiKeysByUser(user.id);
 
     return {
       id: user.id,
@@ -107,13 +106,6 @@ export function getAllUsers(_req: Request, res: Response): void {
         id: a.id,
         provider: a.provider,
         displayName: a.displayName,
-      })),
-      apiKeys: apiKeys.map((k) => ({
-        id: k.id,
-        keyHash: k.keyHash,
-        name: k.name,
-        createdAt: k.createdAt,
-        revokedAt: k.revokedAt ?? null,
       })),
     };
   });
@@ -132,13 +124,15 @@ export function getAllAccounts(_req: Request, res: Response): void {
     const userApiKeys = listApiKeysByUser(user.id);
     return userAccounts.map((account) => {
       const session = getSession(account.id);
-      // Find API keys bound to this account
+      // Find all API keys bound to this account (active + revoked)
       const accountApiKeys = userApiKeys
-        .filter((k) => k.providerAccountId === account.id && !k.revokedAt)
+        .filter((k) => k.providerAccountId === account.id)
         .map((k) => ({
           id: k.id,
           keyHash: k.keyHash,
           name: k.name,
+          createdAt: k.createdAt,
+          revokedAt: k.revokedAt ?? null,
         }));
       return {
         id: account.id,
@@ -194,11 +188,13 @@ export function getAccountDetails(req: Request, res: Response): void {
       const session = getSession(account.id);
       const userApiKeys = listApiKeysByUser(user.id);
       const accountApiKeys = userApiKeys
-        .filter((k) => k.providerAccountId === account.id && !k.revokedAt)
+        .filter((k) => k.providerAccountId === account.id)
         .map((k) => ({
           id: k.id,
           keyHash: k.keyHash,
           name: k.name,
+          createdAt: k.createdAt,
+          revokedAt: k.revokedAt ?? null,
         }));
       res.json({
         id: account.id,

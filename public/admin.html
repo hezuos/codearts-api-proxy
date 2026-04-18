@@ -96,8 +96,8 @@
               <th>Domain ID</th>
               <th>Provider</th>
               <th>Status</th>
-              <th>Token Status</th>
-              <th>API Key</th>
+              <th>Token Expires</th>
+              <th>API Keys</th>
               <th>Actions</th>
             </tr>
           </thead>
@@ -113,7 +113,6 @@
               <th>Display Name</th>
               <th>Created</th>
               <th>Accounts</th>
-              <th>API Keys</th>
             </tr>
           </thead>
           <tbody id="users-table"></tbody>
@@ -185,7 +184,12 @@
           document.getElementById("total-accounts").textContent =
             accountsData.accounts.length;
           document.getElementById("total-keys").textContent =
-            usersData.users.reduce((sum, u) => sum + u.apiKeys.length, 0);
+            accountsData.accounts.reduce(
+              (sum, a) =>
+                sum +
+                (a.apiKeys ? a.apiKeys.filter((k) => !k.revokedAt).length : 0),
+              0,
+            );
 
           // Populate accounts table
           const accountsTable = document.getElementById("accounts-table");
@@ -194,7 +198,15 @@
             const status = calculateAccountStatus(account.session?.expiresAt);
             const apiKeyHtml =
               account.apiKeys && account.apiKeys.length > 0
-                ? account.apiKeys.map((k) => keyCell(k.id, k.keyHash)).join("")
+                ? account.apiKeys
+                    .map(
+                      (k) => `
+                  <div>
+                    ${keyCell(k.id, k.keyHash)}
+                    ${k.revokedAt ? '<span class="status-expired">(Revoked)</span>' : `<button onclick="revokeKey('${k.id}')">Revoke</button>`}
+                  </div>`,
+                    )
+                    .join("")
                 : "<em>None</em>";
             const row = document.createElement("tr");
             row.innerHTML = `
@@ -225,19 +237,6 @@
             <td>${user.displayName || "N/A"}</td>
             <td>${user.createdAt ? formatTimestamp(user.createdAt) : "N/A"}</td>
             <td>${user.accounts.length}</td>
-            <td>
-              ${user.apiKeys
-                .map(
-                  (key) => `
-                <div>
-                  ${keyCell(key.id, key.keyHash)}
-                  ${key.revokedAt ? '<span class="status-expired">(Revoked)</span>' : ""}
-                  ${!key.revokedAt ? `<button onclick="revokeKey('${key.id}')">Revoke</button>` : ""}
-                </div>
-              `,
-                )
-                .join("")}
-            </td>
           `;
             usersTable.appendChild(row);
           });
