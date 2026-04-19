@@ -8,6 +8,7 @@ import { getRequestAuth } from "../middleware/authenticate-api-key";
 import { getTraceId } from "../middleware/request-context";
 import {
   getDefaultUser,
+  validateApiKey,
   upsertProviderAccount,
   listProviderAccounts,
   issueApiKey,
@@ -18,18 +19,40 @@ import {
 } from "../upstream/huawei/ticket";
 import { createOpenAIError } from "../utils/openai-error";
 
+let exchangeHuaweiTicket = waitForHuaweiTicketExchange;
+
+type BrowserLoginStatus =
+  | "pending"
+  | "callback_received"
+  | "exchanging"
+  | "completed"
+  | "failed"
+  | "expired";
+
+interface LoginFlowRecord {
+  ticketId: string;
+  loginUrl?: string;
+  state: string;
+  expiresAt: number;
+  userId: string;
+  kind: "api" | "browser";
+  identifier?: string;
+  redirect?: string;
+  browserStatus?: BrowserLoginStatus;
+  error?: string;
+  completedAt?: number;
+  accountId?: string;
+  apiKey?: string;
+}
+
+const BROWSER_FLOW_MAX_AGE_MS = 5 * 60 * 1000;
+const TERMINAL_BROWSER_FLOW_RETENTION_MS = 10 * 60 * 1000;
+
 const loginFlows = new Map<
   string,
-  {
-    ticketId: string;
-    state: string;
-    expiresAt: number;
-    userId: string;
-    identifier?: string;
-    redirect?: string;
-  }
+  LoginFlowRecord
 >();
-let latestBrowserFlowTicketId: string | null = null;
+const browserExchangeTasks = new Map<string, Promise<void>>();
 
 function maskValue(value: string | undefined): string {
   if (!value) {
@@ -43,86 +66,150 @@ function maskValue(value: string | undefined): string {
   return `${value.slice(0, 6)}...${value.slice(-4)}`;
 }
 
-function getPendingLoginFlow(ticketId?: string): {
-  ticketId: string;
-  state: string;
-  expiresAt: number;
-  userId: string;
-  identifier?: string;
-  redirect?: string;
-} | null {
+function isTerminalBrowserStatus(status: BrowserLoginStatus | undefined): boolean {
+  return status === "completed" || status === "failed" || status === "expired";
+}
+
+function clearExpiredLoginFlows(now = Date.now()): void {
+  for (const [ticketId, flow] of loginFlows.entries()) {
+    if (flow.kind === "browser") {
+      if (
+        isTerminalBrowserStatus(flow.browserStatus) &&
+        flow.completedAt &&
+        now - flow.completedAt > TERMINAL_BROWSER_FLOW_RETENTION_MS
+      ) {
+        loginFlows.delete(ticketId);
+        continue;
+      }
+
+      if (!isTerminalBrowserStatus(flow.browserStatus) && now > flow.expiresAt) {
+        loginFlows.set(ticketId, {
+          ...flow,
+          browserStatus: "expired",
+          error: flow.error ?? "Login flow expired",
+          completedAt: now,
+        });
+      }
+      continue;
+    }
+
+    if (now > flow.expiresAt) {
+      loginFlows.delete(ticketId);
+    }
+  }
+}
+
+function getBrowserLoginFlow(ticketId: string): LoginFlowRecord | null {
+  clearExpiredLoginFlows();
+  const flow = loginFlows.get(ticketId);
+  if (!flow || flow.kind !== "browser") {
+    return null;
+  }
+  return flow;
+}
+
+function getPendingApiLoginFlow(ticketId?: string): LoginFlowRecord | null {
+  clearExpiredLoginFlows();
+
   if (ticketId) {
-    return loginFlows.get(ticketId) ?? null;
+    const exact = loginFlows.get(ticketId);
+    if (exact && exact.kind === "api") {
+      return exact;
+    }
   }
 
-  if (latestBrowserFlowTicketId) {
-    return loginFlows.get(latestBrowserFlowTicketId) ?? null;
-  }
-
-  const now = Date.now();
   const pending = Array.from(loginFlows.values())
-    .filter((flow) => flow.expiresAt > now)
+    .filter((flow) => flow.kind === "api" && flow.expiresAt > Date.now())
     .sort((left, right) => right.expiresAt - left.expiresAt);
 
   return pending[0] ?? null;
+}
+
+function getBrowserLoginStatus(flow: LoginFlowRecord): {
+  ticket_id: string;
+  status: BrowserLoginStatus;
+  expires_at: string;
+  completed_at: string | null;
+  error?: string;
+  account_id?: string;
+} {
+  return {
+    ticket_id: flow.ticketId,
+    status: flow.browserStatus ?? "pending",
+    expires_at: new Date(flow.expiresAt).toISOString(),
+    completed_at: flow.completedAt
+      ? new Date(flow.completedAt).toISOString()
+      : null,
+    error: flow.error,
+    account_id: flow.accountId,
+  };
 }
 
 function getCallbackHost(req: Request): string {
   return `${req.protocol}://${req.get("host") ?? `127.0.0.1:${config.port}`}`;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
+function setAuthKeyCookie(res: Response, apiKey: string): void {
+  const isProduction = process.env.NODE_ENV === "production";
+  res.cookie("auth_key", apiKey, {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: "lax",
+    maxAge: 30 * 24 * 60 * 60 * 1000,
   });
 }
 
-async function waitForFlowIdentifier(ticketId: string): Promise<string> {
-  for (let attempt = 0; attempt < 300; attempt += 1) {
-    const flow = loginFlows.get(ticketId);
-    if (!flow) {
-      throw new Error("Login flow not found");
-    }
-
-    if (Date.now() > flow.expiresAt) {
-      throw new Error("Login flow expired");
-    }
-
-    if (flow.identifier) {
-      console.log(
-        `[huawei-auth] callback identifier ready ticketId=${maskValue(ticketId)} attempt=${attempt + 1} identifier=${maskValue(flow.identifier)} redirect=${flow.redirect ?? "missing"}`,
-      );
-      return flow.identifier;
-    }
-
-    if (attempt === 0 || (attempt + 1) % 5 === 0) {
-      console.log(
-        `[huawei-auth] waiting callback identifier ticketId=${maskValue(ticketId)} attempt=${attempt + 1}`,
-      );
-    }
-
-    await sleep(1000);
-  }
-
-  throw new Error("Timed out waiting for Huawei callback identifier");
+function setBrowserLoginTicketCookie(res: Response, ticketId: string): void {
+  const isProduction = process.env.NODE_ENV === "production";
+  res.cookie("huawei_login_ticket", ticketId, {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: "lax",
+    maxAge: BROWSER_FLOW_MAX_AGE_MS,
+  });
 }
 
-function completeLoginFlow(
-  flow: {
-    ticketId: string;
-    state: string;
-    expiresAt: number;
-    userId: string;
-    identifier?: string;
-    redirect?: string;
-  },
-  result: HuaweiTicketExchangeResponse,
-): { accountId: string; apiKey: string } {
-  loginFlows.delete(flow.ticketId);
-  if (latestBrowserFlowTicketId === flow.ticketId) {
-    latestBrowserFlowTicketId = null;
+function clearBrowserLoginTicketCookie(res: Response): void {
+  const isProduction = process.env.NODE_ENV === "production";
+  res.clearCookie("huawei_login_ticket", {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: "lax",
+  });
+}
+
+function resolveBrowserLoginUserId(req: Request): string | null {
+  const cookieApiKey =
+    typeof req.cookies.auth_key === "string" ? req.cookies.auth_key : undefined;
+  if (cookieApiKey) {
+    const auth = validateApiKey(cookieApiKey);
+    if (auth) {
+      return auth.userId;
+    }
   }
 
+  return getDefaultUser()?.id ?? null;
+}
+
+function createBrowserLoginFlow(userId: string, callbackPort: number): LoginFlowRecord {
+  const flow = createHuaweiLoginFlow(callbackPort);
+  const record: LoginFlowRecord = {
+    ticketId: flow.ticketId,
+    loginUrl: flow.loginUrl,
+    state: flow.state,
+    expiresAt: flow.expiresAt.getTime(),
+    userId,
+    kind: "browser",
+    browserStatus: "pending",
+  };
+  loginFlows.set(flow.ticketId, record);
+  return record;
+}
+
+function provisionLoginResult(
+  flow: LoginFlowRecord,
+  result: HuaweiTicketExchangeResponse,
+): { accountId: string; apiKey: string } {
   // Use domainId to generate a unique, stable accountId for each Huawei account
   const accountId = result.domainId
     ? `huawei-${result.domainId}`
@@ -176,24 +263,72 @@ function completeLoginFlow(
   return { accountId, apiKey: rawKey };
 }
 
-async function waitForFlowAuthentication(flow: {
-  ticketId: string;
-  state: string;
-  expiresAt: number;
-  userId: string;
-  identifier?: string;
-  redirect?: string;
-}): Promise<{ accountId: string; apiKey: string }> {
-  console.log(
-    `[huawei-auth] start waiting flow authentication ticketId=${maskValue(flow.ticketId)} userId=${flow.userId}`,
-  );
-  const identifier = await waitForFlowIdentifier(flow.ticketId);
-  const result = await waitForHuaweiTicketExchange({
-    ticketId: flow.ticketId,
+function startBrowserFlowExchange(
+  flow: LoginFlowRecord,
+  identifier: string,
+  redirect: string | undefined,
+): void {
+  if (browserExchangeTasks.has(flow.ticketId)) {
+    return;
+  }
+
+  loginFlows.set(flow.ticketId, {
+    ...flow,
     identifier,
+    redirect,
+    browserStatus: "callback_received",
+    error: undefined,
   });
 
-  return completeLoginFlow(flow, result);
+  const task = (async () => {
+    loginFlows.set(flow.ticketId, {
+      ...flow,
+      identifier,
+      redirect,
+      browserStatus: "exchanging",
+      error: undefined,
+    });
+
+    try {
+      const result = await exchangeHuaweiTicket({
+        ticketId: flow.ticketId,
+        identifier,
+      });
+      const currentFlow = getBrowserLoginFlow(flow.ticketId) ?? {
+        ...flow,
+        identifier,
+        redirect,
+      };
+      const { accountId, apiKey } = provisionLoginResult(currentFlow, result);
+
+      loginFlows.set(flow.ticketId, {
+        ...currentFlow,
+        identifier,
+        redirect,
+        browserStatus: "completed",
+        completedAt: Date.now(),
+        error: undefined,
+        accountId,
+        apiKey,
+      });
+    } catch (error) {
+      console.error("[huawei-auth] background authentication failed:", error);
+      const currentFlow = getBrowserLoginFlow(flow.ticketId) ?? flow;
+      loginFlows.set(flow.ticketId, {
+        ...currentFlow,
+        identifier,
+        redirect,
+        browserStatus: "failed",
+        completedAt: Date.now(),
+        error:
+          error instanceof Error ? error.message : "Authentication failed",
+      });
+    } finally {
+      browserExchangeTasks.delete(flow.ticketId);
+    }
+  })();
+
+  browserExchangeTasks.set(flow.ticketId, task);
 }
 
 export function initiateHuaweiLogin(req: Request, res: Response): void {
@@ -206,6 +341,7 @@ export function initiateHuaweiLogin(req: Request, res: Response): void {
     state: flow.state,
     expiresAt: flow.expiresAt.getTime(),
     userId: auth.userId,
+    kind: "api",
   });
 
   console.log(
@@ -222,86 +358,160 @@ export function initiateHuaweiLogin(req: Request, res: Response): void {
 }
 
 export function authorizeHuaweiLogin(req: Request, res: Response): void {
-  const defaultUser = getDefaultUser();
-  if (!defaultUser) {
+  clearExpiredLoginFlows();
+
+  const userId = resolveBrowserLoginUserId(req);
+  if (!userId) {
     res.status(500).json(createOpenAIError("No default user configured"));
     return;
   }
 
   const callbackPort = Number(req.query.callback_port) || config.callbackPort;
-  // Only clear expired flows, not all pending flows (multi-account support)
-  const now = Date.now();
-  for (const [ticketId, pendingFlow] of loginFlows.entries()) {
-    if (pendingFlow.expiresAt <= now) {
-      loginFlows.delete(ticketId);
-      if (latestBrowserFlowTicketId === ticketId) {
-        latestBrowserFlowTicketId = null;
-      }
-    }
-  }
-  const flow = createHuaweiLoginFlow(callbackPort);
-  loginFlows.set(flow.ticketId, {
-    ticketId: flow.ticketId,
-    state: flow.state,
-    expiresAt: flow.expiresAt.getTime(),
-    userId: defaultUser.id,
-  });
-  latestBrowserFlowTicketId = flow.ticketId;
+  const flow = createBrowserLoginFlow(userId, callbackPort);
+  setBrowserLoginTicketCookie(res, flow.ticketId);
 
   console.log(
-    `[huawei-auth] browser authorize start ticketId=${maskValue(flow.ticketId)} callbackPort=${callbackPort} loginUrl=${flow.loginUrl}`,
+    `[huawei-auth] browser authorize start ticketId=${maskValue(flow.ticketId)} callbackPort=${callbackPort}`,
   );
 
-  void waitForFlowAuthentication({
-    ticketId: flow.ticketId,
-    state: flow.state,
-    expiresAt: flow.expiresAt.getTime(),
-    userId: defaultUser.id,
-  }).catch((error) => {
-    console.error("Huawei browser login flow failed:", error);
-    const pendingFlow = loginFlows.get(flow.ticketId);
-    if (pendingFlow) {
-      loginFlows.delete(flow.ticketId);
-    }
-    if (latestBrowserFlowTicketId === flow.ticketId) {
-      latestBrowserFlowTicketId = null;
-    }
-  });
+  res.redirect(flow.loginUrl ?? "/");
+}
 
-  res.redirect(flow.loginUrl);
+export function startBrowserHuaweiLogin(req: Request, res: Response): void {
+  clearExpiredLoginFlows();
+
+  const userId = resolveBrowserLoginUserId(req);
+  if (!userId) {
+    res.status(500).json(createOpenAIError("No default user configured"));
+    return;
+  }
+
+  const callbackPort = Number(req.query.callback_port) || config.callbackPort;
+  const flow = createBrowserLoginFlow(userId, callbackPort);
+  setBrowserLoginTicketCookie(res, flow.ticketId);
+
+  res.json({
+    ticket_id: flow.ticketId,
+    login_url: flow.loginUrl,
+    expires_at: new Date(flow.expiresAt).toISOString(),
+    status_url: `${getCallbackHost(req)}/auth/huawei/browser/status/${flow.ticketId}`,
+  });
+}
+
+export function getBrowserHuaweiLoginStatus(req: Request, res: Response): void {
+  const flow = getBrowserLoginFlow(req.params.ticketId);
+  if (!flow) {
+    res.status(404).json({ error: "Login ticket not found" });
+    return;
+  }
+
+  res.json(getBrowserLoginStatus(flow));
+}
+
+export function browserHuaweiLoginCompletePage(
+  _req: Request,
+  res: Response,
+): void {
+  res.sendFile("huawei-login-complete.html", { root: "public" });
+}
+
+export function finalizeBrowserHuaweiLogin(req: Request, res: Response): void {
+  const flow = getBrowserLoginFlow(req.params.ticketId);
+  if (!flow) {
+    res.status(404).json({ error: "Login ticket not found" });
+    return;
+  }
+
+  if (flow.browserStatus !== "completed" || !flow.apiKey) {
+    res.status(409).json({
+      error: flow.error ?? `Login ticket is not ready: ${flow.browserStatus}`,
+      status: flow.browserStatus ?? "pending",
+    });
+    return;
+  }
+
+  clearBrowserLoginTicketCookie(res);
+  setAuthKeyCookie(res, flow.apiKey);
+  res.json({ success: true, redirect_url: "/success" });
 }
 
 export async function handleHuaweiCallback(
   req: Request,
   res: Response,
 ): Promise<void> {
+  clearExpiredLoginFlows();
+
   const identifier = req.query.identifier;
   const redirect =
     typeof req.query.redirect === "string" ? req.query.redirect : undefined;
+  const preferredTicketId =
+    typeof req.query.ticket_id === "string"
+      ? req.query.ticket_id
+      : typeof req.cookies.huawei_login_ticket === "string"
+        ? req.cookies.huawei_login_ticket
+        : undefined;
 
   if (!identifier || typeof identifier !== "string") {
     res.status(400).json(createOpenAIError("Missing identifier in callback"));
     return;
   }
 
-  const flow = getPendingLoginFlow();
-  if (!flow) {
+  const browserFlow = preferredTicketId
+    ? getBrowserLoginFlow(preferredTicketId)
+    : null;
+
+  if (browserFlow) {
+    if (Date.now() > browserFlow.expiresAt) {
+      loginFlows.set(browserFlow.ticketId, {
+        ...browserFlow,
+        browserStatus: "expired",
+        error: "Login flow expired",
+        completedAt: Date.now(),
+      });
+      res.redirect(
+        `/auth/huawei/browser/complete?ticket_id=${encodeURIComponent(browserFlow.ticketId)}`,
+      );
+      return;
+    }
+
+    console.log(
+      `[huawei-auth] callback received ticketId=${maskValue(browserFlow.ticketId)} identifier=${maskValue(identifier)} redirect=${redirect ?? "missing"}`,
+    );
+
+    startBrowserFlowExchange(browserFlow, identifier, redirect);
+    if (redirect) {
+      res.redirect(307, redirect);
+      return;
+    }
+
+    res.redirect(
+      `/auth/huawei/browser/complete?ticket_id=${encodeURIComponent(browserFlow.ticketId)}`,
+    );
+    return;
+  }
+
+  if (!preferredTicketId) {
+    console.warn(
+      `[huawei-auth] callback received without correlated ticket identifier=${maskValue(identifier)} redirect=${redirect ?? "missing"}`,
+    );
+  } else if (!browserFlow) {
+    console.warn(
+      `[huawei-auth] callback ticket not found or not browser ticketId=${maskValue(preferredTicketId)} identifier=${maskValue(identifier)}`,
+    );
+  }
+
+  const apiFlow = getPendingApiLoginFlow(preferredTicketId);
+  if (!apiFlow) {
     res.status(400).json(createOpenAIError("Unknown or expired login flow"));
     return;
   }
 
-  if (Date.now() > flow.expiresAt) {
-    loginFlows.delete(flow.ticketId);
-    res.status(400).json(createOpenAIError("Login flow expired"));
-    return;
-  }
-
   console.log(
-    `[huawei-auth] callback received ticketId=${maskValue(flow.ticketId)} identifier=${maskValue(identifier)} redirect=${redirect ?? "missing"}`,
+    `[huawei-auth] callback received api ticketId=${maskValue(apiFlow.ticketId)} identifier=${maskValue(identifier)} redirect=${redirect ?? "missing"}`,
   );
 
-  loginFlows.set(flow.ticketId, {
-    ...flow,
+  loginFlows.set(apiFlow.ticketId, {
+    ...apiFlow,
     identifier,
     redirect,
   });
@@ -311,26 +521,29 @@ export async function handleHuaweiCallback(
     return;
   }
 
-  // Wait for authentication to complete
-  try {
-    const { accountId, apiKey } = await waitForFlowAuthentication(flow);
-
-    // Set auth_key cookie with the new account's dedicated API key
-    const isProduction = process.env.NODE_ENV === "production";
-    res.cookie("auth_key", apiKey, {
-      httpOnly: true,
-      secure: isProduction,
-      sameSite: "lax",
-      maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
-    });
-
-    console.log(
-      `[huawei-auth] login complete, redirecting to /success userId=${flow.userId} accountId=${accountId}`,
-    );
-
-    res.redirect("/success");
-  } catch (error) {
-    console.error("[huawei-auth] callback authentication failed:", error);
-    res.status(500).json(createOpenAIError("Authentication failed"));
-  }
+  res.json({ success: true, ticket_id: apiFlow.ticketId });
 }
+
+export const __testHooks = {
+  resetLoginFlows(): void {
+    loginFlows.clear();
+    browserExchangeTasks.clear();
+  },
+  getLoginFlow(ticketId: string): LoginFlowRecord | undefined {
+    return loginFlows.get(ticketId);
+  },
+  setLoginFlow(flow: LoginFlowRecord): void {
+    loginFlows.set(flow.ticketId, flow);
+  },
+  setExchangeHuaweiTicketForTest(
+    implementation: typeof waitForHuaweiTicketExchange,
+  ): void {
+    exchangeHuaweiTicket = implementation;
+  },
+  resetExchangeHuaweiTicketForTest(): void {
+    exchangeHuaweiTicket = waitForHuaweiTicketExchange;
+  },
+  async waitForBrowserExchangeTask(ticketId: string): Promise<void> {
+    await browserExchangeTasks.get(ticketId);
+  },
+};

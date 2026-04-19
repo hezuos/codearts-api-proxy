@@ -8,7 +8,7 @@
     "build": "node ./node_modules/typescript/bin/tsc",
     "start": "node dist/index.js",
     "dev": "node -r ts-node/register src/index.ts",
-    "test": "node -r ts-node/register src/upstream/huawei/chat.test.ts",
+    "test": "node -r ts-node/register src/upstream/huawei/chat.test.ts && node -r ts-node/register src/routes/huawei-auth.test.ts",
     "lint": "node ./node_modules/eslint/bin/eslint.js src/**/*.ts",
     "format": "node ./node_modules/prettier/bin/prettier.cjs --write src/**/*.ts",
     "prepublishOnly": "npm run build"

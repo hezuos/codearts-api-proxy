@@ -15,6 +15,7 @@ import { randomUUID, createHash } from "crypto";
 import https from "https";
 import type { Response } from "express";
 import { config } from "../../config";
+import { getProviderAccount } from "../../auth/store";
 import { decryptString } from "../../auth/crypto/encryption";
 import { signRequest, type SigningCredentials } from "../../auth/huawei/sign";
 import type { StoredHuaweiSession } from "../../auth/huawei/session-store";
@@ -299,7 +300,11 @@ function buildRequestBody(
     lastResponseMessageId.get(chatId) ??
     "";
 
-  const userId = session.businessToken || session.providerAccountId;
+  const providerAccount = getProviderAccount(session.providerAccountId);
+  const userId =
+    providerAccount?.providerUserName?.trim() ||
+    providerAccount?.providerUserId?.trim() ||
+    session.providerAccountId;
 
   const body: Record<string, unknown> = {
     chat_id: chatId,

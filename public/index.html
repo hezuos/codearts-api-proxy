@@ -26,7 +26,10 @@
           Click the link below to login with your Huawei Cloud account and get
           your API key.
         </p>
-        <p><a href="/auth/huawei/authorize">Login with Huawei Cloud</a></p>
+        <p><button onclick="launchHuaweiLogin()">Login with Huawei Cloud</button></p>
+        <div id="login-status" class="hidden login-panel">
+          <p id="login-status-text">Preparing Huawei login...</p>
+        </div>
       </div>
 
       <div class="account-card">
@@ -49,5 +52,36 @@ openai chat.completions.create \
   --model "codearts-model" \
   --messages '[{"role": "user", "content": "Hello!"}]'</code></pre>
     </div>
+    <script src="/app.js"></script>
+    <script>
+      async function launchHuaweiLogin() {
+        const statusPanel = document.getElementById("login-status");
+        const statusText = document.getElementById("login-status-text");
+        statusPanel.classList.remove("hidden");
+        statusText.textContent = "Opening Huawei login popup...";
+
+        try {
+          await startHuaweiBrowserLogin({
+            launchMode: "popup",
+            onStatusChange(status) {
+              statusText.textContent = `Login status: ${status.status || "pending"}`;
+            },
+            onComplete(status) {
+              if (status.status === "completed") {
+                statusText.textContent = "Login complete. Redirecting...";
+                window.location.href = "/success";
+                return;
+              }
+              statusText.textContent = `Login ${status.status}: ${status.error || "Please try again."}`;
+            },
+            onError(error) {
+              statusText.textContent = `Login failed: ${error.message}`;
+            },
+          });
+        } catch (error) {
+          statusText.textContent = `Login failed: ${error.message}`;
+        }
+      }
+    </script>
   </body>
 </html>

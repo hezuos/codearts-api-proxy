@@ -18,6 +18,10 @@ import {
   authorizeHuaweiLogin,
   initiateHuaweiLogin,
   handleHuaweiCallback,
+  startBrowserHuaweiLogin,
+  getBrowserHuaweiLoginStatus,
+  browserHuaweiLoginCompletePage,
+  finalizeBrowserHuaweiLogin,
 } from "./routes/huawei-auth";
 import {
   listBoundProviderAccounts,
@@ -73,6 +77,10 @@ app.get("/", (_req, res) => {
 
 // OAuth routes
 app.get("/auth/huawei/authorize", authorizeHuaweiLogin);
+app.post("/auth/huawei/browser/start", startBrowserHuaweiLogin);
+app.get("/auth/huawei/browser/status/:ticketId", getBrowserHuaweiLoginStatus);
+app.get("/auth/huawei/browser/complete", browserHuaweiLoginCompletePage);
+app.post("/auth/huawei/browser/finalize/:ticketId", finalizeBrowserHuaweiLogin);
 app.post("/auth/huawei/login", authenticateApiKey, initiateHuaweiLogin);
 app.get("/callback", handleHuaweiCallback);
 app.get("/auth/callback", handleHuaweiCallback);

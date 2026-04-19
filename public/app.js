@@ -222,3 +222,71 @@ function setLoading(element, isLoading, originalText = null) {
       originalText || element.dataset.originalText || element.textContent;
   }
 }
+
+async function startHuaweiBrowserLogin(options = {}) {
+  const {
+    launchMode = "iframe",
+    container = null,
+    onStatusChange = null,
+    onComplete = null,
+    onError = null,
+  } = options;
+
+  const result = await fetchJson("/auth/huawei/browser/start", {
+    method: "POST",
+  });
+
+  if (typeof onStatusChange === "function") {
+    onStatusChange(result);
+  }
+
+  let popup = null;
+  if (launchMode === "popup") {
+    popup = window.open(result.login_url, "huawei-login", "width=900,height=720");
+    if (!popup) {
+      throw new Error("Popup was blocked. Please allow popups and try again.");
+    }
+  } else if (container) {
+    popup = window.open(result.login_url, "huawei-login", "width=900,height=720");
+    if (!popup) {
+      throw new Error("Popup was blocked. Please allow popups and try again.");
+    }
+  } else {
+    window.location.href = result.login_url;
+    return result;
+  }
+
+  const timer = window.setInterval(async () => {
+    try {
+      const status = await fetchJson(`/auth/huawei/browser/status/${result.ticket_id}`);
+      if (typeof onStatusChange === "function") {
+        onStatusChange(status);
+      }
+
+      if (["completed", "failed", "expired"].includes(status.status)) {
+        window.clearInterval(timer);
+        if (popup && !popup.closed) {
+          popup.close();
+        }
+        if (status.status === "completed") {
+          await fetchJson(`/auth/huawei/browser/finalize/${result.ticket_id}`, {
+            method: "POST",
+          });
+        }
+        if (typeof onComplete === "function") {
+          onComplete(status);
+        }
+      }
+    } catch (error) {
+      window.clearInterval(timer);
+      if (popup && !popup.closed) {
+        popup.close();
+      }
+      if (typeof onError === "function") {
+        onError(error);
+      }
+    }
+  }, 1000);
+
+  return result;
+}

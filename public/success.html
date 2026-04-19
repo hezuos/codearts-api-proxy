@@ -13,7 +13,11 @@
       <div class="nav">
         <a href="/">Home</a>
         <a href="/status">View Status</a>
-        <a href="/auth/huawei/authorize">Bind Another Account</a>
+        <a href="#" onclick="startBindAnotherAccount(); return false;">Bind Another Account</a>
+      </div>
+
+      <div id="bind-panel" class="hidden login-panel">
+        <p id="bind-status">Preparing Huawei login...</p>
       </div>
 
       <div id="loading" class="loading">
@@ -130,6 +134,35 @@ response = client.chat.completions.create(
 
       function copyKey() {
         copyToClipboard(fullApiKey, document.getElementById("copy-btn"));
+      }
+
+      async function startBindAnotherAccount() {
+        const panel = document.getElementById("bind-panel");
+        const status = document.getElementById("bind-status");
+        panel.classList.remove("hidden");
+        status.textContent = "Opening Huawei login popup...";
+
+        try {
+          await startHuaweiBrowserLogin({
+            launchMode: "popup",
+            onStatusChange(update) {
+              status.textContent = `Login status: ${update.status || "pending"}`;
+            },
+            onComplete(update) {
+              if (update.status === "completed") {
+                status.textContent = "Account bound. Refreshing page...";
+                window.location.href = "/success";
+                return;
+              }
+              status.textContent = `Login ${update.status}: ${update.error || "Please try again."}`;
+            },
+            onError(error) {
+              status.textContent = `Login failed: ${error.message}`;
+            },
+          });
+        } catch (error) {
+          status.textContent = `Login failed: ${error.message}`;
+        }
       }
 
       loadAccountInfo();

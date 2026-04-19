@@ -216,6 +216,26 @@ pre {
   display: none;
 }
 
+.login-frame {
+  width: 100%;
+  min-height: 520px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: white;
+}
+
+.login-panel {
+  margin-top: 15px;
+  padding: 15px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: #fafafa;
+}
+
+.login-panel-actions {
+  margin-top: 10px;
+}
+
 .inline-form {
   display: inline;
 }
