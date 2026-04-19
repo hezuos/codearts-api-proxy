@@ -28,7 +28,13 @@ import type {
   OpenAIToolCall,
   OpenAIToolCallDelta,
 } from "../../types/openai";
-import { DEFAULT_TOOLS, SUB_AGENT_TOOLS, type ToolDefinition } from "./tools";
+import {
+  DEFAULT_TOOLS,
+  SUB_AGENT_TOOLS,
+  convertOpenAIToolsToCodeArts,
+  deriveSubAgentTools,
+  type ToolDefinition,
+} from "./tools";
 
 export class UpstreamAuthError extends Error {
   constructor(
@@ -282,7 +288,18 @@ function buildRequestBody(
   const toolResults = extractToolResults(request);
   const isToolContinuation = toolResults.length > 0;
   const subAgent = request.codearts?.sub_agent;
-  const tools = subAgent ? SUB_AGENT_TOOLS : DEFAULT_TOOLS;
+
+  // Resolve tools: use caller-provided tools when available, fall back to hardcoded
+  const callerTools = request.tools?.length
+    ? convertOpenAIToolsToCodeArts(request.tools)
+    : undefined;
+  let tools: ToolDefinition[];
+  if (callerTools) {
+    tools = subAgent ? deriveSubAgentTools(callerTools) : callerTools;
+  } else {
+    tools = subAgent ? SUB_AGENT_TOOLS : DEFAULT_TOOLS;
+  }
+
   const modelId = resolveModelId(request);
 
   // Caller is responsible for maintaining chat_id and parent_message_id.
@@ -483,22 +500,34 @@ async function* parseSSE(
 // ---------------------------------------------------------------------------
 
 /**
+ * Case-repair map for Task.subagent_type.
+ * Maps known case variants to the exact casing registered by OpenCode.
+ * Values not in the map pass through unchanged.
+ */
+const SUBAGENT_CASE_REPAIR: Record<string, string> = {
+  "explore": "Explore",
+  "specagent": "spec-agent",
+  "spec_agent": "spec-agent",
+  "general": "Explore",
+  "general-purpose": "Explore",
+};
+
+/**
  * Normalize tool call arguments before returning to OpenCode.
- * Currently: lowercase Task.subagent_type so OpenCode can find the agent.
- * The LLM sometimes generates "Explore", "General", etc. with uppercase,
- * but OpenCode registers agents in lowercase only.
+ * Repairs known case variants of Task.subagent_type to the exact
+ * casing registered by OpenCode. Unknown values pass through unchanged.
  */
 function normalizeToolCallArguments(name: string, argsStr: string): string {
   if (name !== "Task") return argsStr;
   try {
     const args = JSON.parse(argsStr) as Record<string, unknown>;
     if (typeof args.subagent_type === "string") {
-      const normalized = args.subagent_type.toLowerCase();
-      if (normalized !== args.subagent_type) {
+      const repaired = SUBAGENT_CASE_REPAIR[args.subagent_type];
+      if (repaired && repaired !== args.subagent_type) {
         console.log(
-          `  normalizeToolCall: Task.subagent_type "${args.subagent_type}" → "${normalized}"`,
+          `  normalizeToolCall: Task.subagent_type "${args.subagent_type}" → "${repaired}"`,
         );
-        args.subagent_type = normalized;
+        args.subagent_type = repaired;
         return JSON.stringify(args);
       }
     }

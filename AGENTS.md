@@ -1,5 +1,10 @@
 # AGENTS.md
 
+## 使用中文
+- 文档使用中文
+- LLM 输出和think使用中文
+- 注释使用中文
+
 ## Project overview
 
 OpenAI-compatible proxy that wraps the Huawei CodeArts Agent LLM API.
