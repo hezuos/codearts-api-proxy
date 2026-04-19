@@ -120,6 +120,14 @@ function resolveModelId(request: OpenAIChatCompletionRequest): string {
  */
 const lastResponseMessageId = new Map<string, string>();
 
+/**
+ * Tracks which chat_ids have been used by sub-agent vs main-agent requests.
+ * Key: chat_id, Value: "main" | "sub"
+ * Used to detect chat_id collisions between main and sub-agent conversations,
+ * which would cause lastResponseMessageId corruption.
+ */
+const chatIdRole = new Map<string, "main" | "sub">();
+
 // ---------------------------------------------------------------------------
 // Conversation ID derivation
 // ---------------------------------------------------------------------------
@@ -308,6 +316,29 @@ function buildRequestBody(
   // the same chat_id (instead of generating a new random UUID each turn).
   const chatId =
     request.codearts?.chat_id?.trim() || deriveConversationId(request.messages);
+
+  // ── Sub-agent / main-agent chat_id collision detection ──────────────────
+  const currentRole = subAgent ? "sub" : "main";
+  const previousRole = chatIdRole.get(chatId);
+  chatIdRole.set(chatId, currentRole);
+
+  if (previousRole && previousRole !== currentRole) {
+    console.warn(
+      `⚠ CHAT_ID COLLISION: chat_id=${chatId} was previously used by ${previousRole}-agent ` +
+      `but now used by ${currentRole}-agent! ` +
+      `lastResponseMessageId for this chat_id may be corrupted. ` +
+      `This likely causes "Tool messages must be a response to a preceding tool calls" errors.`,
+    );
+  } else if (subAgent) {
+    console.log(
+      `ℹ Sub-agent request using chat_id=${chatId} (previousRole=${previousRole ?? "none"})`,
+    );
+  } else if (isToolContinuation) {
+    console.log(
+      `ℹ Main-agent tool continuation using chat_id=${chatId} (previousRole=${previousRole ?? "none"}, ` +
+      `lastResponseMessageId=${lastResponseMessageId.get(chatId) ?? "(none)"})`,
+    );
+  }
 
   // parent_message_id: prefer what caller provides; otherwise look up the
   // last response_message_id we received for this chat_id. Falls back to ""
@@ -636,6 +667,28 @@ export async function streamHuaweiChatToResponse(
     );
   }
 
+  // ── Tool continuation parent_message_id validation ────────────────────────
+  if (toolResultCount > 0 && parsedBody.parent_message_id) {
+    const cid = parsedBody.chat_id as string;
+    const role = chatIdRole.get(cid);
+    if (role === "sub") {
+      console.warn(
+        `[${traceId}] ⚠ WARN: Tool continuation for chat_id=${cid} but last known role was "sub"! ` +
+        `If this is a main-agent continuation after sub-agent, the parent_message_id ` +
+        `may point to a sub-agent turn, causing "Tool messages must be a response to a preceding tool calls" errors.`,
+      );
+    }
+    // Log tool_call_ids being sent in tool_result for correlation
+    const toolResults = tp?.tool_result as Array<Record<string, unknown>> | undefined;
+    if (toolResults) {
+      const toolCallIds = toolResults.map((tr) => tr.toolCallId ?? "(none)").join(", ");
+      console.log(
+        `[${traceId}] ℹ Tool continuation: chat_id=${cid}, parent_message_id=${parsedBody.parent_message_id as string}, ` +
+        `toolCallIds=[${toolCallIds}], role=${role ?? "unknown"}`,
+      );
+    }
+  }
+
   const { status, stream } = await httpsPost(chatUrl, headers, body);
 
   // ── HTTP status log ───────────────────────────────────────────────────────
@@ -791,10 +844,20 @@ export async function streamHuaweiChatToResponse(
   if (!sseHadError && responseMetadata.response_message_id) {
     const cid = responseMetadata.chat_id;
     if (cid) {
+      const prevValue = lastResponseMessageId.get(cid);
+      const role = chatIdRole.get(cid);
       lastResponseMessageId.set(cid, responseMetadata.response_message_id);
-      console.log(
-        `[${traceId}] ℹ lastResponseMessageId updated: ${cid} → ${responseMetadata.response_message_id}`,
-      );
+      if (prevValue && prevValue !== responseMetadata.response_message_id) {
+        console.log(
+          `[${traceId}] ℹ lastResponseMessageId updated: ${cid} → ${responseMetadata.response_message_id} ` +
+          `(overwrote ${prevValue}, role=${role ?? "unknown"})`,
+        );
+      } else {
+        console.log(
+          `[${traceId}] ℹ lastResponseMessageId updated: ${cid} → ${responseMetadata.response_message_id} ` +
+          `(role=${role ?? "unknown"})`,
+        );
+      }
     }
   } else if (sseHadError) {
     console.warn(
@@ -954,8 +1017,22 @@ export async function sendHuaweiChatRequest(
   // Update parent_message_id tracker only on successful turns
   if (!sseHadErrorNS && responseMetadata.response_message_id) {
     const cid = responseMetadata.chat_id;
-    if (cid)
+    if (cid) {
+      const prevValue = lastResponseMessageId.get(cid);
+      const role = chatIdRole.get(cid);
       lastResponseMessageId.set(cid, responseMetadata.response_message_id);
+      if (prevValue && prevValue !== responseMetadata.response_message_id) {
+        console.log(
+          `[${traceId}] ℹ lastResponseMessageId updated: ${cid} → ${responseMetadata.response_message_id} ` +
+          `(overwrote ${prevValue}, role=${role ?? "unknown"})`,
+        );
+      } else {
+        console.log(
+          `[${traceId}] ℹ lastResponseMessageId updated: ${cid} → ${responseMetadata.response_message_id} ` +
+          `(role=${role ?? "unknown"})`,
+        );
+      }
+    }
   }
   console.log(
     `[${traceId}] ── RESPONSE COMPLETE (non-stream) ────────────────`,
