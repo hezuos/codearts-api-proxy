@@ -30,6 +30,19 @@
         <div id="login-status" class="hidden login-panel">
           <p id="login-status-text">Preparing Huawei login...</p>
         </div>
+        <div id="paste-callback-section" class="hidden" style="margin-top: 1em; padding-top: 1em; border-top: 1px solid #ddd;">
+          <h4>Paste Callback URL</h4>
+          <p style="font-size: 0.9em;">
+            If the login popup cannot reach this proxy, complete the login in the
+            browser first, then paste the callback URL from the browser address
+            bar here.
+          </p>
+          <p>
+            <input type="text" id="callback-url-input" placeholder="http://127.0.0.1:1455/callback?identifier=...&redirect=..." style="width: 100%; font-family: monospace; font-size: 0.85em;" />
+          </p>
+          <p><button onclick="submitCallbackUrl()">Submit Callback URL</button></p>
+          <div id="callback-error" class="hidden" style="color: #c00;"></div>
+        </div>
       </div>
 
       <div class="account-card">
@@ -54,6 +67,15 @@ openai chat.completions.create \
     </div>
     <script src="/app.js"></script>
     <script>
+      // Show "Paste Callback URL" section only when proxy is not on localhost
+      (function() {
+        const hostname = window.location.hostname;
+        if (hostname !== "localhost" && hostname !== "127.0.0.1") {
+          const section = document.getElementById("paste-callback-section");
+          if (section) section.classList.remove("hidden");
+        }
+      })();
+
       async function launchHuaweiLogin() {
         const statusPanel = document.getElementById("login-status");
         const statusText = document.getElementById("login-status-text");
@@ -80,6 +102,26 @@ openai chat.completions.create \
           });
         } catch (error) {
           statusText.textContent = `Login failed: ${error.message}`;
+        }
+      }
+
+      function submitCallbackUrl() {
+        const input = document.getElementById("callback-url-input");
+        const errorDiv = document.getElementById("callback-error");
+        errorDiv.classList.add("hidden");
+        errorDiv.textContent = "";
+
+        const url = input.value.trim();
+        if (!url) {
+          errorDiv.textContent = "Please paste the callback URL from the browser address bar.";
+          errorDiv.classList.remove("hidden");
+          return;
+        }
+
+        const result = pasteAndRedirectCallbackUrl(url);
+        if (!result.success) {
+          errorDiv.textContent = result.error;
+          errorDiv.classList.remove("hidden");
         }
       }
     </script>

@@ -290,3 +290,39 @@ async function startHuaweiBrowserLogin(options = {}) {
 
   return result;
 }
+
+/**
+ * Paste a Huawei OAuth callback URL and open it with the host rewritten
+ * to the current proxy origin. This allows completing authentication when the
+ * automatic callback to 127.0.0.1 cannot reach the proxy (e.g. remote proxy).
+ *
+ * Uses window.open with the same target as the login popup ("huawei-login")
+ * so the callback is processed in the login window, not the main page.
+ *
+ * @param {string} callbackUrl - The full callback URL from the browser address bar
+ * @returns {{ success: boolean, error?: string }} Result object
+ */
+function pasteAndRedirectCallbackUrl(callbackUrl) {
+  let url;
+  try {
+    url = new URL(callbackUrl);
+  } catch {
+    return { success: false, error: "Invalid URL format. Please paste the full callback URL from the browser address bar." };
+  }
+
+  if (!url.pathname.startsWith("/callback")) {
+    return { success: false, error: "URL does not appear to be a callback URL. Expected path starting with /callback." };
+  }
+
+  if (!url.searchParams.has("identifier")) {
+    return { success: false, error: "Callback URL is missing the 'identifier' parameter. Please copy the full URL from the browser address bar." };
+  }
+
+  // Rewrite the origin (schema + host + port) to the current proxy
+  url.host = window.location.host;
+  url.protocol = window.location.protocol;
+
+  // Open in the login popup window — the existing /callback endpoint will handle the rest
+  window.open(url.toString(), "huawei-login");
+  return { success: true };
+}
