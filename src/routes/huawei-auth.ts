@@ -408,12 +408,6 @@ export function getBrowserHuaweiLoginStatus(req: Request, res: Response): void {
   res.json(getBrowserLoginStatus(flow));
 }
 
-export function browserHuaweiLoginCompletePage(
-  _req: Request,
-  res: Response,
-): void {
-  res.sendFile("huawei-login-complete.html", { root: "public" });
-}
 
 export function finalizeBrowserHuaweiLogin(req: Request, res: Response): void {
   const flow = getBrowserLoginFlow(req.params.ticketId);

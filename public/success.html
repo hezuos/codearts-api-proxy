@@ -3,16 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Login Success - CodeArts Agent Proxy</title>
+    <title>Account Dashboard - CodeArts Agent Proxy</title>
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
     <div class="container">
-      <h1>Login Successful!</h1>
+      <h1>Account Dashboard</h1>
 
       <div class="nav">
         <a href="/">Home</a>
-        <a href="/status">View Status</a>
         <a href="#" onclick="startBindAnotherAccount(); return false;">Bind Another Account</a>
       </div>
 
@@ -30,20 +29,17 @@
           <span id="api-key-display"></span>
           <button id="show-btn" onclick="toggleKey()">Show</button>
           <button id="copy-btn" onclick="copyKey()">Copy</button>
+          <button onclick="regenerateKey()">Regenerate</button>
         </div>
 
-        <h2>Account Information</h2>
-        <div class="account-card">
-          <dl class="account-info">
-            <dt>User Name:</dt>
-            <dd id="user-name">-</dd>
+        <h2>Bound Accounts</h2>
+        <div id="accounts-list"></div>
 
-            <dt>Domain ID:</dt>
-            <dd id="domain-id">-</dd>
-
-            <dt>Account ID:</dt>
-            <dd id="account-id">-</dd>
-          </dl>
+        <div id="no-accounts" class="hidden">
+          <p>
+            No accounts bound yet.
+            <a href="#" onclick="startBindAnotherAccount(); return false;">Bind an account</a>.
+          </p>
         </div>
 
         <h2>Usage Examples</h2>
@@ -83,9 +79,9 @@ response = client.chat.completions.create(
       let fullApiKey = "";
       let isMasked = true;
 
-      async function loadAccountInfo() {
+      async function loadDashboard() {
         try {
-          const response = await fetchJson("/api/ui/account");
+          const response = await fetchJson("/api/ui/status");
 
           fullApiKey = response.apiKey;
           const maskedKey = maskApiKey(fullApiKey);
@@ -100,12 +96,64 @@ response = client.chat.completions.create(
           document.getElementById("base-url-python").textContent = baseUrl;
           document.getElementById("base-url-curl").textContent = baseUrl;
 
-          document.getElementById("user-name").textContent =
-            response.userName || "N/A";
-          document.getElementById("domain-id").textContent =
-            response.domainId || "N/A";
-          document.getElementById("account-id").textContent =
-            response.accountId || "N/A";
+          const accountsList = document.getElementById("accounts-list");
+          const noAccounts = document.getElementById("no-accounts");
+
+          if (response.accounts && response.accounts.length > 0) {
+            accountsList.innerHTML = "";
+            noAccounts.classList.add("hidden");
+
+            response.accounts.forEach((account) => {
+              const status = calculateAccountStatus(account.session?.expiresAt);
+              const isLastAccount = response.accounts.length === 1;
+              const card = document.createElement("div");
+              card.className = "account-card";
+              card.innerHTML = `
+              <h3>${account.displayName || "Account"} ${account.isDefault ? '<span class="status-valid">(Default)</span>' : ""}</h3>
+              <dl class="account-info">
+                <dt>Status:</dt>
+                <dd class="${status.class}">${status.label}</dd>
+
+                <dt>Provider:</dt>
+                <dd>${account.provider}</dd>
+
+                <dt>User Name:</dt>
+                <dd>${account.providerUserName || "N/A"}</dd>
+
+                <dt>Domain ID:</dt>
+                <dd>${account.domainId || "N/A"}</dd>
+
+                <dt>Account ID:</dt>
+                <dd>${account.providerUserId || "N/A"}</dd>
+
+                ${
+                  account.session
+                    ? `
+                  <dt>Token Expires:</dt>
+                  <dd>${formatTimestamp(account.session.expiresAt)} (${formatRelativeTime(account.session.expiresAt)})</dd>
+                  ${
+                    account.session.lastRefreshedAt
+                      ? `
+                  <dt>Last Refreshed:</dt>
+                  <dd>${formatTimestamp(account.session.lastRefreshedAt)}</dd>
+                  `
+                      : ""
+                  }
+                `
+                    : ""
+                }
+              </dl>
+              <div>
+                <button onclick="refreshAccount('${account.id}')">Refresh</button>
+                <button class="danger" onclick="unbindAccount('${account.id}')" ${isLastAccount ? 'disabled title="Cannot unbind the last account"' : ""}>Unbind</button>
+                ${!account.isDefault ? `<button onclick="setDefault('${account.id}')">Set as Default</button>` : ""}
+              </div>
+            `;
+              accountsList.appendChild(card);
+            });
+          } else {
+            noAccounts.classList.remove("hidden");
+          }
 
           document.getElementById("loading").classList.add("hidden");
           document.getElementById("content").classList.remove("hidden");
@@ -136,6 +184,70 @@ response = client.chat.completions.create(
         copyToClipboard(fullApiKey, document.getElementById("copy-btn"));
       }
 
+      async function regenerateKey() {
+        if (
+          !confirmAction(
+            "Are you sure you want to regenerate your API key? Your current key will stop working immediately.",
+          )
+        ) {
+          return;
+        }
+
+        try {
+          const response = await fetchJson("/api/ui/regenerate-key", {
+            method: "POST",
+          });
+          fullApiKey = response.apiKey;
+          document.getElementById("api-key-display").textContent =
+            maskApiKey(fullApiKey);
+          isMasked = true;
+          document.getElementById("show-btn").textContent = "Show";
+          showSuccess("API key regenerated. Your old key is now invalid.");
+        } catch (error) {
+          showError("Failed to regenerate API key: " + error.message);
+        }
+      }
+
+      async function refreshAccount(accountId) {
+        try {
+          await fetchJson(`/api/ui/accounts/${accountId}/refresh`, {
+            method: "POST",
+          });
+          showSuccess("Account refresh initiated");
+          setTimeout(loadDashboard, 1000);
+        } catch (error) {
+          showError("Failed to refresh account: " + error.message);
+        }
+      }
+
+      async function unbindAccount(accountId) {
+        if (!confirmAction("Are you sure you want to unbind this account?")) {
+          return;
+        }
+
+        try {
+          await fetchJson(`/api/ui/accounts/${accountId}`, {
+            method: "DELETE",
+          });
+          showSuccess("Account unbound successfully");
+          loadDashboard();
+        } catch (error) {
+          showError("Failed to unbind account: " + error.message);
+        }
+      }
+
+      async function setDefault(accountId) {
+        try {
+          await fetchJson(`/api/ui/accounts/${accountId}/default`, {
+            method: "POST",
+          });
+          showSuccess("Default account updated");
+          loadDashboard();
+        } catch (error) {
+          showError("Failed to set default account: " + error.message);
+        }
+      }
+
       async function startBindAnotherAccount() {
         const panel = document.getElementById("bind-panel");
         const status = document.getElementById("bind-status");
@@ -151,7 +263,7 @@ response = client.chat.completions.create(
             onComplete(update) {
               if (update.status === "completed") {
                 status.textContent = "Account bound. Refreshing page...";
-                window.location.href = "/success";
+                loadDashboard();
                 return;
               }
               status.textContent = `Login ${update.status}: ${update.error || "Please try again."}`;
@@ -165,7 +277,7 @@ response = client.chat.completions.create(
         }
       }
 
-      loadAccountInfo();
+      loadDashboard();
     </script>
   </body>
 </html>

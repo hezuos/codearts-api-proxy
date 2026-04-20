@@ -32,7 +32,6 @@ import {
 import { createChatCompletion, listModels } from "./routes/openai";
 import {
   successPage,
-  statusPage,
   getAccountInfo,
   getAccountStatus,
   regenerateApiKey,
@@ -79,7 +78,7 @@ app.get("/", (_req, res) => {
 app.get("/auth/huawei/authorize", authorizeHuaweiLogin);
 app.post("/auth/huawei/browser/start", startBrowserHuaweiLogin);
 app.get("/auth/huawei/browser/status/:ticketId", getBrowserHuaweiLoginStatus);
-app.get("/auth/huawei/browser/complete", browserHuaweiLoginCompletePage);
+// app.get("/auth/huawei/browser/complete", browserHuaweiLoginCompletePage);
 app.post("/auth/huawei/browser/finalize/:ticketId", finalizeBrowserHuaweiLogin);
 app.post("/auth/huawei/login", authenticateApiKey, initiateHuaweiLogin);
 app.get("/callback", handleHuaweiCallback);
@@ -107,7 +106,6 @@ app.post(
 
 // Web UI routes
 app.get("/success", requireUiAuth, successPage);
-app.get("/status", requireUiAuth, statusPage);
 app.get("/api/ui/account", requireUiAuth, getAccountInfo);
 app.get("/api/ui/status", requireUiAuth, getAccountStatus);
 app.post("/api/ui/regenerate-key", requireUiAuth, regenerateApiKey);

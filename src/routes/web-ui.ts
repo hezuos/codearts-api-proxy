@@ -24,13 +24,6 @@ export function successPage(_req: Request, res: Response): void {
 }
 
 /**
- * GET /status - Account status page
- */
-export function statusPage(_req: Request, res: Response): void {
-  res.sendFile("status.html", { root: "public" });
-}
-
-/**
  * GET /api/ui/account - Get current user's account information
  */
 export function getAccountInfo(req: Request, res: Response): void {
