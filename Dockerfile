@@ -6,7 +6,7 @@ RUN corepack enable && corepack prepare pnpm@latest --activate
 
 WORKDIR /app
 
-# Install dependencies first (better layer caching)
+# Install all dependencies (for build)
 COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile
 
@@ -16,10 +16,17 @@ COPY src/ src/
 COPY public/ public/
 RUN pnpm build
 
-# Prune to production dependencies only
-RUN pnpm deploy --frozen-lockfile --prod /app/prod
+# ── Stage 2: Production deps ───────────────────────────────────
+FROM node:20-alpine AS prod-deps
 
-# ── Stage 2: Runtime ───────────────────────────────────────────
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+WORKDIR /app
+
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile --prod
+
+# ── Stage 3: Runtime ───────────────────────────────────────────
 FROM node:20-alpine AS runtime
 
 WORKDIR /app
@@ -27,7 +34,7 @@ WORKDIR /app
 # Copy production artifacts
 COPY --from=builder /app/dist/ dist/
 COPY --from=builder /app/public/ public/
-COPY --from=builder /app/prod/node_modules/ node_modules/
+COPY --from=prod-deps /app/node_modules/ node_modules/
 COPY --from=builder /app/package.json package.json
 
 # Create data directory for runtime state (should be mounted as volume)
