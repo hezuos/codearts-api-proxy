@@ -1,0 +1,15 @@
+node_modules
+dist
+data
+.git
+.github
+.opencode
+openspec
+docs
+scripts
+tests
+examples
+*.log
+*.swp
+.env
+.env.*
