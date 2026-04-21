@@ -8,6 +8,7 @@
 ```
 scripts/
 ├── README.md                  ← 本文件
+├── debug-decrypt.mjs          解密项目加密存储文件的调试工具（推荐）
 ├── cdp-capture.mjs            一键抓包工具（推荐，自动检测端口和 session）
 ├── cdp-intercept.mjs          CDP 请求拦截器（核心抓包工具）
 ├── cdp-probe.mjs              CDP 扩展宿主探测
@@ -27,6 +28,43 @@ scripts/
 ├── encrypted-session.bin      加密的会话数据（二进制）
 └── session-decrypted.json     解密后的会话 JSON
 ```
+
+---
+
+## Debug 工具
+
+### debug-decrypt.mjs
+
+**解密项目加密存储文件的调试工具。** 可以方便地查看和导出 `data/` 目录下的加密文件。
+
+**用法：**
+```powershell
+# 列出所有加密文件及其状态
+node scripts/debug-decrypt.mjs list
+
+# 查看文件内容（敏感信息掩码）
+node scripts/debug-decrypt.mjs show auth-store
+node scripts/debug-decrypt.mjs show huawei-sessions
+
+# 查看完整内容（包含敏感信息）
+node scripts/debug-decrypt.mjs reveal huawei-sessions
+
+# 导出为明文 JSON
+node scripts/debug-decrypt.mjs export huawei-sessions ./debug-sessions.json
+
+# 使用自定义加密密钥
+node scripts/debug-decrypt.mjs --key "my-secret-key" show auth-store
+```
+
+**支持的文件别名：**
+- `auth-store` → `data/auth-store.json`
+- `huawei-sessions` → `data/huawei-sessions.json`
+- `admin-config` → `data/admin-config.json`
+- `conversation-store` → `data/conversation-store.json`
+
+**选项：**
+- `--key <key>` - 使用自定义加密密钥（默认使用 `ENCRYPTION_KEY` 环境变量）
+- `--no-mask` - 不掩码敏感字段
 
 ---
 
