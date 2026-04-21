@@ -223,6 +223,53 @@ function setLoading(element, isLoading, originalText = null) {
   }
 }
 
+/**
+ * Manages a single named popup window, ensuring all opens reuse the same
+ * window instance. Prevents duplicate windows when multiple calls target
+ * the same logical window (e.g. login popup + callback redirect).
+ */
+const LoginWindowManager = {
+  _window: null,
+
+  /**
+   * Open or reuse the login popup window.
+   * If the window already exists and is not closed, its location is updated
+   * to the new URL. Otherwise a new window is opened.
+   *
+   * @param {string} url - URL to open
+   * @param {string} [name="huawei-login"] - Window target name
+   * @param {string} [features="width=900,height=720"] - Window features string
+   * @returns {Window|null} The window reference, or null if blocked
+   */
+  open(url, name = "huawei-login", features = "width=900,height=720") {
+    if (this._window && !this._window.closed) {
+      this._window.location.href = url;
+      this._window.focus();
+      return this._window;
+    }
+    this._window = window.open(url, name, features);
+    return this._window;
+  },
+
+  /**
+   * Close the login popup window if it is still open.
+   */
+  close() {
+    if (this._window && !this._window.closed) {
+      this._window.close();
+    }
+    this._window = null;
+  },
+
+  /**
+   * Check whether the login popup window is currently open.
+   * @returns {boolean}
+   */
+  get isOpen() {
+    return this._window != null && !this._window.closed;
+  },
+};
+
 async function startHuaweiBrowserLogin(options = {}) {
   const {
     launchMode = "iframe",
@@ -240,14 +287,8 @@ async function startHuaweiBrowserLogin(options = {}) {
     onStatusChange(result);
   }
 
-  let popup = null;
-  if (launchMode === "popup") {
-    popup = window.open(result.login_url, "huawei-login", "width=900,height=720");
-    if (!popup) {
-      throw new Error("Popup was blocked. Please allow popups and try again.");
-    }
-  } else if (container) {
-    popup = window.open(result.login_url, "huawei-login", "width=900,height=720");
+  if (launchMode === "popup" || container) {
+    const popup = LoginWindowManager.open(result.login_url);
     if (!popup) {
       throw new Error("Popup was blocked. Please allow popups and try again.");
     }
@@ -265,9 +306,7 @@ async function startHuaweiBrowserLogin(options = {}) {
 
       if (["completed", "failed", "expired"].includes(status.status)) {
         window.clearInterval(timer);
-        if (popup && !popup.closed) {
-          popup.close();
-        }
+        LoginWindowManager.close();
         if (status.status === "completed") {
           await fetchJson(`/auth/huawei/browser/finalize/${result.ticket_id}`, {
             method: "POST",
@@ -279,9 +318,7 @@ async function startHuaweiBrowserLogin(options = {}) {
       }
     } catch (error) {
       window.clearInterval(timer);
-      if (popup && !popup.closed) {
-        popup.close();
-      }
+      LoginWindowManager.close();
       if (typeof onError === "function") {
         onError(error);
       }
@@ -323,6 +360,6 @@ function pasteAndRedirectCallbackUrl(callbackUrl) {
   url.protocol = window.location.protocol;
 
   // Open in the login popup window — the existing /callback endpoint will handle the rest
-  window.open(url.toString(), "huawei-login");
+  LoginWindowManager.open(url.toString());
   return { success: true };
 }
