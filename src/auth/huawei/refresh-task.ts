@@ -22,11 +22,20 @@ function shouldRefresh(expiresAt?: string): boolean {
 
   const expires = new Date(expiresAt).getTime();
   if (Number.isNaN(expires)) {
-    return true;
+    return false;
   }
 
+  const now = Date.now();
+  const remaining = expires - now;
+
+  // 已过期 → 不刷新（需要重新登录）
+  if (remaining <= 0) {
+    return false;
+  }
+
+  // 剩余时间 < 2小时 → 刷新
   const jitter = Math.floor(Math.random() * 59000);
-  return expires - Date.now() - REFRESH_THRESHOLD_MS - jitter <= 0;
+  return remaining - REFRESH_THRESHOLD_MS - jitter <= 0;
 }
 
 async function refreshOnce(): Promise<void> {
@@ -37,10 +46,27 @@ async function refreshOnce(): Promise<void> {
   running = true;
   try {
     let refreshed = 0;
+    let expired = 0;
     const providerAccountIds = listSessionProviderAccountIds();
     for (const providerAccountId of providerAccountIds) {
       const session = getSession(providerAccountId);
-      if (!session || !shouldRefresh(session.expiresAt)) {
+      if (!session) {
+        continue;
+      }
+
+      // 检测已过期的 session
+      if (session.expiresAt) {
+        const expires = new Date(session.expiresAt).getTime();
+        if (!Number.isNaN(expires) && expires <= Date.now()) {
+          expired += 1;
+          console.warn(
+            `[refresh-task] Session ${providerAccountId} has expired at ${session.expiresAt}. Please re-login to get new credentials.`,
+          );
+          continue;
+        }
+      }
+
+      if (!shouldRefresh(session.expiresAt)) {
         continue;
       }
 
@@ -60,7 +86,7 @@ async function refreshOnce(): Promise<void> {
       }
     }
 
-    if (refreshed > 0) {
+    if (refreshed > 0 || expired > 0) {
       logSessionCacheSummary();
     }
   } finally {

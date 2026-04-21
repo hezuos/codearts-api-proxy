@@ -14,8 +14,13 @@ import {
   listProviderAccounts,
   listApiKeysByUser,
   revokeApiKey as revokeStoreApiKey,
+  deleteProviderAccount,
 } from "../auth/store";
-import { getSession, refreshStoredSession } from "../auth/huawei/session-store";
+import {
+  getSession,
+  refreshStoredSession,
+  deleteSession,
+} from "../auth/huawei/session-store";
 
 /**
  * GET /admin/setup - Admin setup page
@@ -245,4 +250,44 @@ export async function forceRefreshAccount(
     );
     res.status(502).json({ error: "Refresh failed" });
   }
+}
+
+/**
+ * DELETE /admin/api/accounts/:id - Delete account
+ */
+export function deleteAccount(req: Request, res: Response): void {
+  const accountId = req.params.id;
+
+  // 查找账户所属用户
+  const users = listAllUsers();
+  let targetUserId: string | null = null;
+
+  for (const user of users) {
+    const accounts = listProviderAccounts(user.id);
+    if (accounts.find((a) => a.id === accountId)) {
+      targetUserId = user.id;
+      break;
+    }
+  }
+
+  if (!targetUserId) {
+    res.status(404).json({ error: "Account not found" });
+    return;
+  }
+
+  // 删除账户（同时撤销关联的 API Key）
+  const ok = deleteProviderAccount(targetUserId, accountId);
+  if (!ok) {
+    res.status(500).json({ error: "Failed to delete account" });
+    return;
+  }
+
+  // 删除 session（清除凭据）
+  deleteSession(accountId);
+
+  console.log(
+    `[admin] Account deleted: ${accountId} (user: ${targetUserId})`,
+  );
+
+  res.json({ success: true, accountId });
 }

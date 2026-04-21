@@ -50,6 +50,7 @@ import {
   getAccountDetails,
   revokeApiKey,
   forceRefreshAccount,
+  deleteAccount,
 } from "./routes/admin";
 import { createOpenAIError } from "./utils/openai-error";
 
@@ -135,6 +136,7 @@ app.post(
   requireAdminAuth,
   forceRefreshAccount,
 );
+app.delete("/admin/api/accounts/:id", requireAdminAuth, deleteAccount);
 
 app.use(
   (

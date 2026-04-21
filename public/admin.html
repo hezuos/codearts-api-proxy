@@ -221,6 +221,7 @@
             <td>
               <button onclick="viewAccount('${account.id}')">View</button>
               <button onclick="forceRefresh('${account.id}')">Refresh</button>
+              <button onclick="deleteAccount('${account.id}')">Delete</button>
             </td>
           `;
             accountsTable.appendChild(row);
@@ -284,6 +285,26 @@
           setTimeout(loadAdminData, 1000);
         } catch (error) {
           showError("Failed to force refresh: " + error.message);
+        }
+      }
+
+      async function deleteAccount(accountId) {
+        if (
+          !confirmAction(
+            "Are you sure you want to delete this account? This will also revoke all associated API keys.",
+          )
+        ) {
+          return;
+        }
+
+        try {
+          await fetchJson(`/admin/api/accounts/${accountId}`, {
+            method: "DELETE",
+          });
+          showSuccess("Account deleted");
+          loadAdminData();
+        } catch (error) {
+          showError("Failed to delete account: " + error.message);
         }
       }
 
