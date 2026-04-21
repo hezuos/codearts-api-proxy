@@ -8,6 +8,7 @@
 ```
 scripts/
 ├── README.md                  ← 本文件
+├── cdp-capture.mjs            一键抓包工具（推荐，自动检测端口和 session）
 ├── cdp-intercept.mjs          CDP 请求拦截器（核心抓包工具）
 ├── cdp-probe.mjs              CDP 扩展宿主探测
 ├── cdp-explore-scope.mjs      CDP 全局作用域探索
@@ -32,6 +33,41 @@ scripts/
 ## CDP 系列 — Chrome DevTools Protocol 调试
 
 通过 CDP WebSocket 连接到 VS Code 扩展宿主进程，在运行时注入代码。
+
+### cdp-capture.mjs
+
+**一键抓包工具（推荐）。** 自动检测 VS Code 调试端口、获取 CDP WebSocket URL、连接并安装请求拦截器。相比 `cdp-intercept.mjs`，无需手动从 VS Code 输出中复制 WebSocket URL。
+
+**用法：**
+```powershell
+# 方式 1：一键运行（自动检测端口 63732 和 session）
+node scripts/cdp-capture.mjs
+
+# 方式 2：指定端口（自动获取 session ID）
+node scripts/cdp-capture.mjs --port 63732
+
+# 方式 3：直接传 WebSocket URL（跳过自动检测）
+node scripts/cdp-capture.mjs ws://127.0.0.1:63732/xxxxxxxx
+
+# 方式 4：通过环境变量指定端口
+$env:CODEARTS_INSPECT_PORT=63732
+node scripts/cdp-capture.mjs
+```
+
+**前置条件：**
+```powershell
+# VS Code 需要以调试模式启动
+codearts-agent --inspect-extensions=63732
+
+# 或设置环境变量后正常启动
+$env:CODEARTS_INSPECT_PORT=63732
+codearts-agent
+```
+
+**输出：**
+- 控制台实时打印捕获的请求详情（URL、headers、body）
+- 每个请求保存到 `scripts/captured-requests/captured-request-N.json`
+- 最长等待 6 分钟，期间持续轮询新请求
 
 ### cdp-intercept.mjs
 
