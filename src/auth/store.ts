@@ -165,8 +165,8 @@ export function deleteProviderAccount(
   providerAccounts.delete(providerAccountId);
   for (const apiKey of apiKeys.values()) {
     if (apiKey.providerAccountId === providerAccountId) {
-      apiKey.revokedAt = new Date().toISOString();
-      apiKeys.set(apiKey.id, apiKey);
+      apiKeys.delete(apiKey.id);
+      apiKeysByValue.delete(apiKey.keyHash);
     }
   }
 

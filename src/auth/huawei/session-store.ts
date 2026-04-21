@@ -133,9 +133,15 @@ async function refreshStoredSessionInternal(
   console.log(`Refresh result for ${providerAccountId}:`, result.raw);
 
   const payload = result.raw as Record<string, unknown>;
-  const credential = (payload.credential ??
+  const resultPayload =
+    payload.result && typeof payload.result === "object"
+      ? (payload.result as Record<string, unknown>)
+      : payload;
+  const credential = (resultPayload.credential ??
+    resultPayload.credentials ??
+    payload.credential ??
     payload.credentials ??
-    payload) as Record<string, unknown>;
+    resultPayload) as Record<string, unknown>;
 
   stored.accessKey =
     typeof credential.access === "string"
