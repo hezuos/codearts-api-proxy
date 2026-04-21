@@ -18,6 +18,16 @@ export interface AppConfig {
   ideVersion: string;
   /** Extension (plugin) version — must match server requirements */
   pluginVersion: string;
+  /** GPTs (agent-center) URL override. If not set, derived from huaweiChatHost + isInnerVersion */
+  huaweiGptsUrl: string;
+  /** Agent ID to query for model list. If not set, derived from isInnerVersion:
+   *  - Internal: "CodeMate" (brandName)
+   *  - External: "Pangu_Doer_in_CodeArts" */
+  huaweiAgentId: string;
+  /** Whether the upstream is the internal version (affects URL path and response parsing) */
+  isInnerVersion: boolean;
+  /** Model list cache TTL in seconds (default: 300 = 5 minutes) */
+  modelCacheTtl: number;
 }
 
 function requireEnv(name: string, fallback?: string): string {
@@ -57,4 +67,36 @@ export const config: AppConfig = {
   enableRefreshTask: (process.env.ENABLE_REFRESH_TASK ?? "true") !== "false",
   ideVersion: process.env.IDE_VERSION ?? "26.3.11",
   pluginVersion: process.env.PLUGIN_VERSION ?? "26.3.5",
+  huaweiGptsUrl: process.env.HUAWEI_GPTS_URL ?? "", // empty = derive from chatHost
+  isInnerVersion: (process.env.HUAWEI_IS_INNER_VERSION ?? "false") === "true",
+  huaweiAgentId:
+    process.env.HUAWEI_AGENT_ID ?? "", // empty = derive from isInnerVersion
+  modelCacheTtl: Number(process.env.MODEL_CACHE_TTL ?? 300),
 };
+
+/**
+ * Derive the GPTs (agent-center) URL from config.
+ * If HUAWEI_GPTS_URL is set explicitly, use that.
+ * Otherwise, derive from HUAWEI_CHAT_HOST based on isInnerVersion:
+ *   - Internal: {chatHost}/PromptCenterService/v1/agent-center/agents
+ *   - External: {chatHost}/v1/agent-center/agents
+ */
+export function getGptsUrl(): string {
+  if (config.huaweiGptsUrl) return config.huaweiGptsUrl;
+  const base = config.huaweiChatHost.replace(/\/$/, "");
+  return config.isInnerVersion
+    ? `${base}/PromptCenterService/v1/agent-center/agents`
+    : `${base}/v1/agent-center/agents`;
+}
+
+/**
+ * Derive the agent ID from config.
+ * If HUAWEI_AGENT_ID is set explicitly, use that.
+ * Otherwise, derive from isInnerVersion:
+ *   - Internal: "CodeMate" (brandName with spaces replaced by underscores)
+ *   - External: "Pangu_Doer_in_CodeArts"
+ */
+export function getAgentId(): string {
+  if (config.huaweiAgentId) return config.huaweiAgentId;
+  return config.isInnerVersion ? "CodeMate" : "Pangu_Doer_in_CodeArts";
+}

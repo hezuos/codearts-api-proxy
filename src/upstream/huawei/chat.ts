@@ -84,9 +84,9 @@ interface CodeArtsRawToolCall {
 // Model mapping
 // ---------------------------------------------------------------------------
 
-const DEFAULT_MODEL_ID = "Glm-4.7-internal";
+export const DEFAULT_MODEL_ID = "Glm-4.7-internal";
 
-const MODEL_MAP: Record<string, string> = {
+export const MODEL_MAP: Record<string, string> = {
   "gpt-4": DEFAULT_MODEL_ID,
   "gpt-4o": DEFAULT_MODEL_ID,
   "gpt-3.5-turbo": DEFAULT_MODEL_ID,
@@ -95,8 +95,7 @@ const MODEL_MAP: Record<string, string> = {
   "glm-5": "Glm-5-internal",
   "glm-5-internal": "Glm-5-internal",
   "glm-5.1": "GLM-5.1",
-  "deepseek-r1": "deepseek-r1",
-  "deepseek-v3.2": "deepseek-v3.2",
+  "deepseek-v3.2": "deepseek-v3.2"
 };
 
 function resolveModelId(request: OpenAIChatCompletionRequest): string {

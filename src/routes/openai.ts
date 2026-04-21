@@ -14,6 +14,10 @@ import {
   streamHuaweiChatToResponse,
   UpstreamAuthError,
 } from "../upstream/huawei/chat";
+import {
+  getModelList,
+  invalidateCache,
+} from "../upstream/huawei/models";
 import { createOpenAIError } from "../utils/openai-error";
 
 function isChatCompletionRequest(
@@ -27,8 +31,58 @@ function isChatCompletionRequest(
   return typeof request.model === "string" && Array.isArray(request.messages);
 }
 
-export function listModels(_req: Request, res: Response): void {
-  res.json(buildModelsResponse());
+export async function listModels(req: Request, res: Response): Promise<void> {
+  const auth = getRequestAuth(req);
+
+  // Resolve provider account (same logic as chat completions)
+  let providerAccount = auth.providerAccountId
+    ? getProviderAccount(auth.providerAccountId)
+    : undefined;
+  if (!providerAccount) {
+    const accounts = listProviderAccounts(auth.userId);
+    providerAccount = accounts.find((a) => a.isDefault) ?? accounts[0];
+  }
+  if (!providerAccount) {
+    res
+      .status(400)
+      .json(createOpenAIError("Provider account not found", "auth_error"));
+    return;
+  }
+
+  const traceId = getTraceId(req);
+  const accountId = providerAccount.id;
+
+  // Get session for AK/SK signing
+  const session = getSession(accountId);
+  if (!session?.accessKey || !session?.secretKeyCiphertext) {
+    res
+      .status(401)
+      .json(
+        createOpenAIError(
+          "No active Huawei Cloud session. Please authenticate first.",
+          "auth_error",
+        ),
+      );
+    return;
+  }
+
+  // Check for cache refresh request
+  const forceRefresh = req.query.refresh === "true";
+  if (forceRefresh) {
+    invalidateCache(accountId);
+  }
+
+  try {
+    const models = await getModelList(accountId, session, traceId, forceRefresh);
+    res.json(buildModelsResponse(models));
+  } catch (error) {
+    // Fallback: return static models on any error
+    console.error(
+      `[${traceId}] Model list fetch failed, returning static models:`,
+      error instanceof Error ? error.message : error,
+    );
+    res.json(buildModelsResponse());
+  }
 }
 
 export function createChatCompletion(req: Request, res: Response): void {
