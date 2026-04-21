@@ -5,6 +5,7 @@
  * conversation-store dependency — the proxy is stateless by design.
  */
 import assert from "assert";
+import { createHash } from "crypto";
 
 // ---------------------------------------------------------------------------
 // Helper: simulate what the caller maintains between turns
@@ -97,6 +98,51 @@ function testToolContinuationPreservesParentMessageId(): void {
   assert.equal(state.parentMessageId, "resp-after-tool");
 }
 
+function deriveConversationIdForTest(
+  messages: Array<{ role: string; content: string }>,
+): string {
+  const firstMsg =
+    messages.find((m) => m.role === "user") ??
+    messages.find((m) => m.role === "system");
+  assert.ok(firstMsg, "test messages must contain a user or system message");
+  return createHash("sha256").update(firstMsg.content).digest("hex").slice(0, 32);
+}
+
+function testChatIdPrefersFirstUserMessageOverSystemPrompt(): void {
+  const systemPrompt = "You are opencode, an interactive CLI tool...";
+  const requestA = deriveConversationIdForTest([
+    { role: "system", content: systemPrompt },
+    { role: "user", content: "分析一下项目" },
+  ]);
+  const requestB = deriveConversationIdForTest([
+    { role: "system", content: systemPrompt },
+    { role: "user", content: "修一下这个 bug" },
+  ]);
+
+  assert.notEqual(
+    requestA,
+    requestB,
+    "chat_id should differ for different first user messages even when system prompt is identical",
+  );
+}
+
+function testChatIdFallsBackToSystemWhenNoUserMessageExists(): void {
+  const systemPrompt = "You are a title generator.";
+  const chatId = deriveConversationIdForTest([
+    { role: "system", content: systemPrompt },
+  ]);
+  const expected = createHash("sha256")
+    .update(systemPrompt)
+    .digest("hex")
+    .slice(0, 32);
+
+  assert.equal(
+    chatId,
+    expected,
+    "chat_id should still be derivable from system message when no user message exists",
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Run
 // ---------------------------------------------------------------------------
@@ -106,5 +152,7 @@ testCallerStateAdvancesAfterMetaEvent();
 testSubsequentTurnUsesResponseMessageIdAsParent();
 testChatIdRemainsStableWithinConversation();
 testToolContinuationPreservesParentMessageId();
+testChatIdPrefersFirstUserMessageOverSystemPrompt();
+testChatIdFallsBackToSystemWhenNoUserMessageExists();
 
 console.log("All chat stateless behaviour tests passed.");

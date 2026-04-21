@@ -1,6 +1,6 @@
 /**
  * Tests for tool format conversion, sub-agent tool derivation,
- * and subagent_type case repair.
+ * and subagent_type normalization.
  */
 import assert from "assert";
 import {
@@ -60,60 +60,60 @@ function testFallbackToDefaultTools(): void {
 }
 
 // ---------------------------------------------------------------------------
-// 4.3 Test that `subagent_type: "explore"` is repaired to `"Explore"`
+// 4.3 Test that `subagent_type: "Explore"` is repaired to `"explore"`
 // ---------------------------------------------------------------------------
 
 function testExploreRepaired(): void {
   // Simulate the normalizeToolCallArguments logic
   const SUBAGENT_CASE_REPAIR: Record<string, string> = {
-    "explore": "Explore",
+    "Explore": "explore",
     "specagent": "spec-agent",
     "spec_agent": "spec-agent",
-    "general": "Explore",
-    "general-purpose": "Explore",
+    "General": "general",
+    "general-purpose": "general",
   };
 
-  const input = JSON.stringify({ subagent_type: "explore", prompt: "test" });
+  const input = JSON.stringify({ subagent_type: "Explore", prompt: "test" });
   const args = JSON.parse(input) as Record<string, unknown>;
   const repaired = SUBAGENT_CASE_REPAIR[args.subagent_type as string];
-  assert.equal(repaired, "Explore", '"explore" should be repaired to "Explore"');
+  assert.equal(repaired, "explore", '"Explore" should be repaired to "explore"');
 }
 
 // ---------------------------------------------------------------------------
-// 4.4 Test that `subagent_type: "Explore"` passes through unchanged
+// 4.4 Test that `subagent_type: "explore"` passes through unchanged
 // ---------------------------------------------------------------------------
 
 function testExplorePassthrough(): void {
   const SUBAGENT_CASE_REPAIR: Record<string, string> = {
-    "explore": "Explore",
+    "Explore": "explore",
     "specagent": "spec-agent",
     "spec_agent": "spec-agent",
-    "general": "Explore",
-    "general-purpose": "Explore",
+    "General": "general",
+    "general-purpose": "general",
   };
 
-  const input = "Explore";
+  const input = "explore";
   const repaired = SUBAGENT_CASE_REPAIR[input];
-  // "Explore" is not in the map, so repaired is undefined → pass through
-  assert.equal(repaired, undefined, '"Explore" is not in the repair map, so it passes through');
-  assert.equal(input, "Explore", "original value unchanged");
+  // "explore" 已经是目标值，不在 repair map 中，直接透传
+  assert.equal(repaired, undefined, '"explore" is not in the repair map, so it passes through');
+  assert.equal(input, "explore", "original value unchanged");
 }
 
 // ---------------------------------------------------------------------------
-// 4.5 Test that `subagent_type: "general-purpose"` is repaired to `"Explore"`
+// 4.5 Test that `subagent_type: "general-purpose"` is repaired to `"general"`
 // ---------------------------------------------------------------------------
 
 function testGeneralPurposeRepaired(): void {
   const SUBAGENT_CASE_REPAIR: Record<string, string> = {
-    "explore": "Explore",
+    "Explore": "explore",
     "specagent": "spec-agent",
     "spec_agent": "spec-agent",
-    "general": "Explore",
-    "general-purpose": "Explore",
+    "General": "general",
+    "general-purpose": "general",
   };
 
   const repaired = SUBAGENT_CASE_REPAIR["general-purpose"];
-  assert.equal(repaired, "Explore", '"general-purpose" should be repaired to "Explore"');
+  assert.equal(repaired, "general", '"general-purpose" should be repaired to "general"');
 }
 
 // ---------------------------------------------------------------------------
@@ -122,11 +122,11 @@ function testGeneralPurposeRepaired(): void {
 
 function testUnknownSubagentTypePassthrough(): void {
   const SUBAGENT_CASE_REPAIR: Record<string, string> = {
-    "explore": "Explore",
+    "Explore": "explore",
     "specagent": "spec-agent",
     "spec_agent": "spec-agent",
-    "general": "Explore",
-    "general-purpose": "Explore",
+    "General": "general",
+    "general-purpose": "general",
   };
 
   const unknown = "some-unknown-type";

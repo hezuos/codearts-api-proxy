@@ -132,14 +132,13 @@ const chatIdRole = new Map<string, "main" | "sub">();
 // ---------------------------------------------------------------------------
 
 /**
- * Derive a stable chat_id from the first user/system message in the conversation.
- * This ensures all turns of the same conversation (including tool continuations)
- * map to the same chat_id, even when the caller does not provide one explicitly.
+ * 优先基于首条 user 消息推导稳定 chat_id，避免固定 system prompt
+ * 把不同会话错误折叠到同一个 chat_id 上。
  */
 function deriveConversationId(messages: OpenAIChatMessage[]): string {
-  const firstMsg = messages.find(
-    (m) => m.role === "user" || m.role === "system",
-  );
+  const firstMsg =
+    messages.find((m) => m.role === "user") ??
+    messages.find((m) => m.role === "system");
   if (!firstMsg) return randomUUID().replace(/-/g, "");
   const content = normalizeMessageContent(firstMsg.content);
   return createHash("sha256").update(content).digest("hex").slice(0, 32);
@@ -530,22 +529,20 @@ async function* parseSSE(
 // ---------------------------------------------------------------------------
 
 /**
- * Case-repair map for Task.subagent_type.
- * Maps known case variants to the exact casing registered by OpenCode.
- * Values not in the map pass through unchanged.
+ * 修正常见的 subagent_type 变体，统一到宿主当前要求的小写值。
  */
 const SUBAGENT_CASE_REPAIR: Record<string, string> = {
-  "explore": "Explore",
+  "Explore": "explore",
   "specagent": "spec-agent",
   "spec_agent": "spec-agent",
-  "general": "Explore",
-  "general-purpose": "Explore",
+  "General": "general",
+  "general-purpose": "general",
 };
 
 /**
  * Normalize tool call arguments before returning to OpenCode.
- * Repairs known case variants of Task.subagent_type to the exact
- * casing registered by OpenCode. Unknown values pass through unchanged.
+ * Repairs known Task.subagent_type variants to the exact values
+ * expected by the current host.
  */
 function normalizeToolCallArguments(name: string, argsStr: string): string {
   if (name !== "Task") return argsStr;
