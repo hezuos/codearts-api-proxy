@@ -312,7 +312,7 @@ async function main() {
 
               // Also save the full body to a file
               const fs = await import("fs");
-              const savePath = `scripts/captured-request-${j + 1}.json`;
+              const savePath = `scripts/captured-requests/captured-request-${j + 1}.json`;
               fs.writeFileSync(savePath, JSON.stringify(parsed, null, 2));
               console.log(`\n  Full request saved to: ${savePath}`);
             } else {
