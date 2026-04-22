@@ -259,6 +259,10 @@ function migrate(dryRun = false) {
     console.error(`  ✗ Key 数不匹配：期望 ${apiKeys.length}，实际 ${writtenKeys}`);
     errors++;
   }
+  if (writtenSessions !== writtenKeys) {
+    console.error(`  ✗ Session 数不匹配：期望 ${writtenKeys}（每个 key 一个），实际 ${writtenSessions}`);
+    errors++;
+  }
 
   if (errors === 0) {
     console.log("  ✓ 验证通过，数据完整");
