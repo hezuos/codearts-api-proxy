@@ -1,10 +1,8 @@
 import type { Request, Response } from "express";
 import {
-  getSession,
   refreshStoredSession,
   type StoredHuaweiSession,
 } from "../auth/huawei/session-store";
-import { getProviderAccount, listProviderAccounts } from "../auth/store";
 import { getRequestAuth } from "../middleware/authenticate-api-key";
 import { getTraceId } from "../middleware/request-context";
 import type { OpenAIChatCompletionRequest } from "../types/openai";
@@ -33,27 +31,9 @@ function isChatCompletionRequest(
 
 export async function listModels(req: Request, res: Response): Promise<void> {
   const auth = getRequestAuth(req);
+  const session = auth.session;
+  const accountId = auth.providerAccountId;
 
-  // Resolve provider account (same logic as chat completions)
-  let providerAccount = auth.providerAccountId
-    ? getProviderAccount(auth.providerAccountId)
-    : undefined;
-  if (!providerAccount) {
-    const accounts = listProviderAccounts(auth.userId);
-    providerAccount = accounts.find((a) => a.isDefault) ?? accounts[0];
-  }
-  if (!providerAccount) {
-    res
-      .status(400)
-      .json(createOpenAIError("Provider account not found", "auth_error"));
-    return;
-  }
-
-  const traceId = getTraceId(req);
-  const accountId = providerAccount.id;
-
-  // Get session for AK/SK signing
-  const session = getSession(accountId);
   if (!session?.accessKey || !session?.secretKeyCiphertext) {
     res
       .status(401)
@@ -72,6 +52,8 @@ export async function listModels(req: Request, res: Response): Promise<void> {
     invalidateCache(accountId);
   }
 
+  const traceId = getTraceId(req);
+
   try {
     const models = await getModelList(accountId, session, traceId, forceRefresh);
     res.json(buildModelsResponse(models));
@@ -87,22 +69,8 @@ export async function listModels(req: Request, res: Response): Promise<void> {
 
 export function createChatCompletion(req: Request, res: Response): void {
   const auth = getRequestAuth(req);
-
-  // Resolve provider account: use the one bound to the API key,
-  // or fall back to the user's default account
-  let providerAccount = auth.providerAccountId
-    ? getProviderAccount(auth.providerAccountId)
-    : undefined;
-  if (!providerAccount) {
-    const accounts = listProviderAccounts(auth.userId);
-    providerAccount = accounts.find((a) => a.isDefault) ?? accounts[0];
-  }
-  if (!providerAccount) {
-    res
-      .status(400)
-      .json(createOpenAIError("Provider account not found", "auth_error"));
-    return;
-  }
+  const session = auth.session;
+  const accountId = auth.providerAccountId;
 
   if (!isChatCompletionRequest(req.body)) {
     res
@@ -111,8 +79,19 @@ export function createChatCompletion(req: Request, res: Response): void {
     return;
   }
 
+  if (!session?.accessKey || !session?.secretKeyCiphertext) {
+    res
+      .status(401)
+      .json(
+        createOpenAIError(
+          "No active Huawei Cloud session. Please authenticate first.",
+          "auth_error",
+        ),
+      );
+    return;
+  }
+
   const traceId = getTraceId(req);
-  const accountId = providerAccount.id;
   const body = req.body as OpenAIChatCompletionRequest;
 
   // ── Incoming request log ──────────────────────────────────────────────────
@@ -160,23 +139,10 @@ export function createChatCompletion(req: Request, res: Response): void {
     `[${traceId}] ──────────────────────────────────────────────────────`,
   );
 
-  const session = getSession(accountId);
-  if (!session?.accessKey || !session?.secretKeyCiphertext) {
-    res
-      .status(401)
-      .json(
-        createOpenAIError(
-          "No active Huawei Cloud session. Please authenticate first.",
-          "auth_error",
-        ),
-      );
-    return;
-  }
-
   if (req.body.stream) {
-    void handleStreamingRequest(body, accountId, traceId, res);
+    void handleStreamingRequest(body, auth.apiKeyId, traceId, res);
   } else {
-    void handleNonStreamingRequest(body, accountId, traceId, res);
+    void handleNonStreamingRequest(body, auth.apiKeyId, traceId, res);
   }
 }
 
@@ -186,11 +152,12 @@ export function createChatCompletion(req: Request, res: Response): void {
 
 async function handleStreamingRequest(
   request: OpenAIChatCompletionRequest,
-  accountId: string,
+  keyId: string,
   traceId: string,
   res: Response,
 ): Promise<void> {
-  const session = getSession(accountId)!;
+  const auth = getRequestAuth(res.req as Request);
+  const session = auth.session;
   try {
     await streamHuaweiChatToResponse(request, session, traceId, res);
   } catch (error) {
@@ -199,7 +166,7 @@ async function handleStreamingRequest(
       console.log(
         `[${traceId}] Auth error (${error.httpStatus}), refreshing credentials...`,
       );
-      const refreshed = await tryRefreshSession(accountId, traceId);
+      const refreshed = await tryRefreshSession(keyId, traceId);
       if (refreshed) {
         try {
           await streamHuaweiChatToResponse(request, refreshed, traceId, res);
@@ -220,11 +187,12 @@ async function handleStreamingRequest(
 
 async function handleNonStreamingRequest(
   request: OpenAIChatCompletionRequest,
-  accountId: string,
+  keyId: string,
   traceId: string,
   res: Response,
 ): Promise<void> {
-  const session = getSession(accountId)!;
+  const auth = getRequestAuth(res.req as Request);
+  const session = auth.session;
   try {
     const response = await sendHuaweiChatRequest(request, session, traceId);
     res.json(response);
@@ -233,7 +201,7 @@ async function handleNonStreamingRequest(
       console.log(
         `[${traceId}] Auth error (${error.httpStatus}), refreshing credentials...`,
       );
-      const refreshed = await tryRefreshSession(accountId, traceId);
+      const refreshed = await tryRefreshSession(keyId, traceId);
       if (refreshed) {
         try {
           const response = await sendHuaweiChatRequest(
@@ -258,11 +226,11 @@ async function handleNonStreamingRequest(
 }
 
 async function tryRefreshSession(
-  accountId: string,
+  keyId: string,
   traceId: string,
 ): Promise<StoredHuaweiSession | undefined> {
   try {
-    const refreshed = await refreshStoredSession(accountId);
+    const refreshed = await refreshStoredSession(keyId);
     if (refreshed?.accessKey && refreshed?.secretKeyCiphertext) {
       console.log(`[${traceId}] Credentials refreshed successfully`);
       return refreshed;

@@ -15,11 +15,13 @@ import {
   listApiKeysByUser,
   revokeApiKey as revokeStoreApiKey,
   deleteProviderAccount,
+  deleteKey as deleteStoreKey,
+  getApiKey,
+  getKeyLocation,
 } from "../auth/store";
 import {
   getSession,
   refreshStoredSession,
-  deleteSession,
 } from "../auth/huawei/session-store";
 
 /**
@@ -79,7 +81,6 @@ export function adminLogin(req: Request, res: Response): void {
 
 /**
  * POST /admin/logout - Admin logout
- * Spec: system SHALL redirect to home page "/"
  */
 export function adminLogout(_req: Request, res: Response): void {
   clearAdminSession(res);
@@ -94,7 +95,7 @@ export function adminPanel(_req: Request, res: Response): void {
 }
 
 /**
- * GET /admin/api/users - Get all users with their accounts (no API keys)
+ * GET /admin/api/users - Get all users with their accounts
  */
 export function getAllUsers(_req: Request, res: Response): void {
   const users = listAllUsers();
@@ -118,8 +119,21 @@ export function getAllUsers(_req: Request, res: Response): void {
   res.json({ users: result });
 }
 
+/** Determine session status from expiresAt */
+function sessionStatus(
+  expiresAt?: string,
+): "active" | "expiring" | "expired" | "missing" {
+  if (!expiresAt) return "missing";
+  const expires = new Date(expiresAt).getTime();
+  if (Number.isNaN(expires)) return "missing";
+  const remaining = expires - Date.now();
+  if (remaining <= 0) return "expired";
+  if (remaining < 2 * 60 * 60 * 1000) return "expiring";
+  return "active";
+}
+
 /**
- * GET /admin/api/accounts - Get all accounts with session details
+ * GET /admin/api/accounts - Get all accounts with key+session details
  */
 export function getAllAccounts(_req: Request, res: Response): void {
   const users = listAllUsers();
@@ -128,17 +142,26 @@ export function getAllAccounts(_req: Request, res: Response): void {
     const userAccounts = listProviderAccounts(user.id);
     const userApiKeys = listApiKeysByUser(user.id);
     return userAccounts.map((account) => {
-      const session = getSession(account.id);
       // Find all API keys bound to this account (active + revoked)
       const accountApiKeys = userApiKeys
         .filter((k) => k.providerAccountId === account.id)
-        .map((k) => ({
-          id: k.id,
-          keyHash: k.keyHash,
-          name: k.name,
-          createdAt: k.createdAt,
-          revokedAt: k.revokedAt ?? null,
-        }));
+        .map((k) => {
+          const keySession = getSession(k.id);
+          return {
+            id: k.id,
+            keyHash: k.keyHash,
+            name: k.name,
+            createdAt: k.createdAt,
+            revokedAt: k.revokedAt ?? null,
+            sessionStatus: sessionStatus(keySession?.expiresAt),
+            session: keySession
+              ? {
+                  expiresAt: keySession.expiresAt,
+                  lastRefreshedAt: keySession.lastRefreshedAt,
+                }
+              : null,
+          };
+        });
       return {
         id: account.id,
         userId: account.userId,
@@ -151,12 +174,6 @@ export function getAllAccounts(_req: Request, res: Response): void {
         isDefault: account.isDefault,
         status: account.status,
         apiKeys: accountApiKeys,
-        session: session
-          ? {
-              expiresAt: session.expiresAt,
-              lastRefreshedAt: session.lastRefreshedAt,
-            }
-          : null,
       };
     });
   });
@@ -180,6 +197,55 @@ export function revokeApiKey(req: Request, res: Response): void {
 }
 
 /**
+ * DELETE /admin/api/keys/:id - Delete API key (cascade deletes session)
+ */
+export function deleteApiKey(req: Request, res: Response): void {
+  const keyId = req.params.id;
+  const apiKey = getApiKey(keyId);
+  if (!apiKey) {
+    res.status(404).json({ error: "API key not found" });
+    return;
+  }
+
+  const loc = getKeyLocation(keyId);
+  if (!loc) {
+    res.status(404).json({ error: "Key location not found" });
+    return;
+  }
+
+  deleteStoreKey(loc.userId, loc.accountId, keyId);
+  console.log(`[admin] Key deleted: ${keyId}`);
+  res.json({ success: true, keyId });
+}
+
+/**
+ * POST /admin/api/keys/:id/refresh - Refresh session for a single key
+ */
+export async function refreshApiKey(
+  req: Request,
+  res: Response,
+): Promise<void> {
+  const keyId = req.params.id;
+  const apiKey = getApiKey(keyId);
+  if (!apiKey) {
+    res.status(404).json({ error: "API key not found" });
+    return;
+  }
+
+  if (apiKey.revokedAt) {
+    res.status(400).json({ error: "Cannot refresh revoked key" });
+    return;
+  }
+
+  try {
+    await refreshStoredSession(keyId);
+    res.json({ success: true, keyId });
+  } catch (error) {
+    res.status(500).json({ error: `Refresh failed: ${String(error)}` });
+  }
+}
+
+/**
  * GET /admin/api/accounts/:id - Get single account details
  */
 export function getAccountDetails(req: Request, res: Response): void {
@@ -190,17 +256,26 @@ export function getAccountDetails(req: Request, res: Response): void {
     const accounts = listProviderAccounts(user.id);
     const account = accounts.find((a) => a.id === accountId);
     if (account) {
-      const session = getSession(account.id);
       const userApiKeys = listApiKeysByUser(user.id);
       const accountApiKeys = userApiKeys
         .filter((k) => k.providerAccountId === account.id)
-        .map((k) => ({
-          id: k.id,
-          keyHash: k.keyHash,
-          name: k.name,
-          createdAt: k.createdAt,
-          revokedAt: k.revokedAt ?? null,
-        }));
+        .map((k) => {
+          const keySession = getSession(k.id);
+          return {
+            id: k.id,
+            keyHash: k.keyHash,
+            name: k.name,
+            createdAt: k.createdAt,
+            revokedAt: k.revokedAt ?? null,
+            sessionStatus: sessionStatus(keySession?.expiresAt),
+            session: keySession
+              ? {
+                  expiresAt: keySession.expiresAt,
+                  lastRefreshedAt: keySession.lastRefreshedAt,
+                }
+              : null,
+          };
+        });
       res.json({
         id: account.id,
         userId: account.userId,
@@ -213,12 +288,6 @@ export function getAccountDetails(req: Request, res: Response): void {
         isDefault: account.isDefault,
         status: account.status,
         apiKeys: accountApiKeys,
-        session: session
-          ? {
-              expiresAt: session.expiresAt,
-              lastRefreshedAt: session.lastRefreshedAt,
-            }
-          : null,
       });
       return;
     }
@@ -228,7 +297,7 @@ export function getAccountDetails(req: Request, res: Response): void {
 }
 
 /**
- * POST /admin/api/accounts/:id/refresh - Force refresh account token
+ * POST /admin/api/accounts/:id/refresh - Force refresh all keys' sessions for an account
  */
 export async function forceRefreshAccount(
   req: Request,
@@ -236,24 +305,46 @@ export async function forceRefreshAccount(
 ): Promise<void> {
   const accountId = req.params.id;
 
-  try {
-    const session = await refreshStoredSession(accountId);
-    if (!session) {
-      res.status(404).json({ error: "Account session not found" });
-      return;
+  // Find all active keys for this account
+  const users = listAllUsers();
+  let found = false;
+  const results: Array<{ keyId: string; success: boolean; error?: string }> = [];
+
+  for (const user of users) {
+    const accounts = listProviderAccounts(user.id);
+    if (accounts.find((a) => a.id === accountId)) {
+      found = true;
+      const userKeys = listApiKeysByUser(user.id);
+      const accountKeys = userKeys.filter(
+        (k) => !k.revokedAt && k.providerAccountId === accountId,
+      );
+
+      for (const key of accountKeys) {
+        try {
+          await refreshStoredSession(key.id);
+          results.push({ keyId: key.id, success: true });
+        } catch (error) {
+          results.push({
+            keyId: key.id,
+            success: false,
+            error: String(error),
+          });
+        }
+      }
+      break;
     }
-    res.json({ success: true, accountId, session });
-  } catch (error) {
-    console.error(
-      `[admin] Force refresh failed for account ${accountId}:`,
-      error,
-    );
-    res.status(502).json({ error: "Refresh failed" });
   }
+
+  if (!found) {
+    res.status(404).json({ error: "Account not found" });
+    return;
+  }
+
+  res.json({ success: true, accountId, results });
 }
 
 /**
- * DELETE /admin/api/accounts/:id - Delete account
+ * DELETE /admin/api/accounts/:id - Delete account (cascade deletes keys + sessions)
  */
 export function deleteAccount(req: Request, res: Response): void {
   const accountId = req.params.id;
@@ -275,15 +366,12 @@ export function deleteAccount(req: Request, res: Response): void {
     return;
   }
 
-  // 删除账户（同时撤销关联的 API Key）
+  // 删除账户（级联删除 keys + sessions）
   const ok = deleteProviderAccount(targetUserId, accountId);
   if (!ok) {
     res.status(500).json({ error: "Failed to delete account" });
     return;
   }
-
-  // 删除 session（清除凭据）
-  deleteSession(accountId);
 
   console.log(
     `[admin] Account deleted: ${accountId} (user: ${targetUserId})`,

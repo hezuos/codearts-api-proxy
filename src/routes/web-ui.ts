@@ -8,10 +8,11 @@ import {
   setDefaultProviderAccount,
   getProviderAccount,
   listApiKeysByUser,
+  getSessionByKeyId,
+  setSession,
 } from "../auth/store";
 import {
   getSession,
-  deleteSession,
   refreshStoredSession,
 } from "../auth/huawei/session-store";
 import { randomUUID } from "crypto";
@@ -37,8 +38,12 @@ export function getAccountInfo(req: Request, res: Response): void {
   const accounts = listProviderAccounts(auth.userId);
   const defaultAccount = accounts.find((a) => a.isDefault) || accounts[0];
 
-  // Get session info for the default account
-  const session = defaultAccount ? getSession(defaultAccount.id) : null;
+  // Get session info from the first active key of the default account
+  const userKeys = listApiKeysByUser(auth.userId);
+  const defaultKey = userKeys.find(
+    (k) => !k.revokedAt && k.providerAccountId === defaultAccount?.id,
+  );
+  const session = defaultKey ? getSession(defaultKey.id) : null;
 
   res.json({
     apiKey: req.cookies.auth_key,
@@ -80,9 +85,14 @@ export function getAccountStatus(req: Request, res: Response): void {
 
   const user = getUser(auth.userId);
   const accounts = listProviderAccounts(auth.userId);
+  const userKeys = listApiKeysByUser(auth.userId);
 
   const accountsWithStatus = accounts.map((account) => {
-    const session = getSession(account.id);
+    // Find first active key for this account
+    const accountKey = userKeys.find(
+      (k) => !k.revokedAt && k.providerAccountId === account.id,
+    );
+    const session = accountKey ? getSession(accountKey.id) : null;
     return {
       id: account.id,
       provider: account.provider,
@@ -115,6 +125,7 @@ export function getAccountStatus(req: Request, res: Response): void {
 
 /**
  * POST /api/ui/regenerate-key - Regenerate user's API key
+ * Copies the current key's session to the new key (1:1).
  */
 export function regenerateApiKey(req: Request, res: Response): void {
   const auth = req.uiAuth;
@@ -123,25 +134,42 @@ export function regenerateApiKey(req: Request, res: Response): void {
     return;
   }
 
-  // Revoke all existing active keys for this user
+  // Find the current active key to copy its session
   const existingKeys = listApiKeysByUser(auth.userId);
+  const currentKey = existingKeys.find(
+    (k) => !k.revokedAt && k.keyHash === req.cookies.auth_key,
+  );
+  const currentSession = currentKey
+    ? getSessionByKeyId(currentKey.id)
+    : null;
+
+  // Revoke all existing active keys for this user
   for (const key of existingKeys) {
     if (!key.revokedAt) {
       revokeStoreApiKey(key.id);
     }
   }
 
-  // Generate and issue new API key
-  // Bind to the same provider account as the current key, or the user's default
+  // Generate and issue new API key bound to the same account
   const accounts = listProviderAccounts(auth.userId);
   const defaultAccount = accounts.find((a) => a.isDefault) ?? accounts[0];
+  const accountId =
+    currentKey?.providerAccountId ?? defaultAccount?.id ?? "";
   const newKey = `sk-${randomUUID()}`;
   const apiKey = issueApiKey({
     userId: auth.userId,
-    providerAccountId: auth.providerAccountId ?? defaultAccount?.id,
+    providerAccountId: accountId,
     name: "regenerated",
     rawKey: newKey,
   });
+
+  // Copy the current session to the new key (1:1)
+  if (currentSession) {
+    setSession(apiKey.id, {
+      ...currentSession,
+      keyId: apiKey.id,
+    });
+  }
 
   // Update cookie
   const isProduction = process.env.NODE_ENV === "production";
@@ -160,6 +188,7 @@ export function regenerateApiKey(req: Request, res: Response): void {
 
 /**
  * POST /api/ui/accounts/:accountId/refresh - Refresh account token (cookie auth)
+ * Refreshes all active keys' sessions for this account.
  */
 export async function refreshAccountToken(
   req: Request,
@@ -179,13 +208,23 @@ export async function refreshAccountToken(
     return;
   }
 
-  try {
-    const session = await refreshStoredSession(accountId);
-    res.json({ success: true, session });
-  } catch (error) {
-    console.error("Manual account refresh failed:", error);
-    res.status(502).json({ error: "Refresh failed" });
+  // Refresh all active keys' sessions for this account
+  const userKeys = listApiKeysByUser(auth.userId);
+  const accountKeys = userKeys.filter(
+    (k) => !k.revokedAt && k.providerAccountId === accountId,
+  );
+
+  const results = [];
+  for (const key of accountKeys) {
+    try {
+      const session = await refreshStoredSession(key.id);
+      results.push({ keyId: key.id, success: true, session });
+    } catch (error) {
+      results.push({ keyId: key.id, success: false, error: String(error) });
+    }
   }
+
+  res.json({ success: true, results });
 }
 
 /**
@@ -213,7 +252,7 @@ export function unbindAccount(req: Request, res: Response): void {
     return;
   }
 
-  deleteSession(accountId);
+  // Session deletion is handled by cascade in hierarchical-store
   res.status(204).end();
 }
 

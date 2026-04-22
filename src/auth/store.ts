@@ -1,86 +1,51 @@
-import fs from "fs";
-import path from "path";
 import { randomUUID } from "crypto";
-import { config } from "../config";
 import type { ApiKey } from "../db/models/api-key";
 import type { ProviderAccount } from "../db/models/provider-account";
 import type { User } from "../db/models/user";
-import { decryptString, encryptString } from "./crypto/encryption";
+import type { StoredHuaweiSession } from "./huawei/session-store";
+import {
+  getUser,
+  getDefaultUser,
+  setUser,
+  getProviderAccount,
+  setProviderAccount,
+  getApiKey,
+  setApiKey,
+  findApiKeyByValue,
+  removeApiKeyFromValueIndex as _removeApiKeyFromValueIndex,
+  getSessionByKeyId,
+  setSession,
+  deleteKey,
+  deleteAccount,
+  getAllUsers,
+  getAllApiKeys,
+  getAllProviderAccounts,
+  loadAllEntities,
+  ensureDataDirs,
+  listAccounts,
+  listKeys,
+  getKeyLocation,
+} from "../store/hierarchical-store";
 
 export interface AuthContext {
   apiKeyId: string;
   userId: string;
-  providerAccountId?: string;
+  providerAccountId: string;
+  session: StoredHuaweiSession;
 }
 
-const users = new Map<string, User>();
-const apiKeys = new Map<string, ApiKey>();
-const apiKeysByValue = new Map<string, ApiKey>();
-const providerAccounts = new Map<string, ProviderAccount>();
-
-function getAuthStorePath(): string {
-  return path.resolve(process.cwd(), config.authStoreFile);
-}
-
-function ensureAuthStoreDir(): void {
-  fs.mkdirSync(path.dirname(getAuthStorePath()), { recursive: true });
-}
-
-function persistAuthStore(): void {
-  ensureAuthStoreDir();
-  const payload = {
-    version: 1,
-    users: Array.from(users.values()),
-    apiKeys: Array.from(apiKeys.values()),
-    providerAccounts: Array.from(providerAccounts.values()),
-  };
-  fs.writeFileSync(
-    getAuthStorePath(),
-    encryptString(JSON.stringify(payload)),
-    "utf8",
-  );
-}
+// ---------------------------------------------------------------------------
+// Startup
+// ---------------------------------------------------------------------------
 
 export function loadPersistedAuthStore(): void {
-  const filePath = getAuthStorePath();
-  if (!fs.existsSync(filePath)) {
-    return;
-  }
-
-  try {
-    const raw = fs.readFileSync(filePath, "utf8");
-    const payload = JSON.parse(decryptString(raw)) as {
-      users?: User[];
-      apiKeys?: ApiKey[];
-      providerAccounts?: ProviderAccount[];
-    };
-
-    users.clear();
-    apiKeys.clear();
-    apiKeysByValue.clear();
-    providerAccounts.clear();
-
-    for (const user of payload.users ?? []) {
-      users.set(user.id, user);
-    }
-    for (const apiKey of payload.apiKeys ?? []) {
-      apiKeys.set(apiKey.id, apiKey);
-      apiKeysByValue.set(apiKey.keyHash, apiKey);
-    }
-    for (const providerAccount of payload.providerAccounts ?? []) {
-      providerAccounts.set(providerAccount.id, providerAccount);
-    }
-
-    console.log(
-      `Loaded persisted auth store from ${filePath}: users=${users.size} apiKeys=${apiKeys.size} providerAccounts=${providerAccounts.size}`,
-    );
-  } catch (error) {
-    console.error(
-      `Failed to load persisted auth store from ${filePath}:`,
-      error,
-    );
-  }
+  ensureDataDirs();
+  loadAllEntities();
 }
+
+// ---------------------------------------------------------------------------
+// User operations
+// ---------------------------------------------------------------------------
 
 export function createUser(input: Pick<User, "email" | "displayName">): User {
   const now = new Date().toISOString();
@@ -92,23 +57,20 @@ export function createUser(input: Pick<User, "email" | "displayName">): User {
     updatedAt: now,
   };
 
-  users.set(user.id, user);
-  persistAuthStore();
+  setUser(user);
   return user;
 }
 
-export function getUser(userId: string): User | undefined {
-  return users.get(userId);
-}
+export { getUser, getDefaultUser, getAllUsers as listAllUsers };
 
-export function getDefaultUser(): User | undefined {
-  return Array.from(users.values())[0];
-}
+// ---------------------------------------------------------------------------
+// ProviderAccount operations
+// ---------------------------------------------------------------------------
 
 export function upsertProviderAccount(
   input: Omit<ProviderAccount, "createdAt" | "updatedAt">,
 ): ProviderAccount {
-  const existing = providerAccounts.get(input.id);
+  const existing = getProviderAccount(input.id);
   const now = new Date().toISOString();
   const providerAccount: ProviderAccount = {
     ...input,
@@ -116,22 +78,17 @@ export function upsertProviderAccount(
     updatedAt: now,
   };
 
-  providerAccounts.set(providerAccount.id, providerAccount);
-  persistAuthStore();
+  setProviderAccount(providerAccount);
   return providerAccount;
 }
 
 export function listProviderAccounts(userId: string): ProviderAccount[] {
-  return Array.from(providerAccounts.values()).filter(
+  return getAllProviderAccounts().filter(
     (providerAccount) => providerAccount.userId === userId,
   );
 }
 
-export function getProviderAccount(
-  providerAccountId: string,
-): ProviderAccount | undefined {
-  return providerAccounts.get(providerAccountId);
-}
+export { getProviderAccount };
 
 export function setDefaultProviderAccount(
   userId: string,
@@ -153,31 +110,28 @@ export function setDefaultProviderAccount(
   return selected;
 }
 
-export function deleteProviderAccount(
+export { deleteProviderAccountViaStore as deleteProviderAccount };
+
+function deleteProviderAccountViaStore(
   userId: string,
   providerAccountId: string,
 ): boolean {
-  const providerAccount = providerAccounts.get(providerAccountId);
+  const providerAccount = getProviderAccount(providerAccountId);
   if (!providerAccount || providerAccount.userId !== userId) {
     return false;
   }
 
-  providerAccounts.delete(providerAccountId);
-  for (const apiKey of apiKeys.values()) {
-    if (apiKey.providerAccountId === providerAccountId) {
-      apiKeys.delete(apiKey.id);
-      apiKeysByValue.delete(apiKey.keyHash);
-    }
-  }
-
-  persistAuthStore();
-
+  deleteAccount(userId, providerAccountId);
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// ApiKey operations
+// ---------------------------------------------------------------------------
+
 export function issueApiKey(input: {
   userId: string;
-  providerAccountId?: string;
+  providerAccountId: string;
   name: string;
   rawKey: string;
 }): ApiKey {
@@ -192,15 +146,22 @@ export function issueApiKey(input: {
     updatedAt: now,
   };
 
-  apiKeys.set(apiKey.id, apiKey);
-  apiKeysByValue.set(input.rawKey, apiKey);
-  persistAuthStore();
+  setApiKey(apiKey, input.rawKey);
   return apiKey;
 }
 
 export function validateApiKey(rawKey: string): AuthContext | null {
-  const apiKey = apiKeysByValue.get(rawKey);
+  const apiKey = findApiKeyByValue(rawKey);
   if (!apiKey || apiKey.revokedAt) {
+    return null;
+  }
+
+  if (!apiKey.providerAccountId) {
+    return null;
+  }
+
+  const session = getSessionByKeyId(apiKey.id);
+  if (!session) {
     return null;
   }
 
@@ -208,11 +169,12 @@ export function validateApiKey(rawKey: string): AuthContext | null {
     apiKeyId: apiKey.id,
     userId: apiKey.userId,
     providerAccountId: apiKey.providerAccountId,
+    session,
   };
 }
 
 export function getUserApiKey(userId: string): string | null {
-  for (const apiKey of apiKeys.values()) {
+  for (const apiKey of getAllApiKeys()) {
     if (apiKey.userId === userId && !apiKey.revokedAt) {
       return apiKey.keyHash;
     }
@@ -221,26 +183,29 @@ export function getUserApiKey(userId: string): string | null {
 }
 
 export function revokeApiKey(apiKeyId: string): boolean {
-  const apiKey = apiKeys.get(apiKeyId);
+  const apiKey = getApiKey(apiKeyId);
   if (!apiKey || apiKey.revokedAt) {
     return false;
   }
   apiKey.revokedAt = new Date().toISOString();
   apiKey.updatedAt = new Date().toISOString();
-  apiKeys.set(apiKeyId, apiKey);
-  persistAuthStore();
+
+  const loc = getKeyLocation(apiKeyId);
+  if (loc) {
+    setApiKey(apiKey, apiKey.keyHash);
+  }
   return true;
 }
 
 export function listApiKeysByUser(userId: string): ApiKey[] {
-  return Array.from(apiKeys.values()).filter((k) => k.userId === userId);
+  return getAllApiKeys().filter((k) => k.userId === userId);
 }
 
-export function listAllUsers(): User[] {
-  return Array.from(users.values());
-}
+// ---------------------------------------------------------------------------
+// Bootstrap (no default key — only creates user)
+// ---------------------------------------------------------------------------
 
-export function bootstrapDefaultAuth(rawApiKey: string): AuthContext {
+export function bootstrapDefaultAuth(_rawApiKey: string): void {
   let user = getDefaultUser();
   if (!user) {
     user = createUser({
@@ -248,22 +213,19 @@ export function bootstrapDefaultAuth(rawApiKey: string): AuthContext {
       displayName: "Development User",
     });
   }
-
-  let apiKey = apiKeysByValue.get(rawApiKey);
-  if (!apiKey) {
-    // Issue API key without binding to a specific provider account.
-    // It will be resolved to the user's default account at request time.
-    apiKey = issueApiKey({
-      userId: user.id,
-      providerAccountId: undefined,
-      name: "default",
-      rawKey: rawApiKey,
-    });
-  }
-
-  return {
-    apiKeyId: apiKey.id,
-    userId: user.id,
-    providerAccountId: apiKey.providerAccountId,
-  };
+  // No default key creation — users must OAuth login to get keys
 }
+
+// ---------------------------------------------------------------------------
+// Re-exports for hierarchical store access
+// ---------------------------------------------------------------------------
+
+export {
+  getSessionByKeyId,
+  setSession,
+  getKeyLocation,
+  getApiKey,
+  listAccounts,
+  listKeys,
+  deleteKey,
+};

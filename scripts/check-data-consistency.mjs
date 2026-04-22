@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 /**
+ * @deprecated Use data-manager.mjs check instead. This script targets the old flat-file format.
+ *
  * check-data-consistency.mjs — 检查 auth-store 和 huawei-sessions 数据一致性
  */
 import fs from "fs";

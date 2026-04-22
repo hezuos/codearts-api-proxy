@@ -1,6 +1,6 @@
 import {
   getSession,
-  listSessionProviderAccountIds,
+  listSessionKeyIds,
   logSessionCacheSummary,
   refreshStoredSession,
 } from "./session-store";
@@ -47,9 +47,9 @@ async function refreshOnce(): Promise<void> {
   try {
     let refreshed = 0;
     let expired = 0;
-    const providerAccountIds = listSessionProviderAccountIds();
-    for (const providerAccountId of providerAccountIds) {
-      const session = getSession(providerAccountId);
+    const keyIds = listSessionKeyIds();
+    for (const keyId of keyIds) {
+      const session = getSession(keyId);
       if (!session) {
         continue;
       }
@@ -60,7 +60,7 @@ async function refreshOnce(): Promise<void> {
         if (!Number.isNaN(expires) && expires <= Date.now()) {
           expired += 1;
           console.warn(
-            `[refresh-task] Session ${providerAccountId} has expired at ${session.expiresAt}. Please re-login to get new credentials.`,
+            `[refresh-task] Session for key ${keyId} has expired at ${session.expiresAt}. Please re-login to get new credentials.`,
           );
           continue;
         }
@@ -72,7 +72,7 @@ async function refreshOnce(): Promise<void> {
 
       try {
         await Promise.race([
-          refreshStoredSession(providerAccountId),
+          refreshStoredSession(keyId),
           new Promise((_, reject) => {
             setTimeout(
               () => reject(new Error("refresh timeout")),
@@ -82,7 +82,7 @@ async function refreshOnce(): Promise<void> {
         ]);
         refreshed += 1;
       } catch (error) {
-        console.warn(`Refresh task failed for ${providerAccountId}:`, error);
+        console.warn(`Refresh task failed for key ${keyId}:`, error);
       }
     }
 

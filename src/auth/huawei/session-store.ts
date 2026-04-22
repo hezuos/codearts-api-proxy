@@ -1,10 +1,8 @@
-import fs from "fs";
-import path from "path";
-import { config } from "../../config";
-import { decryptString, encryptString } from "../crypto/encryption";
+import { getSessionByKeyId, setSession, getAllSessions } from "../../store/hierarchical-store";
 import { refreshHuaweiSession, type RefreshableHuaweiSession } from "./refresh";
 
 export interface StoredHuaweiSession {
+  keyId: string;
   providerAccountId: string;
   businessToken?: string;
   accessKey?: string;
@@ -14,99 +12,36 @@ export interface StoredHuaweiSession {
   lastRefreshedAt?: string;
 }
 
-const sessionCache = new Map<string, StoredHuaweiSession>();
-const refreshLocks = new Map<string, Promise<StoredHuaweiSession | null>>();
-
-function getSessionStorePath(): string {
-  return path.resolve(process.cwd(), config.sessionStoreFile);
-}
-
-function ensureSessionStoreDir(): void {
-  fs.mkdirSync(path.dirname(getSessionStorePath()), { recursive: true });
-}
-
-function persistSessions(): void {
-  ensureSessionStoreDir();
-  const payload = {
-    version: 1,
-    sessions: Array.from(sessionCache.values()),
-  };
-  const serialized = JSON.stringify(payload);
-  fs.writeFileSync(getSessionStorePath(), encryptString(serialized), "utf8");
-}
-
-export function loadPersistedSessions(): void {
-  const filePath = getSessionStorePath();
-  if (!fs.existsSync(filePath)) {
-    return;
-  }
-
-  try {
-    const raw = fs.readFileSync(filePath, "utf8");
-    const payload = JSON.parse(decryptString(raw)) as {
-      sessions?: StoredHuaweiSession[];
-    };
-
-    sessionCache.clear();
-    for (const session of payload.sessions ?? []) {
-      if (!session.providerAccountId) {
-        continue;
-      }
-      sessionCache.set(session.providerAccountId, session);
-    }
-
-    console.log(
-      `Loaded ${sessionCache.size} persisted Huawei session(s) from ${filePath}`,
-    );
-  } catch (error) {
-    console.error(`Failed to load persisted sessions from ${filePath}:`, error);
-  }
-}
-
-export function listSessionProviderAccountIds(): string[] {
-  return Array.from(sessionCache.keys());
-}
+// ---------------------------------------------------------------------------
+// Session access (delegates to hierarchical store)
+// ---------------------------------------------------------------------------
 
 export function getSession(
-  providerAccountId: string,
+  keyId: string,
 ): StoredHuaweiSession | undefined {
-  return sessionCache.get(providerAccountId);
+  return getSessionByKeyId(keyId);
 }
 
 export function storeSession(
-  providerAccountId: string,
+  keyId: string,
   session: StoredHuaweiSession,
 ): void {
-  sessionCache.set(providerAccountId, session);
-  persistSessions();
+  setSession(keyId, session);
 }
 
-export function deleteSession(providerAccountId: string): void {
-  sessionCache.delete(providerAccountId);
-  persistSessions();
+export function deleteSession(_keyId: string): void {
+  // Session deletion is handled by deleteKey cascade in hierarchical-store
+  // This function is kept for API compatibility but is a no-op
 }
+
+// ---------------------------------------------------------------------------
+// Refresh
+// ---------------------------------------------------------------------------
 
 export async function refreshStoredSession(
-  providerAccountId: string,
+  keyId: string,
 ): Promise<StoredHuaweiSession | null> {
-  const existingLock = refreshLocks.get(providerAccountId);
-  if (existingLock) {
-    return existingLock;
-  }
-
-  const refreshPromise = refreshStoredSessionInternal(
-    providerAccountId,
-  ).finally(() => {
-    refreshLocks.delete(providerAccountId);
-  });
-  refreshLocks.set(providerAccountId, refreshPromise);
-  return refreshPromise;
-}
-
-async function refreshStoredSessionInternal(
-  providerAccountId: string,
-): Promise<StoredHuaweiSession | null> {
-  const stored = sessionCache.get(providerAccountId);
+  const stored = getSessionByKeyId(keyId);
   if (!stored) {
     return null;
   }
@@ -117,11 +52,12 @@ async function refreshStoredSessionInternal(
     !stored.securityToken
   ) {
     console.warn(
-      `Session for ${providerAccountId} missing refreshable credentials`,
+      `Session for key ${keyId} missing refreshable credentials`,
     );
     return stored;
   }
 
+  const { decryptString } = await import("../crypto/encryption");
   const secretKey = decryptString(stored.secretKeyCiphertext);
   const refreshable: RefreshableHuaweiSession = {
     accessKey: stored.accessKey,
@@ -130,7 +66,7 @@ async function refreshStoredSessionInternal(
   };
 
   const result = await refreshHuaweiSession(refreshable);
-  console.log(`Refresh result for ${providerAccountId}:`, result.raw);
+  console.log(`Refresh result for key ${keyId}:`, result.raw);
 
   const payload = result.raw as Record<string, unknown>;
   const resultPayload =
@@ -161,16 +97,24 @@ async function refreshStoredSessionInternal(
     stored.secretKeyCiphertext = encryptString(credential.secret);
   }
 
-  sessionCache.set(providerAccountId, stored);
-  persistSessions();
-
+  setSession(keyId, stored);
   return stored;
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics
+// ---------------------------------------------------------------------------
+
+/** List all key IDs that have sessions */
+export function listSessionKeyIds(): string[] {
+  return Array.from(getAllSessions().keys());
 }
 
 /** Log diagnostic summary of the session cache. */
 export function logSessionCacheSummary(): void {
   const now = Date.now();
-  for (const [id, session] of sessionCache.entries()) {
+  const allSessions = getAllSessions();
+  for (const [keyId, session] of allSessions.entries()) {
     const expiresAt = session.expiresAt
       ? new Date(session.expiresAt).getTime()
       : NaN;
@@ -178,8 +122,8 @@ export function logSessionCacheSummary(): void {
       ? "unknown"
       : `${Math.round((expiresAt - now) / 60_000)}min`;
     console.log(
-      `  session[${id}]: AK=${session.accessKey ? "yes" : "no"} expires=${remainingMin}`,
+      `  session[key=${keyId.slice(0, 8)}...]: AK=${session.accessKey ? "yes" : "no"} expires=${remainingMin}`,
     );
   }
-  console.log(`Session cache total: ${sessionCache.size} provider sessions`);
+  console.log(`Session cache total: ${allSessions.size} key sessions`);
 }

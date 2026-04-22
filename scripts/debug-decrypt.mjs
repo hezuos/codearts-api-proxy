@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 /**
+ * @deprecated Use data-manager.mjs instead. This script targets the old flat-file format.
+ *
  * debug-decrypt.mjs — 解密项目加密存储文件的调试工具
  *
  * 用法：

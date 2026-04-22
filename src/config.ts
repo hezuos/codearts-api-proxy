@@ -4,9 +4,6 @@ export interface AppConfig {
   nodeEnv: string;
   requestBodyLimit: string;
   dataDir: string;
-  authStoreFile: string;
-  conversationStoreFile: string;
-  sessionStoreFile: string;
   encryptionKey: string;
   defaultApiKey: string;
   huaweiApiHost: string;
@@ -44,11 +41,6 @@ export const config: AppConfig = {
   nodeEnv: process.env.NODE_ENV ?? "development",
   requestBodyLimit: process.env.REQUEST_BODY_LIMIT ?? "10mb",
   dataDir: process.env.DATA_DIR ?? "data",
-  authStoreFile: process.env.AUTH_STORE_FILE ?? "data/auth-store.json",
-  conversationStoreFile:
-    process.env.CONVERSATION_STORE_FILE ?? "data/conversation-store.json",
-  sessionStoreFile:
-    process.env.SESSION_STORE_FILE ?? "data/huawei-sessions.json",
   encryptionKey: requireEnv(
     "ENCRYPTION_KEY",
     "dev-only-32-byte-encryption-key!",

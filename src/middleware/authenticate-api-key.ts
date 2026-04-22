@@ -1,5 +1,5 @@
 import type { NextFunction, Request, Response } from "express";
-import { validateApiKey } from "../auth/store";
+import { validateApiKey, type AuthContext } from "../auth/store";
 import { createOpenAIError } from "../utils/openai-error";
 
 export function authenticateApiKey(
@@ -26,14 +26,8 @@ export function authenticateApiKey(
   next();
 }
 
-export function getRequestAuth(req: Request): {
-  apiKeyId: string;
-  userId: string;
-  providerAccountId?: string;
-} {
-  return Reflect.get(req, "auth") as {
-    apiKeyId: string;
-    userId: string;
-    providerAccountId?: string;
-  };
+export function getRequestAuth(req: Request): AuthContext {
+  return Reflect.get(req, "auth") as AuthContext;
 }
+
+export { type AuthContext };

@@ -36,18 +36,186 @@
         font-size: 1.5rem;
         line-height: 1;
       }
-      .key-cell {
+
+      /* Key row layout */
+      .key-row {
         display: flex;
         align-items: center;
-        gap: 4px;
+        gap: 6px;
+        padding: 4px 0;
       }
-      .key-cell code {
+      .key-row + .key-row {
+        border-top: 1px solid #eee;
+      }
+      .key-value {
+        font-family: "Courier New", Courier, monospace;
         font-size: 0.85em;
+        background: #f8f8f8;
+        padding: 2px 6px;
+        border-radius: 3px;
+        user-select: all;
       }
-      .key-cell button {
+
+      .session-badge {
+        font-size: 0.75em;
         padding: 1px 6px;
+        border-radius: 3px;
+        font-weight: bold;
+      }
+      .session-badge.active { background: #d4edda; color: #155724; }
+      .session-badge.expiring { background: #fff3cd; color: #856404; }
+      .session-badge.expired { background: #f8d7da; color: #721c24; }
+      .session-badge.missing { background: #e2e3e5; color: #383d41; }
+
+      .revoked-label {
+        font-size: 0.75em;
+        color: #e74c3c;
+        font-weight: bold;
+      }
+
+      .session-badge.revoked { background: #f8d7da; color: #721c24; }
+
+      .key-name {
+        font-size: 0.8em;
+        color: #666;
+      }
+
+      /* Key: Copy button always visible */
+      .key-copy-btn {
+        padding: 2px 8px;
         font-size: 0.75em;
         cursor: pointer;
+        border: none;
+        border-radius: 3px;
+        color: white;
+        background: #3498db;
+        margin: 0;
+      }
+      .key-copy-btn:hover { background: #2980b9; }
+
+      /* ⋮ toggle + floating action bar (for key rows) */
+      .menu-wrap {
+        position: relative;
+        margin-left: auto;
+      }
+      .menu-toggle {
+        background: none;
+        border: 1px solid #ccc;
+        border-radius: 3px;
+        padding: 1px 8px;
+        cursor: pointer;
+        font-size: 1em;
+        color: #555;
+        line-height: 1.3;
+      }
+      .menu-toggle:hover,
+      .menu-wrap.open .menu-toggle {
+        background: #e8e8e8;
+      }
+      .action-popover {
+        display: none;
+        position: absolute;
+        right: calc(100% + 4px);
+        top: 50%;
+        transform: translateY(-50%);
+        background: white;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+        z-index: 50;
+        padding: 4px 6px;
+        align-items: center;
+        gap: 4px;
+        white-space: nowrap;
+      }
+      .menu-wrap:hover .action-popover,
+      .menu-wrap.open .action-popover {
+        display: flex;
+      }
+      .action-popover .btn-sm {
+        padding: 2px 8px;
+        font-size: 0.75em;
+        cursor: pointer;
+        border: none;
+        border-radius: 3px;
+        color: white;
+        margin: 0;
+      }
+      .btn-sm.btn-default { background: #3498db; }
+      .btn-sm.btn-default:hover { background: #2980b9; }
+      .btn-sm.btn-danger { background: #e74c3c; }
+      .btn-sm.btn-danger:hover { background: #c0392b; }
+      .btn-sm.btn-warn { background: #f39c12; }
+      .btn-sm.btn-warn:hover { background: #d68910; }
+      .btn-sm.btn-success { background: #27ae60; }
+      .btn-sm.btn-success:hover { background: #229954; }
+      .btn-sm:disabled { background: #bdc3c7; cursor: not-allowed; }
+
+      /* Account actions: View always visible, ⋮ dropdown menu */
+      .account-act-cell {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .dropdown-wrap {
+        position: relative;
+      }
+      .dropdown-toggle {
+        background: none;
+        border: 1px solid #ccc;
+        border-radius: 3px;
+        padding: 1px 8px;
+        cursor: pointer;
+        font-size: 1em;
+        color: #555;
+        line-height: 1.3;
+      }
+      .dropdown-toggle:hover,
+      .dropdown-wrap.open .dropdown-toggle {
+        background: #e8e8e8;
+      }
+      .dropdown-menu {
+        display: none;
+        position: absolute;
+        right: 0;
+        top: calc(100% + 2px);
+        background: white;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+        z-index: 50;
+        min-width: 130px;
+        padding: 4px 0;
+      }
+      .dropdown-wrap:hover .dropdown-menu,
+      .dropdown-wrap.open .dropdown-menu {
+        display: block;
+      }
+      .dropdown-menu button {
+        display: block;
+        width: 100%;
+        text-align: left;
+        background: none;
+        border: none;
+        padding: 6px 12px;
+        font-size: 0.8em;
+        cursor: pointer;
+        color: #333;
+        margin: 0;
+        border-radius: 0;
+      }
+      .dropdown-menu button:hover {
+        background: #f5f5f5;
+      }
+      .dropdown-menu button.danger-item {
+        color: #e74c3c;
+      }
+      .dropdown-menu button.danger-item:hover {
+        background: #fde8e8;
+      }
+      .dropdown-menu .sep {
+        border-top: 1px solid #eee;
+        margin: 2px 0;
       }
     </style>
   </head>
@@ -96,7 +264,6 @@
               <th>Domain ID</th>
               <th>Provider</th>
               <th>Status</th>
-              <th>Token Expires</th>
               <th>API Keys</th>
               <th>Actions</th>
             </tr>
@@ -139,36 +306,122 @@
 
     <script src="/app.js"></script>
     <script>
-      // Track revealed keys to support toggle
-      const revealedKeys = new Set();
+      // Key data store — avoids inline string interpolation in onclick
+      const keyDataMap = new Map();
 
-      function keyCell(keyId, fullKey) {
-        const revealed = revealedKeys.has(keyId);
-        const display = revealed ? fullKey : maskApiKey(fullKey);
-        const toggleLabel = revealed ? "Hide" : "Show";
+      function registerKeyData(keyId, fullKey) {
+        keyDataMap.set(keyId, fullKey);
+      }
+
+      function buildKeyRow(k) {
+        registerKeyData(k.id, k.keyHash);
+        const revoked = !!k.revokedAt;
+
+        // Revoked key shows "Revoked" badge, not session status
+        const statusClass = revoked ? "revoked" : (k.sessionStatus || "missing");
+        const statusLabel = revoked ? "Revoked" : ({
+          active: "Active",
+          expiring: "Expiring",
+          expired: "Expired",
+          missing: "No Session",
+        }[k.sessionStatus] || k.sessionStatus || "No Session");
+
+        const expiryInfo = (!revoked && k.session)
+          ? `<small>${formatRelativeTime(k.session.expiresAt)}</small>`
+          : "";
+
+        // Copy always visible; Refresh/Revoke/Delete in ⋮ popover
+        const actionBtns = revoked
+          ? `<button class="btn-sm btn-danger" onclick="deleteKey('${k.id}', this)">Delete</button>`
+          : `
+              <button class="btn-sm btn-success" onclick="refreshKey('${k.id}', this)">Refresh</button>
+              <button class="btn-sm btn-warn" onclick="revokeKey('${k.id}', this)">Revoke</button>
+              <button class="btn-sm btn-danger" onclick="deleteKey('${k.id}', this)">Delete</button>
+            `;
+
         return `
-          <div class="key-cell">
-            <code>${display}</code>
-            <button onclick="toggleKey('${keyId}', '${fullKey}', this)">${toggleLabel}</button>
-            <button onclick="copyKey('${fullKey}', this)">Copy</button>
+          <div class="key-row" data-key-id="${k.id}">
+            <span class="key-value" title="Click to select">${maskApiKey(k.keyHash)}</span>
+            ${k.name ? `<span class="key-name">(${k.name})</span>` : ""}
+            <span class="session-badge ${statusClass}">${statusLabel}</span>
+            ${expiryInfo}
+            ${!revoked ? `<button class="key-copy-btn" onclick="copyKeyById('${k.id}', this)">Copy</button>` : ""}
+            <div class="menu-wrap">
+              <div class="action-popover">${actionBtns}</div>
+              <button class="menu-toggle" onclick="toggleMenu(this)">&#8942;</button>
+            </div>
           </div>
         `;
       }
 
-      function toggleKey(keyId, fullKey, btn) {
-        if (revealedKeys.has(keyId)) {
-          revealedKeys.delete(keyId);
-          btn.previousElementSibling.textContent = maskApiKey(fullKey);
-          btn.textContent = "Show";
-        } else {
-          revealedKeys.add(keyId);
-          btn.previousElementSibling.textContent = fullKey;
-          btn.textContent = "Hide";
+      function toggleMenu(btn) {
+        const wrap = btn.parentElement;
+        const wasOpen = wrap.classList.contains("open");
+        closeAllPopups();
+        if (!wasOpen) wrap.classList.add("open");
+      }
+
+      function toggleDropdown(btn) {
+        const wrap = btn.parentElement;
+        const wasOpen = wrap.classList.contains("open");
+        closeAllPopups();
+        if (!wasOpen) wrap.classList.add("open");
+      }
+
+      function closeAllPopups() {
+        document.querySelectorAll(".menu-wrap.open, .dropdown-wrap.open").forEach(w => w.classList.remove("open"));
+      }
+
+      document.addEventListener("click", (e) => {
+        if (!e.target.closest(".menu-wrap") && !e.target.closest(".dropdown-wrap")) {
+          closeAllPopups();
+        }
+      });
+
+      async function copyKeyById(keyId, btn) {
+        const fullKey = keyDataMap.get(keyId);
+        if (!fullKey) {
+          showError("Key data not found");
+          return;
+        }
+        await copyToClipboard(fullKey, btn);
+      }
+
+      async function refreshKey(keyId, btn) {
+        const orig = btn.textContent;
+        btn.textContent = "...";
+        btn.disabled = true;
+        try {
+          await fetchJson(`/admin/api/keys/${keyId}/refresh`, { method: "POST" });
+          showSuccess("Key session refreshed");
+          setTimeout(loadAdminData, 500);
+        } catch (error) {
+          showError("Refresh failed: " + error.message);
+          btn.textContent = orig;
+          btn.disabled = false;
         }
       }
 
-      function copyKey(fullKey, btn) {
-        copyToClipboard(fullKey, btn);
+      async function revokeKey(keyId, btn) {
+        if (!confirmAction("Revoke this API key? The key will no longer be usable but is retained for audit.")) return;
+        try {
+          await fetchJson(`/admin/api/keys/${keyId}/revoke`, { method: "POST" });
+          showSuccess("Key revoked");
+          loadAdminData();
+        } catch (error) {
+          showError("Revoke failed: " + error.message);
+        }
+      }
+
+      async function deleteKey(keyId, btn) {
+        if (!confirmAction("Permanently delete this API key and its session? This cannot be undone.")) return;
+        try {
+          await fetchJson(`/admin/api/keys/${keyId}`, { method: "DELETE" });
+          showSuccess("Key deleted");
+          loadAdminData();
+        } catch (error) {
+          showError("Delete failed: " + error.message);
+        }
       }
 
       async function loadAdminData() {
@@ -195,33 +448,38 @@
           const accountsTable = document.getElementById("accounts-table");
           accountsTable.innerHTML = "";
           accountsData.accounts.forEach((account) => {
-            const status = calculateAccountStatus(account.session?.expiresAt);
+            // Derive account status from best key session
+            const bestExpiry = account.apiKeys
+              ?.filter(k => k.session?.expiresAt)
+              .map(k => k.session.expiresAt)
+              .sort()
+              .pop();
+            const status = calculateAccountStatus(bestExpiry);
+
             const apiKeyHtml =
               account.apiKeys && account.apiKeys.length > 0
-                ? account.apiKeys
-                    .map(
-                      (k) => `
-                  <div>
-                    ${keyCell(k.id, k.keyHash)}
-                    ${k.revokedAt ? '<span class="status-expired">(Revoked)</span>' : `<button onclick="revokeKey('${k.id}')">Revoke</button>`}
-                  </div>`,
-                    )
-                    .join("")
+                ? account.apiKeys.map((k) => buildKeyRow(k)).join("")
                 : "<em>None</em>";
+
             const row = document.createElement("tr");
             row.innerHTML = `
             <td>${account.providerUserName || "N/A"}</td>
             <td><code>${account.domainId || "N/A"}</code></td>
             <td>${account.provider}</td>
             <td class="${status.class}">${status.label}</td>
-            <td>
-              ${account.session ? formatRelativeTime(account.session.expiresAt) : "N/A"}
-            </td>
             <td>${apiKeyHtml}</td>
             <td>
-              <button onclick="viewAccount('${account.id}')">View</button>
-              <button onclick="forceRefresh('${account.id}')">Refresh</button>
-              <button onclick="deleteAccount('${account.id}')">Delete</button>
+              <div class="account-act-cell">
+                <button onclick="viewAccount('${account.id}')">View</button>
+                <div class="dropdown-wrap">
+                  <button class="dropdown-toggle" onclick="toggleDropdown(this)">&#8942;</button>
+                  <div class="dropdown-menu">
+                    <button onclick="forceRefresh('${account.id}')">Refresh All</button>
+                    <div class="sep"></div>
+                    <button class="danger-item" onclick="deleteAccount('${account.id}')">Delete Account</button>
+                  </div>
+                </div>
+              </div>
             </td>
           `;
             accountsTable.appendChild(row);
@@ -260,28 +518,12 @@
         window.location.href = "/";
       }
 
-      async function revokeKey(keyId) {
-        if (!confirmAction("Are you sure you want to revoke this API key?")) {
-          return;
-        }
-
-        try {
-          await fetchJson(`/admin/api/keys/${keyId}/revoke`, {
-            method: "POST",
-          });
-          showSuccess("API key revoked");
-          loadAdminData();
-        } catch (error) {
-          showError("Failed to revoke key: " + error.message);
-        }
-      }
-
       async function forceRefresh(accountId) {
         try {
           await fetchJson(`/admin/api/accounts/${accountId}/refresh`, {
             method: "POST",
           });
-          showSuccess("Force refresh initiated");
+          showSuccess("Force refresh initiated for all keys");
           setTimeout(loadAdminData, 1000);
         } catch (error) {
           showError("Failed to force refresh: " + error.message);
@@ -291,7 +533,7 @@
       async function deleteAccount(accountId) {
         if (
           !confirmAction(
-            "Are you sure you want to delete this account? This will also revoke all associated API keys.",
+            "Delete this account and all its API keys? This cannot be undone."
           )
         ) {
           return;
@@ -313,7 +555,7 @@
           const account = await fetchJson(`/admin/api/accounts/${accountId}`);
           const apiKeyDetails =
             account.apiKeys && account.apiKeys.length > 0
-              ? account.apiKeys.map((k) => keyCell(k.id, k.keyHash)).join("")
+              ? account.apiKeys.map((k) => buildKeyRow(k)).join("")
               : "<em>None</em>";
           const dl = document.getElementById("modal-details");
           dl.innerHTML = `
@@ -325,15 +567,7 @@
             <dt>Domain ID:</dt><dd>${account.domainId || "N/A"}</dd>
             <dt>Status:</dt><dd>${account.status || "N/A"}</dd>
             <dt>Default:</dt><dd>${account.isDefault ? "Yes" : "No"}</dd>
-            <dt>API Key:</dt><dd>${apiKeyDetails}</dd>
-            ${
-              account.session
-                ? `
-            <dt>Token Expires:</dt><dd>${formatTimestamp(account.session.expiresAt)} (${formatRelativeTime(account.session.expiresAt)})</dd>
-            <dt>Last Refreshed:</dt><dd>${account.session.lastRefreshedAt ? formatTimestamp(account.session.lastRefreshedAt) : "Never"}</dd>
-            `
-                : "<dt>Session:</dt><dd>No active session</dd>"
-            }
+            <dt>API Keys:</dt><dd>${apiKeyDetails}</dd>
           `;
           document.getElementById("account-modal").classList.add("active");
         } catch (error) {

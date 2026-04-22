@@ -35,7 +35,19 @@ function toggleApiKeyVisibility(element, fullKey, isMasked) {
  */
 async function copyToClipboard(text, button) {
   try {
-    await navigator.clipboard.writeText(text);
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      // Fallback for non-secure contexts (HTTP, non-localhost)
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
     const originalText = button.textContent;
     button.textContent = "Copied!";
     button.disabled = true;

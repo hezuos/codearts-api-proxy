@@ -7,7 +7,6 @@ import {
   stopHuaweiRefreshTask,
   setRefreshTaskEnabled,
 } from "./auth/huawei/refresh-task";
-import { loadPersistedSessions } from "./auth/huawei/session-store";
 import { loadAdminConfig } from "./auth/admin";
 import { config } from "./config";
 import { authenticateApiKey } from "./middleware/authenticate-api-key";
@@ -49,6 +48,8 @@ import {
   getAllAccounts,
   getAccountDetails,
   revokeApiKey,
+  deleteApiKey,
+  refreshApiKey,
   forceRefreshAccount,
   deleteAccount,
 } from "./routes/admin";
@@ -63,7 +64,6 @@ app.use(withRequestContext);
 
 loadPersistedAuthStore();
 bootstrapDefaultAuth(config.defaultApiKey);
-loadPersistedSessions();
 loadAdminConfig();
 
 app.get("/health", (_req, res) => {
@@ -131,6 +131,8 @@ app.get("/admin/api/users", requireAdminAuth, getAllUsers);
 app.get("/admin/api/accounts", requireAdminAuth, getAllAccounts);
 app.get("/admin/api/accounts/:id", requireAdminAuth, getAccountDetails);
 app.post("/admin/api/keys/:id/revoke", requireAdminAuth, revokeApiKey);
+app.delete("/admin/api/keys/:id", requireAdminAuth, deleteApiKey);
+app.post("/admin/api/keys/:id/refresh", requireAdminAuth, refreshApiKey);
 app.post(
   "/admin/api/accounts/:id/refresh",
   requireAdminAuth,

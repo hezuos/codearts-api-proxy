@@ -1,6 +1,6 @@
-import fs from "fs";
-import path from "path";
 import bcrypt from "bcryptjs";
+import { readPlaintextFile, writePlaintextFile } from "../store/file-store";
+import { adminPath } from "../store/paths";
 
 export interface AdminConfig {
   password_hash: string;
@@ -11,17 +11,6 @@ export interface AdminConfig {
 
 let adminConfig: AdminConfig | null = null;
 let adminPasswordFromEnv: string | null = null;
-
-function getAdminConfigPath(): string {
-  return path.resolve(process.cwd(), "data", "admin-config.json");
-}
-
-function ensureDataDir(): void {
-  const dataDir = path.dirname(getAdminConfigPath());
-  if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir, { recursive: true });
-  }
-}
 
 export function loadAdminConfig(): void {
   // Check environment variable first (highest priority)
@@ -34,25 +23,17 @@ export function loadAdminConfig(): void {
   }
 
   // Try to load from file
-  const configPath = getAdminConfigPath();
-  if (fs.existsSync(configPath)) {
-    try {
-      const raw = fs.readFileSync(configPath, "utf8");
-      adminConfig = JSON.parse(raw) as AdminConfig;
-      console.log(`[admin] Loaded admin config from ${configPath}`);
-    } catch (error) {
-      console.error(
-        `[admin] Failed to load admin config from ${configPath}:`,
-        error,
-      );
-      adminConfig = null;
-    }
+  const configPath = adminPath();
+  const loaded = readPlaintextFile<AdminConfig>(configPath);
+  if (loaded) {
+    adminConfig = loaded;
+    console.log(`[admin] Loaded admin config from ${configPath}`);
+  } else {
+    adminConfig = null;
   }
 }
 
 export function saveAdminConfig(password: string): void {
-  ensureDataDir();
-
   const passwordHash = bcrypt.hashSync(password, 12);
   const now = new Date().toISOString();
 
@@ -63,8 +44,8 @@ export function saveAdminConfig(password: string): void {
     source: "setup",
   };
 
-  const configPath = getAdminConfigPath();
-  fs.writeFileSync(configPath, JSON.stringify(adminConfig, null, 2), "utf8");
+  const configPath = adminPath();
+  writePlaintextFile(configPath, adminConfig);
   console.log(`[admin] Saved admin config to ${configPath}`);
 }
 
@@ -89,13 +70,9 @@ export function checkAdminPassword(password: string): boolean {
 export function updateLastLogin(): void {
   if (adminConfig !== null && adminConfig.source === "setup") {
     adminConfig.last_login = new Date().toISOString();
-    const configPath = getAdminConfigPath();
+    const configPath = adminPath();
     try {
-      fs.writeFileSync(
-        configPath,
-        JSON.stringify(adminConfig, null, 2),
-        "utf8",
-      );
+      writePlaintextFile(configPath, adminConfig);
     } catch (error) {
       console.error("[admin] Failed to update last_login:", error);
     }

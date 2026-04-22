@@ -235,7 +235,19 @@ function provisionLoginResult(
     status: "active",
   });
 
-  storeSession(accountId, {
+  // Issue a dedicated API key for this account (Key↔Session 1:1)
+  const rawKey = `sk-${randomUUID()}`;
+  const apiKeyObj = issueApiKey({
+    userId: flow.userId,
+    providerAccountId: accountId,
+    name:
+      result.userName ?? `huawei-${result.domainId?.slice(0, 8) ?? "account"}`,
+    rawKey,
+  });
+
+  // Store session bound to this key (1:1)
+  storeSession(apiKeyObj.id, {
+    keyId: apiKeyObj.id,
     providerAccountId: accountId,
     businessToken: result.businessToken,
     accessKey: result.credentials.accessKey,
@@ -244,16 +256,6 @@ function provisionLoginResult(
       : undefined,
     securityToken: result.credentials.securityToken,
     expiresAt: result.credentials.expiresAt,
-  });
-
-  // Issue a dedicated API key for this account
-  const rawKey = `sk-${randomUUID()}`;
-  issueApiKey({
-    userId: flow.userId,
-    providerAccountId: accountId,
-    name:
-      result.userName ?? `huawei-${result.domainId?.slice(0, 8) ?? "account"}`,
-    rawKey,
   });
 
   console.log(
