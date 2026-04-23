@@ -319,13 +319,14 @@ async function startHuaweiBrowserLogin(options = {}) {
       if (["completed", "failed", "expired"].includes(status.status)) {
         window.clearInterval(timer);
         LoginWindowManager.close();
+        let finalizeResult = null;
         if (status.status === "completed") {
-          await fetchJson(`/auth/huawei/browser/finalize/${result.ticket_id}`, {
+          finalizeResult = await fetchJson(`/auth/huawei/browser/finalize/${result.ticket_id}`, {
             method: "POST",
           });
         }
         if (typeof onComplete === "function") {
-          onComplete(status);
+          onComplete(status, finalizeResult);
         }
       }
     } catch (error) {

@@ -32,6 +32,7 @@ import {
   successPage,
   getAccountInfo,
   getAccountStatus,
+  getLoginResult,
   regenerateApiKey,
   refreshAccountToken,
   unbindAccount,
@@ -107,6 +108,7 @@ app.post(
 app.get("/success", requireUiAuth, successPage);
 app.get("/api/ui/account", requireUiAuth, getAccountInfo);
 app.get("/api/ui/status", requireUiAuth, getAccountStatus);
+app.get("/api/ui/login-result", requireUiAuth, getLoginResult);
 app.post("/api/ui/regenerate-key", requireUiAuth, regenerateApiKey);
 app.post(
   "/api/ui/accounts/:accountId/refresh",

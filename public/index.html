@@ -88,10 +88,11 @@ openai chat.completions.create \
             onStatusChange(status) {
               statusText.textContent = `Login status: ${status.status || "pending"}`;
             },
-            onComplete(status) {
+            onComplete(status, finalizeResult) {
               if (status.status === "completed") {
                 statusText.textContent = "Login complete. Redirecting...";
-                window.location.href = "/success";
+                const redirectUrl = finalizeResult?.redirect_url || "/success";
+                window.location.href = redirectUrl;
                 return;
               }
               statusText.textContent = `Login ${status.status}: ${status.error || "Please try again."}`;

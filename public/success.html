@@ -3,14 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Account Dashboard - CodeArts Agent Proxy</title>
+    <title>CodeArts Agent Proxy</title>
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
     <div class="container">
-      <h1>Account Dashboard</h1>
+      <h1 id="page-title">Account Dashboard</h1>
 
-      <div class="nav">
+      <div class="nav" id="dashboard-nav">
         <a href="/">Home</a>
         <a href="#" onclick="startBindAnotherAccount(); return false;">Bind Another Account</a>
       </div>
@@ -23,24 +23,17 @@
         <p>Loading account information...</p>
       </div>
 
-      <div id="content" class="hidden">
+      <!-- Login result mode: only the session just authenticated -->
+      <div id="login-result" class="hidden">
         <h2>Your API Key</h2>
         <div class="api-key">
           <span id="api-key-display"></span>
           <button id="show-btn" onclick="toggleKey()">Show</button>
           <button id="copy-btn" onclick="copyKey()">Copy</button>
-          <button onclick="regenerateKey()">Regenerate</button>
         </div>
 
-        <h2>Bound Accounts</h2>
-        <div id="accounts-list"></div>
-
-        <div id="no-accounts" class="hidden">
-          <p>
-            No accounts bound yet.
-            <a href="#" onclick="startBindAnotherAccount(); return false;">Bind an account</a>.
-          </p>
-        </div>
+        <h2>Account</h2>
+        <div id="account-info"></div>
 
         <h2>Usage Examples</h2>
 
@@ -71,20 +64,77 @@ response = client.chat.completions.create(
   }'</code></pre>
       </div>
 
+      <!-- Dashboard mode: all accounts -->
+      <div id="content" class="hidden">
+        <h2>Your API Key</h2>
+        <div class="api-key">
+          <span id="api-key-display-dash"></span>
+          <button id="show-btn-dash" onclick="toggleKeyDash()">Show</button>
+          <button id="copy-btn-dash" onclick="copyKeyDash()">Copy</button>
+          <button onclick="regenerateKey()">Regenerate</button>
+        </div>
+
+        <h2>Bound Accounts</h2>
+        <div id="accounts-list"></div>
+
+        <div id="no-accounts" class="hidden">
+          <p>
+            No accounts bound yet.
+            <a href="#" onclick="startBindAnotherAccount(); return false;">Bind an account</a>.
+          </p>
+        </div>
+
+        <h2>Usage Examples</h2>
+
+        <h3>Environment Variables</h3>
+        <pre><code>export OPENAI_API_KEY="<span id="api-key-env-dash"></span>"
+export OPENAI_BASE_URL="<span id="base-url-dash"></span>"</code></pre>
+
+        <h3>Python (OpenAI SDK)</h3>
+        <pre><code>from openai import OpenAI
+
+client = OpenAI(
+    api_key="<span id="api-key-python-dash"></span>",
+    base_url="<span id="base-url-python-dash"></span>"
+)
+
+response = client.chat.completions.create(
+    model="codearts-model",
+    messages=[{"role": "user", "content": "Hello!"}]
+)</code></pre>
+
+        <h3>cURL</h3>
+        <pre><code>curl <span id="base-url-curl-dash"></span>/v1/chat/completions \
+  -H "Authorization: Bearer <span id="api-key-curl-dash"></span>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "codearts-model",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'</code></pre>
+      </div>
+
       <div id="error" class="error-message hidden"></div>
     </div>
 
     <script src="/app.js"></script>
     <script>
+      const urlKeyId = new URLSearchParams(window.location.search).get("keyId");
+      const isLoginResultMode = !!urlKeyId;
+
       let fullApiKey = "";
       let isMasked = true;
 
-      async function loadDashboard() {
+      // ── Login result mode ──────────────────────────────────────────────
+
+      async function loadLoginResult() {
         try {
-          const response = await fetchJson("/api/ui/status");
+          const response = await fetchJson(`/api/ui/login-result?keyId=${encodeURIComponent(urlKeyId)}`);
 
           fullApiKey = response.apiKey;
           const maskedKey = maskApiKey(fullApiKey);
+
+          document.getElementById("page-title").textContent = "Login Successful";
+          document.getElementById("dashboard-nav").classList.add("hidden");
 
           document.getElementById("api-key-display").textContent = maskedKey;
           document.getElementById("api-key-env").textContent = fullApiKey;
@@ -95,6 +145,84 @@ response = client.chat.completions.create(
           document.getElementById("base-url").textContent = baseUrl;
           document.getElementById("base-url-python").textContent = baseUrl;
           document.getElementById("base-url-curl").textContent = baseUrl;
+
+          const accountInfo = document.getElementById("account-info");
+          if (response.account) {
+            const account = response.account;
+            const status = calculateAccountStatus(response.session?.expiresAt);
+            accountInfo.innerHTML = `
+              <div class="account-card">
+                <h3>${account.displayName || "Account"} ${account.isDefault ? '<span class="status-valid">(Default)</span>' : ""}</h3>
+                <dl class="account-info">
+                  <dt>Status:</dt>
+                  <dd class="${status.class}">${status.label}</dd>
+
+                  <dt>Provider:</dt>
+                  <dd>${account.provider}</dd>
+
+                  <dt>User Name:</dt>
+                  <dd>${account.providerUserName || "N/A"}</dd>
+
+                  <dt>Domain ID:</dt>
+                  <dd>${account.domainId || "N/A"}</dd>
+
+                  <dt>Account ID:</dt>
+                  <dd>${account.providerUserId || "N/A"}</dd>
+
+                  ${
+                    response.session
+                      ? `
+                    <dt>Token Expires:</dt>
+                    <dd>${formatTimestamp(response.session.expiresAt)} (${formatRelativeTime(response.session.expiresAt)})</dd>
+                    ${
+                      response.session.lastRefreshedAt
+                        ? `
+                    <dt>Last Refreshed:</dt>
+                    <dd>${formatTimestamp(response.session.lastRefreshedAt)}</dd>
+                    `
+                        : ""
+                    }
+                  `
+                      : ""
+                  }
+                </dl>
+              </div>
+            `;
+          } else {
+            accountInfo.innerHTML = '<p class="status-pending">Account information not available.</p>';
+          }
+
+          document.getElementById("loading").classList.add("hidden");
+          document.getElementById("login-result").classList.remove("hidden");
+        } catch (error) {
+          document.getElementById("loading").classList.add("hidden");
+          document.getElementById("error").textContent =
+            "Failed to load login result: " + error.message;
+          document.getElementById("error").classList.remove("hidden");
+        }
+      }
+
+      // ── Dashboard mode ─────────────────────────────────────────────────
+
+      let fullApiKeyDash = "";
+      let isMaskedDash = true;
+
+      async function loadDashboard() {
+        try {
+          const response = await fetchJson("/api/ui/status");
+
+          fullApiKeyDash = response.apiKey;
+          const maskedKey = maskApiKey(fullApiKeyDash);
+
+          document.getElementById("api-key-display-dash").textContent = maskedKey;
+          document.getElementById("api-key-env-dash").textContent = fullApiKeyDash;
+          document.getElementById("api-key-python-dash").textContent = fullApiKeyDash;
+          document.getElementById("api-key-curl-dash").textContent = fullApiKeyDash;
+
+          const baseUrl = window.location.origin;
+          document.getElementById("base-url-dash").textContent = baseUrl;
+          document.getElementById("base-url-python-dash").textContent = baseUrl;
+          document.getElementById("base-url-curl-dash").textContent = baseUrl;
 
           const accountsList = document.getElementById("accounts-list");
           const noAccounts = document.getElementById("no-accounts");
@@ -165,6 +293,8 @@ response = client.chat.completions.create(
         }
       }
 
+      // ── Shared key toggle/copy ─────────────────────────────────────────
+
       function toggleKey() {
         const display = document.getElementById("api-key-display");
         const btn = document.getElementById("show-btn");
@@ -184,6 +314,27 @@ response = client.chat.completions.create(
         copyToClipboard(fullApiKey, document.getElementById("copy-btn"));
       }
 
+      function toggleKeyDash() {
+        const display = document.getElementById("api-key-display-dash");
+        const btn = document.getElementById("show-btn-dash");
+
+        if (isMaskedDash) {
+          display.textContent = fullApiKeyDash;
+          btn.textContent = "Hide";
+          isMaskedDash = false;
+        } else {
+          display.textContent = maskApiKey(fullApiKeyDash);
+          btn.textContent = "Show";
+          isMaskedDash = true;
+        }
+      }
+
+      function copyKeyDash() {
+        copyToClipboard(fullApiKeyDash, document.getElementById("copy-btn-dash"));
+      }
+
+      // ── Dashboard actions ──────────────────────────────────────────────
+
       async function regenerateKey() {
         if (
           !confirmAction(
@@ -197,11 +348,11 @@ response = client.chat.completions.create(
           const response = await fetchJson("/api/ui/regenerate-key", {
             method: "POST",
           });
-          fullApiKey = response.apiKey;
-          document.getElementById("api-key-display").textContent =
-            maskApiKey(fullApiKey);
-          isMasked = true;
-          document.getElementById("show-btn").textContent = "Show";
+          fullApiKeyDash = response.apiKey;
+          document.getElementById("api-key-display-dash").textContent =
+            maskApiKey(fullApiKeyDash);
+          isMaskedDash = true;
+          document.getElementById("show-btn-dash").textContent = "Show";
           showSuccess("API key regenerated. Your old key is now invalid.");
         } catch (error) {
           showError("Failed to regenerate API key: " + error.message);
@@ -248,6 +399,8 @@ response = client.chat.completions.create(
         }
       }
 
+      // ── Bind another account ───────────────────────────────────────────
+
       async function startBindAnotherAccount() {
         const panel = document.getElementById("bind-panel");
         const status = document.getElementById("bind-status");
@@ -260,10 +413,15 @@ response = client.chat.completions.create(
             onStatusChange(update) {
               status.textContent = `Login status: ${update.status || "pending"}`;
             },
-            onComplete(update) {
+            onComplete(update, finalizeResult) {
               if (update.status === "completed") {
                 status.textContent = "Account bound. Refreshing page...";
-                loadDashboard();
+                const redirectUrl = finalizeResult?.redirect_url;
+                if (redirectUrl) {
+                  window.location.href = redirectUrl;
+                } else {
+                  loadDashboard();
+                }
                 return;
               }
               status.textContent = `Login ${update.status}: ${update.error || "Please try again."}`;
@@ -277,7 +435,13 @@ response = client.chat.completions.create(
         }
       }
 
-      loadDashboard();
+      // ── Init ───────────────────────────────────────────────────────────
+
+      if (isLoginResultMode) {
+        loadLoginResult();
+      } else {
+        loadDashboard();
+      }
     </script>
   </body>
 </html>

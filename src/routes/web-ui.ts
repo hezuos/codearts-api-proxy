@@ -10,6 +10,7 @@ import {
   listApiKeysByUser,
   getSessionByKeyId,
   setSession,
+  getApiKey,
 } from "../auth/store";
 import {
   getSession,
@@ -275,4 +276,56 @@ export function setDefaultAccount(req: Request, res: Response): void {
   }
 
   res.json({ success: true, account });
+}
+
+/**
+ * GET /api/ui/login-result?keyId=xxx - Get login result for a specific key
+ * Returns only the account + session info for the given key,
+ * not the full dashboard data.
+ */
+export function getLoginResult(req: Request, res: Response): void {
+  const auth = req.uiAuth;
+  if (!auth) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+
+  const keyId = req.query.keyId as string | undefined;
+  if (!keyId) {
+    res.status(400).json({ error: "Missing keyId parameter" });
+    return;
+  }
+
+  const apiKey = getApiKey(keyId);
+  if (!apiKey || apiKey.userId !== auth.userId) {
+    res.status(404).json({ error: "Key not found" });
+    return;
+  }
+
+  const session = getSessionByKeyId(keyId);
+  const account = apiKey.providerAccountId
+    ? getProviderAccount(apiKey.providerAccountId)
+    : null;
+
+  res.json({
+    apiKey: req.cookies.auth_key,
+    account: account
+      ? {
+          id: account.id,
+          provider: account.provider,
+          displayName: account.displayName,
+          providerUserName: account.providerUserName,
+          domainId: account.domainId,
+          providerUserId: account.providerUserId,
+          isDefault: account.isDefault,
+        }
+      : null,
+    session: session
+      ? {
+          expiresAt: session.expiresAt,
+          hasBusinessToken: !!session.businessToken,
+          lastRefreshedAt: session.lastRefreshedAt,
+        }
+      : null,
+  });
 }

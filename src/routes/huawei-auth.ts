@@ -42,6 +42,7 @@ interface LoginFlowRecord {
   error?: string;
   completedAt?: number;
   accountId?: string;
+  apiKeyId?: string;
   apiKey?: string;
 }
 
@@ -209,7 +210,7 @@ function createBrowserLoginFlow(userId: string, callbackPort: number): LoginFlow
 function provisionLoginResult(
   flow: LoginFlowRecord,
   result: HuaweiTicketExchangeResponse,
-): { accountId: string; apiKey: string } {
+): { accountId: string; apiKeyId: string; apiKey: string } {
   // Use domainId to generate a unique, stable accountId for each Huawei account
   const accountId = result.domainId
     ? `huawei-${result.domainId}`
@@ -262,7 +263,7 @@ function provisionLoginResult(
     `[huawei-auth] login session stored providerAccountId=${accountId} userId=${result.userId ?? "missing"} userName=${result.userName ?? "missing"} domainId=${result.domainId ?? "missing"} businessToken=${maskValue(result.businessToken)} accessKey=${maskValue(result.credentials.accessKey)} securityToken=${maskValue(result.credentials.securityToken)} expiresAt=${result.credentials.expiresAt ?? "missing"}`,
   );
 
-  return { accountId, apiKey: rawKey };
+  return { accountId, apiKeyId: apiKeyObj.id, apiKey: rawKey };
 }
 
 function startBrowserFlowExchange(
@@ -301,7 +302,7 @@ function startBrowserFlowExchange(
         identifier,
         redirect,
       };
-      const { accountId, apiKey } = provisionLoginResult(currentFlow, result);
+      const { accountId, apiKeyId, apiKey } = provisionLoginResult(currentFlow, result);
 
       loginFlows.set(flow.ticketId, {
         ...currentFlow,
@@ -311,6 +312,7 @@ function startBrowserFlowExchange(
         completedAt: Date.now(),
         error: undefined,
         accountId,
+        apiKeyId,
         apiKey,
       });
     } catch (error) {
@@ -428,7 +430,10 @@ export function finalizeBrowserHuaweiLogin(req: Request, res: Response): void {
 
   clearBrowserLoginTicketCookie(res);
   setAuthKeyCookie(res, flow.apiKey);
-  res.json({ success: true, redirect_url: "/success" });
+  const redirectUrl = flow.apiKeyId
+    ? `/success?keyId=${encodeURIComponent(flow.apiKeyId)}`
+    : "/success";
+  res.json({ success: true, redirect_url: redirectUrl });
 }
 
 export async function handleHuaweiCallback(
