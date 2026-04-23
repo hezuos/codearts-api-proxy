@@ -160,6 +160,16 @@ function setAuthKeyCookie(res: Response, apiKey: string): void {
   });
 }
 
+function setAuthKeyIdCookie(res: Response, apiKeyId: string): void {
+  const isProduction = process.env.NODE_ENV === "production";
+  res.cookie("auth_key_id", apiKeyId, {
+    httpOnly: false,
+    secure: isProduction,
+    sameSite: "lax",
+    maxAge: 30 * 24 * 60 * 60 * 1000,
+  });
+}
+
 function setBrowserLoginTicketCookie(res: Response, ticketId: string): void {
   const isProduction = process.env.NODE_ENV === "production";
   res.cookie("huawei_login_ticket", ticketId, {
@@ -430,6 +440,9 @@ export function finalizeBrowserHuaweiLogin(req: Request, res: Response): void {
 
   clearBrowserLoginTicketCookie(res);
   setAuthKeyCookie(res, flow.apiKey);
+  if (flow.apiKeyId) {
+    setAuthKeyIdCookie(res, flow.apiKeyId);
+  }
   const redirectUrl = flow.apiKeyId
     ? `/success?keyId=${encodeURIComponent(flow.apiKeyId)}`
     : "/success";

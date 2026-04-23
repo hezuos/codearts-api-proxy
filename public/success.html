@@ -3,28 +3,22 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>CodeArts Agent Proxy</title>
+    <title>Login Successful - CodeArts Agent Proxy</title>
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
     <div class="container">
-      <h1 id="page-title">Account Dashboard</h1>
+      <h1>Login Successful</h1>
 
-      <div class="nav" id="dashboard-nav">
+      <div class="nav">
         <a href="/">Home</a>
-        <a href="#" onclick="startBindAnotherAccount(); return false;">Bind Another Account</a>
-      </div>
-
-      <div id="bind-panel" class="hidden login-panel">
-        <p id="bind-status">Preparing Huawei login...</p>
       </div>
 
       <div id="loading" class="loading">
-        <p>Loading account information...</p>
+        <p>Loading session information...</p>
       </div>
 
-      <!-- Login result mode: only the session just authenticated -->
-      <div id="login-result" class="hidden">
+      <div id="content" class="hidden">
         <h2>Your API Key</h2>
         <div class="api-key">
           <span id="api-key-display"></span>
@@ -64,77 +58,31 @@ response = client.chat.completions.create(
   }'</code></pre>
       </div>
 
-      <!-- Dashboard mode: all accounts -->
-      <div id="content" class="hidden">
-        <h2>Your API Key</h2>
-        <div class="api-key">
-          <span id="api-key-display-dash"></span>
-          <button id="show-btn-dash" onclick="toggleKeyDash()">Show</button>
-          <button id="copy-btn-dash" onclick="copyKeyDash()">Copy</button>
-          <button onclick="regenerateKey()">Regenerate</button>
-        </div>
-
-        <h2>Bound Accounts</h2>
-        <div id="accounts-list"></div>
-
-        <div id="no-accounts" class="hidden">
-          <p>
-            No accounts bound yet.
-            <a href="#" onclick="startBindAnotherAccount(); return false;">Bind an account</a>.
-          </p>
-        </div>
-
-        <h2>Usage Examples</h2>
-
-        <h3>Environment Variables</h3>
-        <pre><code>export OPENAI_API_KEY="<span id="api-key-env-dash"></span>"
-export OPENAI_BASE_URL="<span id="base-url-dash"></span>"</code></pre>
-
-        <h3>Python (OpenAI SDK)</h3>
-        <pre><code>from openai import OpenAI
-
-client = OpenAI(
-    api_key="<span id="api-key-python-dash"></span>",
-    base_url="<span id="base-url-python-dash"></span>"
-)
-
-response = client.chat.completions.create(
-    model="codearts-model",
-    messages=[{"role": "user", "content": "Hello!"}]
-)</code></pre>
-
-        <h3>cURL</h3>
-        <pre><code>curl <span id="base-url-curl-dash"></span>/v1/chat/completions \
-  -H "Authorization: Bearer <span id="api-key-curl-dash"></span>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "codearts-model",
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }'</code></pre>
-      </div>
-
       <div id="error" class="error-message hidden"></div>
     </div>
 
     <script src="/app.js"></script>
     <script>
       const urlKeyId = new URLSearchParams(window.location.search).get("keyId");
-      const isLoginResultMode = !!urlKeyId;
+
+      function getCookieKeyId() {
+        const match = document.cookie.match(/(?:^|;\s*)auth_key_id=([^;]+)/);
+        return match ? decodeURIComponent(match[1]) : "";
+      }
 
       let fullApiKey = "";
       let isMasked = true;
 
-      // ── Login result mode ──────────────────────────────────────────────
-
       async function loadLoginResult() {
         try {
-          const response = await fetchJson(`/api/ui/login-result?keyId=${encodeURIComponent(urlKeyId)}`);
+          const keyId = urlKeyId || getCookieKeyId();
+          const url = keyId
+            ? `/api/ui/login-result?keyId=${encodeURIComponent(keyId)}`
+            : "/api/ui/login-result";
+          const response = await fetchJson(url);
 
           fullApiKey = response.apiKey;
           const maskedKey = maskApiKey(fullApiKey);
-
-          document.getElementById("page-title").textContent = "Login Successful";
-          document.getElementById("dashboard-nav").classList.add("hidden");
 
           document.getElementById("api-key-display").textContent = maskedKey;
           document.getElementById("api-key-env").textContent = fullApiKey;
@@ -193,107 +141,14 @@ response = client.chat.completions.create(
           }
 
           document.getElementById("loading").classList.add("hidden");
-          document.getElementById("login-result").classList.remove("hidden");
-        } catch (error) {
-          document.getElementById("loading").classList.add("hidden");
-          document.getElementById("error").textContent =
-            "Failed to load login result: " + error.message;
-          document.getElementById("error").classList.remove("hidden");
-        }
-      }
-
-      // ── Dashboard mode ─────────────────────────────────────────────────
-
-      let fullApiKeyDash = "";
-      let isMaskedDash = true;
-
-      async function loadDashboard() {
-        try {
-          const response = await fetchJson("/api/ui/status");
-
-          fullApiKeyDash = response.apiKey;
-          const maskedKey = maskApiKey(fullApiKeyDash);
-
-          document.getElementById("api-key-display-dash").textContent = maskedKey;
-          document.getElementById("api-key-env-dash").textContent = fullApiKeyDash;
-          document.getElementById("api-key-python-dash").textContent = fullApiKeyDash;
-          document.getElementById("api-key-curl-dash").textContent = fullApiKeyDash;
-
-          const baseUrl = window.location.origin;
-          document.getElementById("base-url-dash").textContent = baseUrl;
-          document.getElementById("base-url-python-dash").textContent = baseUrl;
-          document.getElementById("base-url-curl-dash").textContent = baseUrl;
-
-          const accountsList = document.getElementById("accounts-list");
-          const noAccounts = document.getElementById("no-accounts");
-
-          if (response.accounts && response.accounts.length > 0) {
-            accountsList.innerHTML = "";
-            noAccounts.classList.add("hidden");
-
-            response.accounts.forEach((account) => {
-              const status = calculateAccountStatus(account.session?.expiresAt);
-              const isLastAccount = response.accounts.length === 1;
-              const card = document.createElement("div");
-              card.className = "account-card";
-              card.innerHTML = `
-              <h3>${account.displayName || "Account"} ${account.isDefault ? '<span class="status-valid">(Default)</span>' : ""}</h3>
-              <dl class="account-info">
-                <dt>Status:</dt>
-                <dd class="${status.class}">${status.label}</dd>
-
-                <dt>Provider:</dt>
-                <dd>${account.provider}</dd>
-
-                <dt>User Name:</dt>
-                <dd>${account.providerUserName || "N/A"}</dd>
-
-                <dt>Domain ID:</dt>
-                <dd>${account.domainId || "N/A"}</dd>
-
-                <dt>Account ID:</dt>
-                <dd>${account.providerUserId || "N/A"}</dd>
-
-                ${
-                  account.session
-                    ? `
-                  <dt>Token Expires:</dt>
-                  <dd>${formatTimestamp(account.session.expiresAt)} (${formatRelativeTime(account.session.expiresAt)})</dd>
-                  ${
-                    account.session.lastRefreshedAt
-                      ? `
-                  <dt>Last Refreshed:</dt>
-                  <dd>${formatTimestamp(account.session.lastRefreshedAt)}</dd>
-                  `
-                      : ""
-                  }
-                `
-                    : ""
-                }
-              </dl>
-              <div>
-                <button onclick="refreshAccount('${account.id}')">Refresh</button>
-                <button class="danger" onclick="unbindAccount('${account.id}')" ${isLastAccount ? 'disabled title="Cannot unbind the last account"' : ""}>Unbind</button>
-                ${!account.isDefault ? `<button onclick="setDefault('${account.id}')">Set as Default</button>` : ""}
-              </div>
-            `;
-              accountsList.appendChild(card);
-            });
-          } else {
-            noAccounts.classList.remove("hidden");
-          }
-
-          document.getElementById("loading").classList.add("hidden");
           document.getElementById("content").classList.remove("hidden");
         } catch (error) {
           document.getElementById("loading").classList.add("hidden");
           document.getElementById("error").textContent =
-            "Failed to load account information: " + error.message;
+            "Failed to load session information: " + error.message;
           document.getElementById("error").classList.remove("hidden");
         }
       }
-
-      // ── Shared key toggle/copy ─────────────────────────────────────────
 
       function toggleKey() {
         const display = document.getElementById("api-key-display");
@@ -314,134 +169,7 @@ response = client.chat.completions.create(
         copyToClipboard(fullApiKey, document.getElementById("copy-btn"));
       }
 
-      function toggleKeyDash() {
-        const display = document.getElementById("api-key-display-dash");
-        const btn = document.getElementById("show-btn-dash");
-
-        if (isMaskedDash) {
-          display.textContent = fullApiKeyDash;
-          btn.textContent = "Hide";
-          isMaskedDash = false;
-        } else {
-          display.textContent = maskApiKey(fullApiKeyDash);
-          btn.textContent = "Show";
-          isMaskedDash = true;
-        }
-      }
-
-      function copyKeyDash() {
-        copyToClipboard(fullApiKeyDash, document.getElementById("copy-btn-dash"));
-      }
-
-      // ── Dashboard actions ──────────────────────────────────────────────
-
-      async function regenerateKey() {
-        if (
-          !confirmAction(
-            "Are you sure you want to regenerate your API key? Your current key will stop working immediately.",
-          )
-        ) {
-          return;
-        }
-
-        try {
-          const response = await fetchJson("/api/ui/regenerate-key", {
-            method: "POST",
-          });
-          fullApiKeyDash = response.apiKey;
-          document.getElementById("api-key-display-dash").textContent =
-            maskApiKey(fullApiKeyDash);
-          isMaskedDash = true;
-          document.getElementById("show-btn-dash").textContent = "Show";
-          showSuccess("API key regenerated. Your old key is now invalid.");
-        } catch (error) {
-          showError("Failed to regenerate API key: " + error.message);
-        }
-      }
-
-      async function refreshAccount(accountId) {
-        try {
-          await fetchJson(`/api/ui/accounts/${accountId}/refresh`, {
-            method: "POST",
-          });
-          showSuccess("Account refresh initiated");
-          setTimeout(loadDashboard, 1000);
-        } catch (error) {
-          showError("Failed to refresh account: " + error.message);
-        }
-      }
-
-      async function unbindAccount(accountId) {
-        if (!confirmAction("Are you sure you want to unbind this account?")) {
-          return;
-        }
-
-        try {
-          await fetchJson(`/api/ui/accounts/${accountId}`, {
-            method: "DELETE",
-          });
-          showSuccess("Account unbound successfully");
-          loadDashboard();
-        } catch (error) {
-          showError("Failed to unbind account: " + error.message);
-        }
-      }
-
-      async function setDefault(accountId) {
-        try {
-          await fetchJson(`/api/ui/accounts/${accountId}/default`, {
-            method: "POST",
-          });
-          showSuccess("Default account updated");
-          loadDashboard();
-        } catch (error) {
-          showError("Failed to set default account: " + error.message);
-        }
-      }
-
-      // ── Bind another account ───────────────────────────────────────────
-
-      async function startBindAnotherAccount() {
-        const panel = document.getElementById("bind-panel");
-        const status = document.getElementById("bind-status");
-        panel.classList.remove("hidden");
-        status.textContent = "Opening Huawei login popup...";
-
-        try {
-          await startHuaweiBrowserLogin({
-            launchMode: "popup",
-            onStatusChange(update) {
-              status.textContent = `Login status: ${update.status || "pending"}`;
-            },
-            onComplete(update, finalizeResult) {
-              if (update.status === "completed") {
-                status.textContent = "Account bound. Refreshing page...";
-                const redirectUrl = finalizeResult?.redirect_url;
-                if (redirectUrl) {
-                  window.location.href = redirectUrl;
-                } else {
-                  loadDashboard();
-                }
-                return;
-              }
-              status.textContent = `Login ${update.status}: ${update.error || "Please try again."}`;
-            },
-            onError(error) {
-              status.textContent = `Login failed: ${error.message}`;
-            },
-          });
-        } catch (error) {
-          status.textContent = `Login failed: ${error.message}`;
-        }
-      }
-
-      // ── Init ───────────────────────────────────────────────────────────
-
-      if (isLoginResultMode) {
-        loadLoginResult();
-      } else {
-        loadDashboard();
-      }
+      loadLoginResult();
     </script>
   </body>
 </html>
