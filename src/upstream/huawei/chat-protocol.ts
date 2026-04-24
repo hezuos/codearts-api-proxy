@@ -2,6 +2,9 @@
  * CodeArts chat protocol types and SSE parser.
  */
 
+import { ProtocolError } from "../../utils/errors";
+import { logger } from "../../utils/logger";
+
 // ---------------------------------------------------------------------------
 // CodeArts upstream types
 // ---------------------------------------------------------------------------
@@ -44,6 +47,7 @@ export interface CodeArtsRawToolCall {
 
 export async function* parseSSE(
   stream: AsyncIterable<string>,
+  traceId?: string,
 ): AsyncGenerator<CodeArtsSSEEvent> {
   for await (const line of stream) {
     if (!line.startsWith("data:")) continue;
@@ -52,7 +56,9 @@ export async function* parseSSE(
     try {
       yield JSON.parse(json) as CodeArtsSSEEvent;
     } catch {
-      // ignore malformed JSON
+      const err = new ProtocolError(`Malformed SSE data: ${json.slice(0, 200)}`, json, traceId);
+      logger.withTrace(traceId ?? "unknown").warn("Malformed SSE data ignored", { rawData: json.slice(0, 200) });
+      yield { error_code: "PROTOCOL_ERROR", error_msg: err.message } as CodeArtsSSEEvent;
     }
   }
 }

@@ -1,5 +1,6 @@
 import { getSessionByKeyId, setSession, getAllSessions } from "../../store/hierarchical-store";
 import { refreshHuaweiSession, type RefreshableHuaweiSession } from "./refresh";
+import { logger } from "../../utils/logger";
 
 export interface StoredHuaweiSession {
   keyId: string;
@@ -46,7 +47,7 @@ export async function refreshStoredSession(
     !stored.secretKeyCiphertext ||
     !stored.securityToken
   ) {
-    console.warn(
+    logger.warn(
       `Session for key ${keyId} missing refreshable credentials`,
     );
     return stored;
@@ -61,7 +62,7 @@ export async function refreshStoredSession(
   };
 
   const result = await refreshHuaweiSession(refreshable);
-  console.log(`Refresh result for key ${keyId}:`, result.raw);
+  logger.info(`Refresh result for key ${keyId}`, { result: result.raw as Record<string, unknown> });
 
   const payload = result.raw as Record<string, unknown>;
   const resultPayload =
@@ -116,9 +117,9 @@ export function logSessionCacheSummary(): void {
     const remainingMin = Number.isNaN(expiresAt)
       ? "unknown"
       : `${Math.round((expiresAt - now) / 60_000)}min`;
-    console.log(
+    logger.info(
       `  session[key=${keyId.slice(0, 8)}...]: AK=${session.accessKey ? "yes" : "no"} expires=${remainingMin}`,
     );
   }
-  console.log(`Session cache total: ${allSessions.size} key sessions`);
+  logger.info(`Session cache total: ${allSessions.size} key sessions`);
 }

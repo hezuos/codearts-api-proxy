@@ -5,6 +5,7 @@ import {
   isAdminConfigured,
   updateLastLogin,
 } from "../auth/admin";
+import { logger } from "../utils/logger";
 import {
   setAdminSession,
   clearAdminSession,
@@ -236,7 +237,7 @@ export function deleteApiKey(req: Request, res: Response): void {
   }
 
   deleteStoreKey(loc.userId, loc.accountId, keyId);
-  console.log(`[admin] Key deleted: ${keyId}`);
+  logger.info(`[admin] Key deleted: ${keyId}`);
   res.json({ success: true, keyId });
 }
 
@@ -347,7 +348,7 @@ export function deleteAccount(req: Request, res: Response): void {
     return;
   }
 
-  console.log(
+  logger.info(
     `[admin] Account deleted: ${accountId} (user: ${owner.userId})`,
   );
 

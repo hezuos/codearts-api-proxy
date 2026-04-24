@@ -6,6 +6,7 @@ import { storeSession } from "../auth/huawei/session-store";
 import { config, isProduction } from "../config";
 import { getRequestAuth } from "../middleware/authenticate-api-key";
 import { getTraceId } from "../middleware/request-context";
+import { logger } from "../utils/logger";
 import {
   getDefaultUser,
   validateApiKey,
@@ -254,7 +255,7 @@ function provisionLoginResult(
     expiresAt: result.credentials.expiresAt,
   });
 
-  console.log(
+  logger.info(
     `[huawei-auth] login session stored providerAccountId=${accountId} userId=${result.userId ?? "missing"} userName=${result.userName ?? "missing"} domainId=${result.domainId ?? "missing"} businessToken=${maskValue(result.businessToken)} accessKey=${maskValue(result.credentials.accessKey)} securityToken=${maskValue(result.credentials.securityToken)} expiresAt=${result.credentials.expiresAt ?? "missing"}`,
   );
 
@@ -311,7 +312,7 @@ function startBrowserFlowExchange(
         apiKey,
       });
     } catch (error) {
-      console.error("[huawei-auth] background authentication failed:", error);
+      logger.error("[huawei-auth] background authentication failed", { error: error instanceof Error ? error.message : String(error) });
       const currentFlow = getBrowserLoginFlow(flow.ticketId) ?? flow;
       loginFlows.set(flow.ticketId, {
         ...currentFlow,
@@ -343,7 +344,7 @@ export function initiateHuaweiLogin(req: Request, res: Response): void {
     kind: "api",
   });
 
-  console.log(
+  logger.info(
     `[${getTraceId(req)}] Created Huawei login flow for user ${auth.userId}`,
   );
 
@@ -369,7 +370,7 @@ export function authorizeHuaweiLogin(req: Request, res: Response): void {
   const flow = createBrowserLoginFlow(userId, callbackPort);
   setBrowserLoginTicketCookie(res, flow.ticketId);
 
-  console.log(
+  logger.info(
     `[huawei-auth] browser authorize start ticketId=${maskValue(flow.ticketId)} callbackPort=${callbackPort}`,
   );
 
@@ -473,7 +474,7 @@ export async function handleHuaweiCallback(
       return;
     }
 
-    console.log(
+    logger.info(
       `[huawei-auth] callback received ticketId=${maskValue(browserFlow.ticketId)} identifier=${maskValue(identifier)} redirect=${redirect ?? "missing"}`,
     );
 
@@ -490,11 +491,11 @@ export async function handleHuaweiCallback(
   }
 
   if (!preferredTicketId) {
-    console.warn(
+    logger.warn(
       `[huawei-auth] callback received without correlated ticket identifier=${maskValue(identifier)} redirect=${redirect ?? "missing"}`,
     );
   } else if (!browserFlow) {
-    console.warn(
+    logger.warn(
       `[huawei-auth] callback ticket not found or not browser ticketId=${maskValue(preferredTicketId)} identifier=${maskValue(identifier)}`,
     );
   }
@@ -505,7 +506,7 @@ export async function handleHuaweiCallback(
     return;
   }
 
-  console.log(
+  logger.info(
     `[huawei-auth] callback received api ticketId=${maskValue(apiFlow.ticketId)} identifier=${maskValue(identifier)} redirect=${redirect ?? "missing"}`,
   );
 

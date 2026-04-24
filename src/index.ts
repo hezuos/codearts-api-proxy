@@ -57,6 +57,7 @@ import {
   deleteAccount,
 } from "./routes/admin";
 import { createOpenAIError } from "./utils/openai-error";
+import { logger } from "./utils/logger";
 
 const app = express();
 
@@ -199,7 +200,7 @@ setRefreshTaskEnabled(config.enableRefreshTask);
 startHuaweiRefreshTask();
 
 const server = app.listen(config.port, () => {
-  console.log(`CodeArts Agent Proxy listening on :${config.port}`);
+  logger.info(`CodeArts Agent Proxy listening on :${config.port}`);
 });
 
 // ---------------------------------------------------------------------------
@@ -207,10 +208,10 @@ const server = app.listen(config.port, () => {
 // ---------------------------------------------------------------------------
 
 function shutdown(signal: string): void {
-  console.log(`\n${signal} received — shutting down...`);
+  logger.info(`${signal} received — shutting down...`);
   stopHuaweiRefreshTask();
   server.close(() => {
-    console.log("HTTP server closed.");
+    logger.info("HTTP server closed.");
     process.exit(0);
   });
   // Force exit after 5 seconds if server doesn't close

@@ -1,6 +1,7 @@
 import https from "https";
 import { config } from "../../config";
 import { maskValue } from "../../utils/mask";
+import { logger } from "../../utils/logger";
 
 export interface HuaweiTicketExchangeRequest {
   ticketId: string;
@@ -178,11 +179,11 @@ export async function waitForHuaweiTicketExchange(
 
   for (let attempt = 0; attempt <= 60; attempt += 1) {
     try {
-      console.log(
+      logger.info(
         `[huawei-ticket] polling /v2/login/ticket attempt=${attempt + 1} ticketId=${maskValue(request.ticketId)} identifier=${maskValue(request.identifier)}`,
       );
       const result = await exchangeHuaweiTicket(request);
-      console.log(
+      logger.info(
         `[huawei-ticket] exchange success attempt=${attempt + 1} userId=${result.userId ?? "missing"} userName=${result.userName ?? "missing"} domainId=${result.domainId ?? "missing"} businessToken=${maskValue(result.businessToken)} accessKey=${maskValue(result.credentials.accessKey)} securityToken=${maskValue(result.credentials.securityToken)} expiresAt=${result.credentials.expiresAt ?? "missing"}`,
       );
       return result;
@@ -192,7 +193,7 @@ export async function waitForHuaweiTicketExchange(
           const err = error as Error & { status?: number; bodyText?: string };
           const status = err.status;
           const bodyText = err.bodyText ?? "unknown";
-          console.error(
+          logger.error(
             `[huawei-ticket] exchange failed terminal status=${status} attempt=${attempt + 1} body=${bodyText}`,
           );
         }
@@ -201,7 +202,7 @@ export async function waitForHuaweiTicketExchange(
 
       const err = error as Error & { bodyText?: string };
       const bodyText = err.bodyText ?? "unknown";
-      console.log(
+      logger.info(
         `[huawei-ticket] exchange pending attempt=${attempt + 1} body=${bodyText}`,
       );
       lastError = new Error(

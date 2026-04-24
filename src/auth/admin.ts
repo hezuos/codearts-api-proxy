@@ -1,6 +1,7 @@
 import bcrypt from "bcryptjs";
 import { readPlaintextFile, writePlaintextFile } from "../store/file-store";
 import { adminPath } from "../store/paths";
+import { logger } from "../utils/logger";
 
 export interface AdminConfig {
   password_hash: string;
@@ -16,9 +17,7 @@ export function loadAdminConfig(): void {
   // Check environment variable first (highest priority)
   if (process.env.ADMIN_PASSWORD) {
     adminPasswordFromEnv = process.env.ADMIN_PASSWORD;
-    console.log(
-      "[admin] Using admin password from ADMIN_PASSWORD environment variable",
-    );
+    logger.info("Using admin password from ADMIN_PASSWORD environment variable");
     return;
   }
 
@@ -27,7 +26,7 @@ export function loadAdminConfig(): void {
   const loaded = readPlaintextFile<AdminConfig>(configPath);
   if (loaded) {
     adminConfig = loaded;
-    console.log(`[admin] Loaded admin config from ${configPath}`);
+    logger.info("Loaded admin config", { path: configPath });
   } else {
     adminConfig = null;
   }
@@ -46,7 +45,7 @@ export function saveAdminConfig(password: string): void {
 
   const configPath = adminPath();
   writePlaintextFile(configPath, adminConfig);
-  console.log(`[admin] Saved admin config to ${configPath}`);
+  logger.info("Saved admin config", { path: configPath });
 }
 
 export function isAdminConfigured(): boolean {
@@ -74,7 +73,7 @@ export function updateLastLogin(): void {
     try {
       writePlaintextFile(configPath, adminConfig);
     } catch (error) {
-      console.error("[admin] Failed to update last_login:", error);
+      logger.error("Failed to update last_login", { error: error instanceof Error ? error.message : String(error) });
     }
   }
 }

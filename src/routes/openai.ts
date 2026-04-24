@@ -12,6 +12,7 @@ import {
   streamHuaweiChatToResponse,
 } from "../upstream/huawei/chat";
 import { UpstreamAuthError } from "../utils/errors";
+import { logger } from "../utils/logger";
 import {
   getModelList,
   invalidateCache,
@@ -58,11 +59,9 @@ export async function listModels(req: Request, res: Response): Promise<void> {
     const models = await getModelList(accountId, session, traceId, forceRefresh);
     res.json(buildModelsResponse(models));
   } catch (error) {
-    // Fallback: return static models on any error
-    console.error(
-      `[${traceId}] Model list fetch failed, returning static models:`,
-      error instanceof Error ? error.message : error,
-    );
+    logger.withTrace(traceId).error("Model list fetch failed, returning static models", {
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.json(buildModelsResponse());
   }
 }
@@ -92,6 +91,7 @@ export function createChatCompletion(req: Request, res: Response): void {
   }
 
   const traceId = getTraceId(req);
+  const log = logger.withTrace(traceId);
   const body = req.body as OpenAIChatCompletionRequest;
 
   // ── Incoming request log ──────────────────────────────────────────────────
@@ -106,38 +106,18 @@ export function createChatCompletion(req: Request, res: Response): void {
           ? `[tool_calls count=${lastMsg.tool_calls.length}]`
           : "(empty)";
 
-  console.log(
-    `[${traceId}] ── INCOMING REQUEST ──────────────────────────────────`,
-  );
-  console.log(`[${traceId}]   model          : ${body.model}`);
-  console.log(`[${traceId}]   stream         : ${!!body.stream}`);
-  console.log(`[${traceId}]   provider_account: ${accountId}`);
-  console.log(`[${traceId}]   messages.count : ${msgCount}`);
-  console.log(
-    `[${traceId}]   last_message   : [${lastMsg?.role}] ${lastMsgPreview}`,
-  );
-  if (body.codearts) {
-    console.log(
-      `[${traceId}]   codearts.chat_id          : ${body.codearts.chat_id ?? "(none)"}`,
-    );
-    console.log(
-      `[${traceId}]   codearts.parent_message_id: ${body.codearts.parent_message_id ?? "(none)"}`,
-    );
-    if (body.codearts.tool_results?.length) {
-      console.log(
-        `[${traceId}]   codearts.tool_results.count: ${body.codearts.tool_results.length}`,
-      );
-    }
-    if (body.codearts.sub_agent) {
-      console.log(
-        `[${traceId}]   codearts.sub_agent: type=${body.codearts.sub_agent.type}`,
-      );
-    }
-  }
-  console.log(`[${traceId}]   body (full):\n${JSON.stringify(req.body)}`);
-  console.log(
-    `[${traceId}] ──────────────────────────────────────────────────────`,
-  );
+  log.info("INCOMING REQUEST", {
+    model: body.model,
+    stream: !!body.stream,
+    provider_account: accountId,
+    messagesCount: msgCount,
+    lastMessage: `[${lastMsg?.role}] ${lastMsgPreview}`,
+    codearts_chat_id: body.codearts?.chat_id ?? "(none)",
+    codearts_parent_message_id: body.codearts?.parent_message_id ?? "(none)",
+    codearts_tool_results_count: body.codearts?.tool_results?.length ?? 0,
+    codearts_sub_agent_type: body.codearts?.sub_agent?.type,
+  });
+  log.debug("Incoming body (full)", { body: req.body });
 
   if (req.body.stream) {
     void handleStreamingRequest(body, auth.apiKeyId, traceId, res);
@@ -156,26 +136,21 @@ async function handleStreamingRequest(
   traceId: string,
   res: Response,
 ): Promise<void> {
+  const log = logger.withTrace(traceId);
   const auth = getRequestAuth(res.req as Request);
   const session = auth.session;
   try {
     await streamHuaweiChatToResponse(request, session, traceId, res);
   } catch (error) {
     if (error instanceof UpstreamAuthError && !res.headersSent) {
-      // Attempt to refresh credentials and retry once
-      console.log(
-        `[${traceId}] Auth error (${error.httpStatus}), refreshing credentials...`,
-      );
+      log.info("Auth error, refreshing credentials", { httpStatus: error.httpStatus });
       const refreshed = await tryRefreshSession(keyId, traceId);
       if (refreshed) {
         try {
           await streamHuaweiChatToResponse(request, refreshed, traceId, res);
           return;
         } catch (retryError) {
-          console.error(
-            `[${traceId}] Retry after refresh also failed:`,
-            retryError,
-          );
+          log.error("Retry after refresh also failed", { error: retryError instanceof Error ? retryError.message : String(retryError) });
           sendErrorResponse(res, retryError, request.model);
           return;
         }
@@ -191,6 +166,7 @@ async function handleNonStreamingRequest(
   traceId: string,
   res: Response,
 ): Promise<void> {
+  const log = logger.withTrace(traceId);
   const auth = getRequestAuth(res.req as Request);
   const session = auth.session;
   try {
@@ -198,9 +174,7 @@ async function handleNonStreamingRequest(
     res.json(response);
   } catch (error) {
     if (error instanceof UpstreamAuthError) {
-      console.log(
-        `[${traceId}] Auth error (${error.httpStatus}), refreshing credentials...`,
-      );
+      log.info("Auth error, refreshing credentials", { httpStatus: error.httpStatus });
       const refreshed = await tryRefreshSession(keyId, traceId);
       if (refreshed) {
         try {
@@ -212,10 +186,7 @@ async function handleNonStreamingRequest(
           res.json(response);
           return;
         } catch (retryError) {
-          console.error(
-            `[${traceId}] Retry after refresh also failed:`,
-            retryError,
-          );
+          log.error("Retry after refresh also failed", { error: retryError instanceof Error ? retryError.message : String(retryError) });
           sendErrorResponse(res, retryError, request.model);
           return;
         }
@@ -229,16 +200,17 @@ async function tryRefreshSession(
   keyId: string,
   traceId: string,
 ): Promise<StoredHuaweiSession | undefined> {
+  const log = logger.withTrace(traceId);
   try {
     const refreshed = await refreshStoredSession(keyId);
     if (refreshed?.accessKey && refreshed?.secretKeyCiphertext) {
-      console.log(`[${traceId}] Credentials refreshed successfully`);
+      log.info("Credentials refreshed successfully");
       return refreshed;
     }
-    console.warn(`[${traceId}] Refresh returned incomplete session`);
+    log.warn("Refresh returned incomplete session");
     return undefined;
   } catch (refreshError) {
-    console.error(`[${traceId}] Credential refresh failed:`, refreshError);
+    log.error("Credential refresh failed", { error: refreshError instanceof Error ? refreshError.message : String(refreshError) });
     return undefined;
   }
 }

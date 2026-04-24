@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { createHash } from "crypto";
+import { logger } from "../utils/logger";
 import type { User } from "../db/models/user";
 import type { ApiKey } from "../db/models/api-key";
 import type { ProviderAccount } from "../db/models/provider-account";
@@ -388,9 +389,7 @@ export function loadAllEntities(): void {
     }
   }
 
-  console.log(
-    `Loaded hierarchical store: users=${users.size} accounts=${providerAccounts.size} keys=${apiKeys.size} sessions=${sessions.size}`,
-  );
+  logger.info("Loaded hierarchical store", { users: users.size, accounts: providerAccounts.size, keys: apiKeys.size, sessions: sessions.size });
 }
 
 // ---------------------------------------------------------------------------

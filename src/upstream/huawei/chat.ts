@@ -1,10 +1,5 @@
 /**
  * Huawei CodeArts Agent chat upstream — non-streaming handler + public re-exports.
- *
- * The streaming handler lives in chat-stream.ts.
- * Request body construction lives in chat-request.ts.
- * Message/tool translation lives in chat-translate.ts.
- * Protocol types + SSE parser live in chat-protocol.ts.
  */
 
 import { randomUUID } from "crypto";
@@ -12,6 +7,7 @@ import { config } from "../../config";
 import { getCredentials } from "../../auth/huawei/credentials";
 import type { StoredHuaweiSession } from "../../auth/huawei/session-store";
 import { UpstreamAuthError } from "../../utils/errors";
+import { logger } from "../../utils/logger";
 import type {
   OpenAIChatCompletion,
   OpenAIChatCompletionRequest,
@@ -41,6 +37,7 @@ export async function sendHuaweiChatRequest(
   session: StoredHuaweiSession,
   traceId: string,
 ): Promise<OpenAIChatCompletion> {
+  const log = logger.withTrace(traceId);
   const credentials = getCredentials(session);
   const chatUrl = `${config.huaweiChatHost}/v1/chat/chat`;
   const body = buildRequestBody(request, session);
@@ -53,47 +50,36 @@ export async function sendHuaweiChatRequest(
     ? (tp.tool_result as unknown[]).length
     : 0;
   const msgArr = parsedBody.messages as unknown[];
-  console.log(`[${traceId}] ── OUTGOING REQUEST → CodeArts (non-stream) ─────`);
-  console.log(`[${traceId}]   url             : POST ${chatUrl}`);
-  console.log(`[${traceId}]   model_id        : ${parsedBody.model_id}`);
-  console.log(`[${traceId}]   chat_id         : ${parsedBody.chat_id}`);
-  console.log(
-    `[${traceId}]   parent_message_id: ${parsedBody.parent_message_id}`,
-  );
-  console.log(`[${traceId}]   messages.count  : ${msgArr.length}`);
-  console.log(`[${traceId}]   tool_result.count: ${toolResultCount}`);
-  console.log(`[${traceId}]   body (full):\n${body}`);
-  console.log(
-    `[${traceId}] ──────────────────────────────────────────────────`,
-  );
+
+  log.info("OUTGOING REQUEST → CodeArts (non-stream)", {
+    url: `POST ${chatUrl}`,
+    model_id: parsedBody.model_id,
+    chat_id: parsedBody.chat_id,
+    parent_message_id: parsedBody.parent_message_id,
+    messagesCount: msgArr.length,
+    toolResultCount,
+  });
+  log.debug("Outgoing body (full)", { body });
 
   // ── Continuity info ───────────────────────────────────────────────────────
   if (!request.codearts?.chat_id) {
-    console.log(
-      `[${traceId}] ℹ chat_id derived from message hash: ${parsedBody.chat_id as string}`,
-    );
+    log.info("chat_id derived from message hash", { chat_id: parsedBody.chat_id });
   }
   if (!request.codearts?.parent_message_id && parsedBody.parent_message_id) {
-    console.log(
-      `[${traceId}] ℹ parent_message_id auto-filled from last turn: ${parsedBody.parent_message_id as string}`,
-    );
+    log.info("parent_message_id auto-filled from last turn", { parent_message_id: parsedBody.parent_message_id });
   }
   if (toolResultCount > 0 && !parsedBody.parent_message_id) {
-    console.warn(
-      `[${traceId}] ⚠ WARN: tool_result continuation but parent_message_id is empty!`,
-    );
+    log.warn("tool_result continuation but parent_message_id is empty");
   }
 
   const { status, stream } = await httpsPost(chatUrl, headers, body);
 
-  console.log(`[${traceId}] ← CodeArts HTTP status: ${status}`);
+  log.info("CodeArts HTTP response", { status });
 
   if (status !== 200) {
     let errorBody = "";
     for await (const line of stream) errorBody += line;
-    console.error(
-      `[${traceId}] ← CodeArts error body: ${errorBody.slice(0, 500)}`,
-    );
+    log.error("CodeArts error body", { status, body: errorBody.slice(0, 500) });
     if (status === 401 || status === 403)
       throw new UpstreamAuthError(status, errorBody);
     throw new Error(
@@ -120,16 +106,12 @@ export async function sendHuaweiChatRequest(
       responseMetadata.request_message_id = event.request_message_id;
 
     if (event.chat_id || event.response_message_id) {
-      console.log(
-        `[${traceId}] ← SSE meta  chat_id=${event.chat_id ?? "-"} response_message_id=${event.response_message_id ?? "-"}`,
-      );
+      log.debug("SSE meta", { chat_id: event.chat_id, response_message_id: event.response_message_id });
     }
 
     if (event.error_code && event.error_code !== "0") {
       sseHadError = true;
-      console.error(
-        `[${traceId}] ← SSE error  code=${event.error_code} msg=${event.error_msg ?? "unknown"}`,
-      );
+      log.error("SSE error from CodeArts", { code: event.error_code, msg: event.error_msg ?? "unknown" });
       throw new Error(
         `CodeArts error ${event.error_code}: ${event.error_msg ?? "unknown"}`,
       );
@@ -142,9 +124,7 @@ export async function sendHuaweiChatRequest(
         const hasIdentity =
           (tc.id && tc.id !== "-") || (tc.function?.name ?? tc.name);
         if (hasIdentity) {
-          console.log(
-            `[${traceId}] ← SSE tool_call  id=${tc.id ?? "-"} name=${tc.function?.name ?? tc.name ?? "-"}`,
-          );
+          log.debug("SSE tool_call", { id: tc.id, name: tc.function?.name ?? tc.name });
         }
       }
     }
@@ -161,33 +141,23 @@ export async function sendHuaweiChatRequest(
       const prevValue = getLastResponseMessageId(cid);
       const role = getChatIdRole(cid);
       setLastResponseMessageId(cid, responseMetadata.response_message_id);
-      if (prevValue && prevValue !== responseMetadata.response_message_id) {
-        console.log(
-          `[${traceId}] ℹ lastResponseMessageId updated: ${cid} → ${responseMetadata.response_message_id} ` +
-          `(overwrote ${prevValue}, role=${role ?? "unknown"})`,
-        );
-      } else {
-        console.log(
-          `[${traceId}] ℹ lastResponseMessageId updated: ${cid} → ${responseMetadata.response_message_id} ` +
-          `(role=${role ?? "unknown"})`,
-        );
-      }
+      log.info("lastResponseMessageId updated", {
+        chat_id: cid,
+        response_message_id: responseMetadata.response_message_id,
+        prevValue: prevValue !== responseMetadata.response_message_id ? prevValue : undefined,
+        role: role ?? "unknown",
+      });
     }
   }
-  console.log(
-    `[${traceId}] ── RESPONSE COMPLETE (non-stream) ────────────────`,
-  );
-  console.log(`[${traceId}]   sse_events      : ${sseEventCount}`);
-  console.log(`[${traceId}]   text_chars      : ${fullContent.length}`);
-  console.log(`[${traceId}]   tool_calls      : ${toolCalls?.length ?? 0}`);
-  console.log(`[${traceId}]   prompt_tokens   : ${promptTokens}`);
-  console.log(`[${traceId}]   completion_tokens: ${completionTokens}`);
-  console.log(
-    `[${traceId}]   response_message_id: ${responseMetadata.response_message_id ?? "(none)"}`,
-  );
-  console.log(
-    `[${traceId}] ──────────────────────────────────────────────────`,
-  );
+
+  log.info("RESPONSE COMPLETE (non-stream)", {
+    sse_events: sseEventCount,
+    text_chars: fullContent.length,
+    tool_calls: toolCalls?.length ?? 0,
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    response_message_id: responseMetadata.response_message_id ?? "(none)",
+  });
 
   const message: OpenAIChatMessage = {
     role: "assistant",

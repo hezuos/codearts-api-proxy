@@ -19,6 +19,7 @@ import {
   deriveSubAgentTools,
   type ToolDefinition,
 } from "./tools";
+import { logger } from "../../utils/logger";
 
 // ---------------------------------------------------------------------------
 // Message content normalization
@@ -148,9 +149,7 @@ function normalizeToolCallArguments(name: string, argsStr: string): string {
     if (typeof args.subagent_type === "string") {
       const repaired = SUBAGENT_CASE_REPAIR[args.subagent_type];
       if (repaired && repaired !== args.subagent_type) {
-        console.log(
-          `  normalizeToolCall: Task.subagent_type "${args.subagent_type}" → "${repaired}"`,
-        );
+        logger.debug("normalizeToolCall: Task.subagent_type repaired", { from: args.subagent_type, to: repaired });
         args.subagent_type = repaired;
         return JSON.stringify(args);
       }

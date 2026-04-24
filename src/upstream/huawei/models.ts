@@ -16,6 +16,7 @@ import { getCredentials, signRequest } from "../../auth/huawei/credentials";
 import type { StoredHuaweiSession } from "../../auth/huawei/session-store";
 import type { OpenAIModel } from "../../types/openai";
 import { MODEL_MAP } from "./chat";
+import { logger } from "../../utils/logger";
 
 // Re-export MODEL_MAP for any other consumers
 export { MODEL_MAP } from "./chat";
@@ -267,17 +268,17 @@ export async function getModelList(
   // Check cache
   if (!forceRefresh && isCacheFresh(accountId)) {
     const cached = modelCache.get(accountId)!;
-    console.log(`[${traceId}] Model list cache hit for account ${accountId}`);
+    logger.info(`[${traceId}] Model list cache hit for account ${accountId}`);
     return cached.models;
   }
 
   // Fetch from upstream
   try {
-    console.log(
+    logger.info(
       `[${traceId}] Fetching model list from upstream for account ${accountId} (innerVersion=${config.isInnerVersion})`,
     );
     const dynamicIds = await fetchUpstreamModels(session, traceId);
-    console.log(
+    logger.info(
       `[${traceId}] Fetched ${dynamicIds.length} model(s) from upstream`,
     );
 
@@ -288,11 +289,11 @@ export async function getModelList(
 
     return models;
   } catch (error) {
-    console.error(
-      `[${traceId}] Failed to fetch model list from upstream:`,
-      error instanceof Error ? error.message : error,
+    logger.error(
+      `[${traceId}] Failed to fetch model list from upstream`,
+      { error: error instanceof Error ? error.message : String(error) },
     );
-    console.log(`[${traceId}] Falling back to static model list`);
+    logger.info(`[${traceId}] Falling back to static model list`);
 
     // Return static models as fallback (don't cache the fallback)
     return getStaticModels();

@@ -4,6 +4,7 @@ import {
   logSessionCacheSummary,
   refreshStoredSession,
 } from "./session-store";
+import { logger } from "../../utils/logger";
 
 const REFRESH_INTERVAL_MS = 10 * 60 * 1000;
 const REFRESH_THRESHOLD_MS = 2 * 60 * 60 * 1000;
@@ -59,7 +60,7 @@ async function refreshOnce(): Promise<void> {
         const expires = new Date(session.expiresAt).getTime();
         if (!Number.isNaN(expires) && expires <= Date.now()) {
           expired += 1;
-          console.warn(
+          logger.warn(
             `[refresh-task] Session for key ${keyId} has expired at ${session.expiresAt}. Please re-login to get new credentials.`,
           );
           continue;
@@ -82,7 +83,7 @@ async function refreshOnce(): Promise<void> {
         ]);
         refreshed += 1;
       } catch (error) {
-        console.warn(`Refresh task failed for key ${keyId}:`, error);
+        logger.warn(`Refresh task failed for key ${keyId}`, { error: error instanceof Error ? error.message : String(error) });
       }
     }
 
