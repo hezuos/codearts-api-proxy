@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { createHash } from "crypto";
 import type { User } from "../db/models/user";
 import type { ApiKey } from "../db/models/api-key";
 import type { ProviderAccount } from "../db/models/provider-account";
@@ -29,12 +30,23 @@ import {
 
 const users = new Map<string, User>();
 const apiKeys = new Map<string, ApiKey>();
-const apiKeysByValue = new Map<string, ApiKey>();
+const apiKeysByValue = new Map<string, ApiKey>(); // legacy plaintext index (backward compat)
+const apiKeysByHash = new Map<string, ApiKey>(); // SHA-256 hash index (new)
 const providerAccounts = new Map<string, ProviderAccount>();
 const sessions = new Map<string, StoredHuaweiSession>();
 
 // Reverse index: keyId → { userId, accountId }
 const keyLocation = new Map<string, { userId: string; accountId: string }>();
+
+/** Hash an API key value using SHA-256 for secure lookup. */
+function hashApiKey(rawKey: string): string {
+  return createHash("sha256").update(rawKey).digest("hex");
+}
+
+/** Check if a keyHash value looks like a SHA-256 hex hash (64 hex chars). */
+function isHashedKey(value: string): boolean {
+  return value.length === 64 && /^[0-9a-f]{64}$/.test(value);
+}
 
 // ---------------------------------------------------------------------------
 // Entity read/write
@@ -167,6 +179,11 @@ export function deleteKey(
   const apiKey = apiKeys.get(keyId);
   if (apiKey) {
     apiKeysByValue.delete(apiKey.keyHash);
+    // Also clean hash index — try all possible hashes
+    // (keyHash may be plaintext or hash depending on migration state)
+    if (isHashedKey(apiKey.keyHash)) {
+      apiKeysByHash.delete(apiKey.keyHash);
+    }
   }
   apiKeys.delete(keyId);
   sessions.delete(keyId);
@@ -277,7 +294,8 @@ export function setApiKey(
   rawKeyValue: string,
 ): void {
   apiKeys.set(apiKey.id, apiKey);
-  apiKeysByValue.set(rawKeyValue, apiKey);
+  apiKeysByValue.set(rawKeyValue, apiKey); // legacy plaintext index
+  apiKeysByHash.set(hashApiKey(rawKeyValue), apiKey); // SHA-256 hash index
   keyLocation.set(apiKey.id, {
     userId: apiKey.userId,
     accountId: apiKey.providerAccountId ?? "",
@@ -297,11 +315,12 @@ export function setSession(
 }
 
 export function findApiKeyByValue(rawKey: string): ApiKey | undefined {
+  // Prefer SHA-256 hash lookup (secure, timing-safe)
+  const hashed = hashApiKey(rawKey);
+  const byHash = apiKeysByHash.get(hashed);
+  if (byHash) return byHash;
+  // Fallback to legacy plaintext index for backward compatibility
   return apiKeysByValue.get(rawKey);
-}
-
-export function removeApiKeyFromValueIndex(rawKey: string): void {
-  apiKeysByValue.delete(rawKey);
 }
 
 /** Write ApiKey to file using its location info */
@@ -320,6 +339,7 @@ export function loadAllEntities(): void {
   users.clear();
   apiKeys.clear();
   apiKeysByValue.clear();
+  apiKeysByHash.clear();
   providerAccounts.clear();
   sessions.clear();
   keyLocation.clear();
@@ -343,7 +363,20 @@ export function loadAllEntities(): void {
         const apiKey = readKey(userId, accountId, keyId);
         if (apiKey) {
           apiKeys.set(keyId, apiKey);
-          apiKeysByValue.set(apiKey.keyHash, apiKey);
+
+          // Migrate plaintext keyHash to SHA-256 hash
+          if (!isHashedKey(apiKey.keyHash)) {
+            // keyHash contains plaintext — keep in legacy index and add hash index
+            apiKeysByValue.set(apiKey.keyHash, apiKey);
+            apiKeysByHash.set(hashApiKey(apiKey.keyHash), apiKey);
+            // Persist the migration: update keyHash to the hash value
+            apiKey.keyHash = hashApiKey(apiKey.keyHash);
+            writeApiKey(apiKey);
+          } else {
+            // keyHash is already a hash — only populate hash index
+            apiKeysByHash.set(apiKey.keyHash, apiKey);
+          }
+
           keyLocation.set(keyId, { userId, accountId });
         }
 
