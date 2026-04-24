@@ -12,11 +12,6 @@ export interface OpenAIError {
   code: string | null;
 }
 
-export interface OpenAIResponse<T> {
-  data: T;
-  error?: OpenAIError;
-}
-
 // ==================== 模型相关类型 ====================
 
 export interface OpenAIModel {
@@ -24,24 +19,6 @@ export interface OpenAIModel {
   object: "model";
   created: number;
   owned_by: string;
-  permission?: OpenAIModelPermission[];
-  root?: string;
-  parent?: string;
-}
-
-export interface OpenAIModelPermission {
-  id: string;
-  object: "model_permission";
-  created: number;
-  allow_create_engine: boolean;
-  allow_sampling: boolean;
-  allow_logprobs: boolean;
-  allow_search_indices: boolean;
-  allow_view: boolean;
-  allow_fine_tuning: boolean;
-  organization: string;
-  group: string | null;
-  is_blocking: boolean;
 }
 
 export interface OpenAIModelsResponse {
@@ -62,32 +39,20 @@ export interface OpenAIChatMessage {
   role: OpenAIChatRole;
   content: string | null;
   name?: string;
-  function_call?: OpenAIFunctionCall;
   tool_calls?: OpenAIToolCall[];
   tool_call_id?: string;
   reasoning_content?: string;
 }
 
-export interface OpenAIFunctionCall {
-  name: string;
-  arguments: string;
-}
-
 export interface OpenAIToolCall {
   id: string;
   type: "function";
-  function: OpenAIFunctionCall;
-}
-
-export interface OpenAIFunctionDefinition {
-  name: string;
-  description?: string;
-  parameters?: Record<string, unknown>;
+  function: { name: string; arguments: string };
 }
 
 export interface OpenAITool {
   type: "function";
-  function: OpenAIFunctionDefinition;
+  function: { name: string; description?: string; parameters?: Record<string, unknown> };
 }
 
 // ==================== Chat Completion 相关类型 ====================
@@ -105,8 +70,6 @@ export interface OpenAIChatCompletionRequest {
   frequency_penalty?: number | null;
   logit_bias?: Record<string, number> | null;
   user?: string | null;
-  functions?: OpenAIFunctionDefinition[] | null;
-  function_call?: "none" | "auto" | { name: string } | null;
   tools?: OpenAITool[] | null;
   tool_choice?:
     | "none"
@@ -162,24 +125,6 @@ export interface OpenAIChatCompletionChoice {
     | "tool_calls"
     | "content_filter"
     | null;
-  logprobs?: OpenAILogProbs | null;
-}
-
-export interface OpenAILogProbs {
-  content: OpenAILogProbsContent[] | null;
-}
-
-export interface OpenAILogProbsContent {
-  token: string;
-  logprob: number;
-  bytes: number[] | null;
-  top_logprobs: OpenAITopLogProb[];
-}
-
-export interface OpenAITopLogProb {
-  token: string;
-  logprob: number;
-  bytes: number[] | null;
 }
 
 export interface OpenAIChatCompletion {
@@ -228,167 +173,19 @@ export interface OpenAIChatCompletionChunkChoice {
     | "tool_calls"
     | "content_filter"
     | null;
-  logprobs?: OpenAILogProbs | null;
 }
 
 export interface OpenAIChatCompletionDelta {
   role?: OpenAIChatRole;
   content?: string | null;
   reasoning_content?: string | null;
-  function_call?: OpenAIFunctionCallDelta;
+  function_call?: { name?: string; arguments?: string };
   tool_calls?: OpenAIToolCallDelta[];
-}
-
-export interface OpenAIFunctionCallDelta {
-  name?: string;
-  arguments?: string;
 }
 
 export interface OpenAIToolCallDelta {
   index: number;
   id?: string;
   type?: "function";
-  function?: OpenAIFunctionCallDelta;
+  function?: { name?: string; arguments?: string };
 }
-
-// ==================== Embeddings 相关类型 ====================
-
-export interface OpenAIEmbeddingRequest {
-  model: string;
-  input: string | string[];
-  encoding_format?: "float" | "base64";
-  dimensions?: number;
-  user?: string;
-}
-
-export interface OpenAIEmbedding {
-  object: "embedding";
-  embedding: number[];
-  index: number;
-}
-
-export interface OpenAIEmbeddingsResponse {
-  object: "list";
-  data: OpenAIEmbedding[];
-  model: string;
-  usage: OpenAIUsage;
-}
-
-// ==================== 模型映射相关类型 ====================
-
-export interface ModelMapping {
-  openaiModelId: string;
-  codeartsModelId: string;
-  displayName: string;
-  contextWindow: number;
-  maxTokens: number;
-  supportsStream: boolean;
-  supportsFunction: boolean;
-  supportsVision: boolean;
-}
-
-// ==================== 配置相关类型 ====================
-
-export interface ProxyConfig {
-  port: number;
-  host: string;
-  baseUrl: string;
-  apiKey?: string;
-  timeout: number;
-  maxRetries: number;
-  retryDelay: number;
-  enableCors: boolean;
-  corsOrigins: string[];
-  rateLimit: {
-    windowMs: number;
-    maxRequests: number;
-  };
-  logging: {
-    level: "debug" | "info" | "warn" | "error";
-    format: "json" | "simple";
-  };
-}
-
-export interface AuthConfig {
-  type: "session" | "apiKey" | "custom";
-  sessionData?: {
-    access: string;
-    secret: string;
-    securitytoken: string;
-    expiresAt: string;
-  };
-  customAuthUrl?: string;
-}
-
-// ==================== 请求/响应转换器类型 ====================
-
-export interface OpenAIToCodeArtsConverter {
-  (request: OpenAIChatCompletionRequest): CodeArtsChatRequest;
-}
-
-export interface CodeArtsToOpenAIConverter {
-  (response: CodeArtsChatResponse): OpenAIChatCompletion;
-}
-
-// ==================== 内部 CodeArts 类型（部分定义，完整定义在 codearts.ts）====================
-
-export interface CodeArtsChatRequest {
-  chat_id: string;
-  messages: Array<{
-    type: string;
-    value: { input: string } | Record<string, unknown>;
-  }>;
-  client: string;
-  task: string;
-  task_parameters: Record<string, unknown>;
-  batch_task_parameters: unknown[];
-  attempt: number;
-  user_id: string;
-  trigger_mode: string;
-  master_body?: string;
-  parent_message_id?: string;
-  is_delta_response: boolean;
-  model_id?: string;
-  agent_id?: string;
-  file_id?: string;
-  mcp_servers?: unknown[];
-}
-
-export interface CodeArtsChatResponse {
-  id: string;
-  model: string;
-  type: string;
-  chat_id: string;
-  response_message_id: string;
-  request_message_id: string;
-  agent_name: string;
-  is_delta_response: boolean;
-  is_model_auto_switched: boolean;
-  prompt_id: string;
-  prompt_tokens: number;
-  rag_references: unknown[];
-  rag_flywheel: unknown[];
-  long_term_memory_info: Record<string, unknown>;
-  query_optimize: boolean;
-  text: string;
-  output: Array<{
-    type: string;
-    text: string;
-    name: string | null;
-    id: string | null;
-    arguments: Record<string, unknown>;
-  }>;
-  response_message_id_field?: string;
-  error_code: string;
-}
-
-// ==================== 工具函数类型 ====================
-
-export type EventType = "completion" | "delta" | "error" | "done";
-
-export interface StreamEvent {
-  type: EventType;
-  data: OpenAIChatCompletion | OpenAIChatCompletionChunk | OpenAIError;
-}
-
-export type StreamCallback = (event: StreamEvent) => void;
