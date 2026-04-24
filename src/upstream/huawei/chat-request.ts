@@ -9,6 +9,7 @@ import { getProviderAccount } from "../../auth/store";
 import { signRequest, type SigningCredentials } from "../../auth/huawei/credentials";
 import type { StoredHuaweiSession } from "../../auth/huawei/session-store";
 import { UpstreamTimeoutError } from "../../utils/errors";
+import { logger } from "../../utils/logger";
 import type { OpenAIChatCompletionRequest, OpenAIChatMessage } from "../../types/openai";
 import { extractUserMessage, extractToolResults, resolveTools, normalizeMessageContent } from "./chat-translate";
 
@@ -39,12 +40,29 @@ function resolveModelId(request: OpenAIChatCompletionRequest): string {
 }
 
 // ---------------------------------------------------------------------------
-// In-memory parent_message_id tracker
+// In-memory parent_message_id tracker (with TTL eviction)
 // ---------------------------------------------------------------------------
 
+const TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
+const CLEANUP_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
+
 const lastResponseMessageId = new Map<string, string>();
+const lastResponseMessageTs = new Map<string, number>();
 
 const chatIdRole = new Map<string, "main" | "sub">();
+
+// Periodic TTL cleanup
+const cleanupTimer = setInterval(() => {
+  const now = Date.now();
+  for (const [key, ts] of lastResponseMessageTs) {
+    if (now - ts > TTL_MS) {
+      lastResponseMessageId.delete(key);
+      lastResponseMessageTs.delete(key);
+      chatIdRole.delete(key);
+    }
+  }
+}, CLEANUP_INTERVAL_MS);
+cleanupTimer.unref();
 
 export function getLastResponseMessageId(chatId: string): string | undefined {
   return lastResponseMessageId.get(chatId);
@@ -52,6 +70,7 @@ export function getLastResponseMessageId(chatId: string): string | undefined {
 
 export function setLastResponseMessageId(chatId: string, messageId: string): void {
   lastResponseMessageId.set(chatId, messageId);
+  lastResponseMessageTs.set(chatId, Date.now());
 }
 
 export function getChatIdRole(chatId: string): "main" | "sub" | undefined {
@@ -140,21 +159,19 @@ export function buildRequestBody(
   setChatIdRole(chatId, currentRole);
 
   if (previousRole && previousRole !== currentRole) {
-    console.warn(
-      `⚠ CHAT_ID COLLISION: chat_id=${chatId} was previously used by ${previousRole}-agent ` +
-      `but now used by ${currentRole}-agent! ` +
-      `lastResponseMessageId for this chat_id may be corrupted. ` +
-      `This likely causes "Tool messages must be a response to a preceding tool calls" errors.`,
-    );
+    logger.warn("CHAT_ID COLLISION", {
+      chat_id: chatId,
+      previousRole,
+      currentRole,
+    });
   } else if (subAgent) {
-    console.log(
-      `ℹ Sub-agent request using chat_id=${chatId} (previousRole=${previousRole ?? "none"})`,
-    );
+    logger.info("Sub-agent request", { chat_id: chatId, previousRole: previousRole ?? "none" });
   } else if (isToolContinuation) {
-    console.log(
-      `ℹ Main-agent tool continuation using chat_id=${chatId} (previousRole=${previousRole ?? "none"}, ` +
-      `lastResponseMessageId=${getLastResponseMessageId(chatId) ?? "(none)"})`,
-    );
+    logger.info("Main-agent tool continuation", {
+      chat_id: chatId,
+      previousRole: previousRole ?? "none",
+      lastResponseMessageId: getLastResponseMessageId(chatId) ?? "(none)",
+    });
   }
 
   const parentMessageId =
