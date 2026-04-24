@@ -12,8 +12,7 @@
  */
 import https from "https";
 import { config, getGptsUrl, getAgentId } from "../../config";
-import { decryptString } from "../../auth/crypto/encryption";
-import { signRequest, type SigningCredentials } from "../../auth/huawei/sign";
+import { getCredentials, signRequest } from "../../auth/huawei/credentials";
 import type { StoredHuaweiSession } from "../../auth/huawei/session-store";
 import type { OpenAIModel } from "../../types/openai";
 import { MODEL_MAP } from "./chat";
@@ -46,21 +45,6 @@ export function invalidateCache(accountId?: string): void {
   } else {
     modelCache.clear();
   }
-}
-
-// ---------------------------------------------------------------------------
-// Credentials helper (same as chat.ts)
-// ---------------------------------------------------------------------------
-
-function getCredentials(session: StoredHuaweiSession): SigningCredentials {
-  if (!session.accessKey || !session.secretKeyCiphertext) {
-    throw new Error("Session missing AK/SK credentials");
-  }
-  return {
-    accessKey: session.accessKey,
-    secretKey: decryptString(session.secretKeyCiphertext),
-    securityToken: session.securityToken,
-  };
 }
 
 // ---------------------------------------------------------------------------

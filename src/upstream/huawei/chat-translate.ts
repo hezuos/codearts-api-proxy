@@ -32,7 +32,7 @@ export function normalizeMessageContent(content: unknown): string {
       .map((item) => {
         if (typeof item === "string") return item;
         if (item && typeof item === "object") {
-          const text = Reflect.get(item, "text");
+          const text = (item as Record<string, unknown>).text;
           if (typeof text === "string") return text;
         }
         return "";

@@ -188,12 +188,6 @@ export const DEFAULT_TOOLS: ToolDefinition[] = [
   ),
 ];
 
-export const SUB_AGENT_TOOLS: ToolDefinition[] = DEFAULT_TOOLS.filter((tool) =>
-  ["Bash", "Glob", "Grep", "Read", "openBrowserInIDE"].includes(
-    tool.function.name,
-  ),
-);
-
 const SUB_AGENT_TOOL_NAMES = new Set([
   "Bash",
   "Glob",
@@ -201,6 +195,10 @@ const SUB_AGENT_TOOL_NAMES = new Set([
   "Read",
   "openBrowserInIDE",
 ]);
+
+export const SUB_AGENT_TOOLS: ToolDefinition[] = DEFAULT_TOOLS.filter((tool) =>
+  SUB_AGENT_TOOL_NAMES.has(tool.function.name),
+);
 
 /**
  * Convert OpenAI-format tools to CodeArts ToolDefinition format.
