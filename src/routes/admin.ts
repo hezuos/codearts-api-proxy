@@ -23,6 +23,64 @@ import {
   getSession,
   refreshStoredSession,
 } from "../auth/huawei/session-store";
+import type { ApiKey } from "../db/models/api-key";
+import type { StoredHuaweiSession } from "../auth/huawei/session-store";
+import type { ProviderAccount } from "../db/models/provider-account";
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+/** Find the user who owns a given account. */
+function findAccountOwner(accountId: string): { userId: string; account: ProviderAccount } | null {
+  for (const user of listAllUsers()) {
+    const account = listProviderAccounts(user.id).find((a) => a.id === accountId);
+    if (account) return { userId: user.id, account };
+  }
+  return null;
+}
+
+/** Determine session status from expiresAt */
+function sessionStatus(
+  expiresAt?: string,
+): "active" | "expiring" | "expired" | "missing" {
+  if (!expiresAt) return "missing";
+  const expires = new Date(expiresAt).getTime();
+  if (Number.isNaN(expires)) return "missing";
+  const remaining = expires - Date.now();
+  if (remaining <= 0) return "expired";
+  if (remaining < 2 * 60 * 60 * 1000) return "expiring";
+  return "active";
+}
+
+/** Map an ApiKey + its session to the admin API response shape. */
+function mapApiKeyDetails(k: ApiKey, keySession: StoredHuaweiSession | undefined) {
+  return {
+    id: k.id,
+    keyHash: k.keyHash,
+    name: k.name,
+    createdAt: k.createdAt,
+    revokedAt: k.revokedAt ?? null,
+    sessionStatus: sessionStatus(keySession?.expiresAt),
+    session: keySession
+      ? {
+          expiresAt: keySession.expiresAt,
+          lastRefreshedAt: keySession.lastRefreshedAt,
+        }
+      : null,
+  };
+}
+
+/** Build account API keys details for a given user + account. */
+function buildAccountApiKeys(userId: string, accountId: string) {
+  return listApiKeysByUser(userId)
+    .filter((k) => k.providerAccountId === accountId)
+    .map((k) => mapApiKeyDetails(k, getSession(k.id)));
+}
+
+// ---------------------------------------------------------------------------
+// Route handlers
+// ---------------------------------------------------------------------------
 
 /**
  * GET /admin/setup - Admin setup page
@@ -119,19 +177,6 @@ export function getAllUsers(_req: Request, res: Response): void {
   res.json({ users: result });
 }
 
-/** Determine session status from expiresAt */
-function sessionStatus(
-  expiresAt?: string,
-): "active" | "expiring" | "expired" | "missing" {
-  if (!expiresAt) return "missing";
-  const expires = new Date(expiresAt).getTime();
-  if (Number.isNaN(expires)) return "missing";
-  const remaining = expires - Date.now();
-  if (remaining <= 0) return "expired";
-  if (remaining < 2 * 60 * 60 * 1000) return "expiring";
-  return "active";
-}
-
 /**
  * GET /admin/api/accounts - Get all accounts with key+session details
  */
@@ -140,42 +185,19 @@ export function getAllAccounts(_req: Request, res: Response): void {
 
   const accounts = users.flatMap((user) => {
     const userAccounts = listProviderAccounts(user.id);
-    const userApiKeys = listApiKeysByUser(user.id);
-    return userAccounts.map((account) => {
-      // Find all API keys bound to this account (active + revoked)
-      const accountApiKeys = userApiKeys
-        .filter((k) => k.providerAccountId === account.id)
-        .map((k) => {
-          const keySession = getSession(k.id);
-          return {
-            id: k.id,
-            keyHash: k.keyHash,
-            name: k.name,
-            createdAt: k.createdAt,
-            revokedAt: k.revokedAt ?? null,
-            sessionStatus: sessionStatus(keySession?.expiresAt),
-            session: keySession
-              ? {
-                  expiresAt: keySession.expiresAt,
-                  lastRefreshedAt: keySession.lastRefreshedAt,
-                }
-              : null,
-          };
-        });
-      return {
-        id: account.id,
-        userId: account.userId,
-        userDisplayName: user.displayName,
-        provider: account.provider,
-        displayName: account.displayName,
-        providerUserName: account.providerUserName,
-        domainId: account.domainId,
-        providerUserId: account.providerUserId,
-        isDefault: account.isDefault,
-        status: account.status,
-        apiKeys: accountApiKeys,
-      };
-    });
+    return userAccounts.map((account) => ({
+      id: account.id,
+      userId: account.userId,
+      userDisplayName: user.displayName,
+      provider: account.provider,
+      displayName: account.displayName,
+      providerUserName: account.providerUserName,
+      domainId: account.domainId,
+      providerUserId: account.providerUserId,
+      isDefault: account.isDefault,
+      status: account.status,
+      apiKeys: buildAccountApiKeys(user.id, account.id),
+    }));
   });
 
   res.json({ accounts });
@@ -250,50 +272,29 @@ export async function refreshApiKey(
  */
 export function getAccountDetails(req: Request, res: Response): void {
   const accountId = req.params.id;
-  const users = listAllUsers();
+  const owner = findAccountOwner(accountId);
 
-  for (const user of users) {
-    const accounts = listProviderAccounts(user.id);
-    const account = accounts.find((a) => a.id === accountId);
-    if (account) {
-      const userApiKeys = listApiKeysByUser(user.id);
-      const accountApiKeys = userApiKeys
-        .filter((k) => k.providerAccountId === account.id)
-        .map((k) => {
-          const keySession = getSession(k.id);
-          return {
-            id: k.id,
-            keyHash: k.keyHash,
-            name: k.name,
-            createdAt: k.createdAt,
-            revokedAt: k.revokedAt ?? null,
-            sessionStatus: sessionStatus(keySession?.expiresAt),
-            session: keySession
-              ? {
-                  expiresAt: keySession.expiresAt,
-                  lastRefreshedAt: keySession.lastRefreshedAt,
-                }
-              : null,
-          };
-        });
-      res.json({
-        id: account.id,
-        userId: account.userId,
-        userDisplayName: user.displayName,
-        provider: account.provider,
-        displayName: account.displayName,
-        providerUserName: account.providerUserName,
-        domainId: account.domainId,
-        providerUserId: account.providerUserId,
-        isDefault: account.isDefault,
-        status: account.status,
-        apiKeys: accountApiKeys,
-      });
-      return;
-    }
+  if (!owner) {
+    res.status(404).json({ error: "Account not found" });
+    return;
   }
 
-  res.status(404).json({ error: "Account not found" });
+  const { userId, account } = owner;
+  const user = listAllUsers().find((u) => u.id === userId);
+
+  res.json({
+    id: account.id,
+    userId: account.userId,
+    userDisplayName: user?.displayName,
+    provider: account.provider,
+    displayName: account.displayName,
+    providerUserName: account.providerUserName,
+    domainId: account.domainId,
+    providerUserId: account.providerUserId,
+    isDefault: account.isDefault,
+    status: account.status,
+    apiKeys: buildAccountApiKeys(userId, account.id),
+  });
 }
 
 /**
@@ -304,40 +305,25 @@ export async function forceRefreshAccount(
   res: Response,
 ): Promise<void> {
   const accountId = req.params.id;
+  const owner = findAccountOwner(accountId);
 
-  // Find all active keys for this account
-  const users = listAllUsers();
-  let found = false;
-  const results: Array<{ keyId: string; success: boolean; error?: string }> = [];
-
-  for (const user of users) {
-    const accounts = listProviderAccounts(user.id);
-    if (accounts.find((a) => a.id === accountId)) {
-      found = true;
-      const userKeys = listApiKeysByUser(user.id);
-      const accountKeys = userKeys.filter(
-        (k) => !k.revokedAt && k.providerAccountId === accountId,
-      );
-
-      for (const key of accountKeys) {
-        try {
-          await refreshStoredSession(key.id);
-          results.push({ keyId: key.id, success: true });
-        } catch (error) {
-          results.push({
-            keyId: key.id,
-            success: false,
-            error: String(error),
-          });
-        }
-      }
-      break;
-    }
-  }
-
-  if (!found) {
+  if (!owner) {
     res.status(404).json({ error: "Account not found" });
     return;
+  }
+
+  const accountKeys = listApiKeysByUser(owner.userId).filter(
+    (k) => !k.revokedAt && k.providerAccountId === accountId,
+  );
+
+  const results: Array<{ keyId: string; success: boolean; error?: string }> = [];
+  for (const key of accountKeys) {
+    try {
+      await refreshStoredSession(key.id);
+      results.push({ keyId: key.id, success: true });
+    } catch (error) {
+      results.push({ keyId: key.id, success: false, error: String(error) });
+    }
   }
 
   res.json({ success: true, accountId, results });
@@ -348,33 +334,21 @@ export async function forceRefreshAccount(
  */
 export function deleteAccount(req: Request, res: Response): void {
   const accountId = req.params.id;
+  const owner = findAccountOwner(accountId);
 
-  // 查找账户所属用户
-  const users = listAllUsers();
-  let targetUserId: string | null = null;
-
-  for (const user of users) {
-    const accounts = listProviderAccounts(user.id);
-    if (accounts.find((a) => a.id === accountId)) {
-      targetUserId = user.id;
-      break;
-    }
-  }
-
-  if (!targetUserId) {
+  if (!owner) {
     res.status(404).json({ error: "Account not found" });
     return;
   }
 
-  // 删除账户（级联删除 keys + sessions）
-  const ok = deleteProviderAccount(targetUserId, accountId);
+  const ok = deleteProviderAccount(owner.userId, accountId);
   if (!ok) {
     res.status(500).json({ error: "Failed to delete account" });
     return;
   }
 
   console.log(
-    `[admin] Account deleted: ${accountId} (user: ${targetUserId})`,
+    `[admin] Account deleted: ${accountId} (user: ${owner.userId})`,
   );
 
   res.json({ success: true, accountId });

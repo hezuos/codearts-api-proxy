@@ -204,7 +204,7 @@ async function testCallbackReturnsImmediatelyAndFinalizeSetsCookie(): Promise<vo
 }
 
 async function run(): Promise<void> {
-  bootstrapDefaultAuth("test-browser-login-key");
+  bootstrapDefaultAuth();
   await testCreateAndPollBrowserTicket();
   await testConcurrentBrowserTicketsRemainDistinct();
   await testExpiredTicketStatus();

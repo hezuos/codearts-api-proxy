@@ -1,4 +1,5 @@
 import type { Request, Response } from "express";
+import { isProduction } from "../config";
 import {
   getUser,
   listProviderAccounts,
@@ -173,7 +174,6 @@ export function regenerateApiKey(req: Request, res: Response): void {
   }
 
   // Update cookie
-  const isProduction = process.env.NODE_ENV === "production";
   res.cookie("auth_key", newKey, {
     httpOnly: true,
     secure: isProduction,

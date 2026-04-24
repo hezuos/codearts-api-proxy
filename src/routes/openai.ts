@@ -10,8 +10,8 @@ import { buildModelsResponse } from "../translation/openai-mock";
 import {
   sendHuaweiChatRequest,
   streamHuaweiChatToResponse,
-  UpstreamAuthError,
 } from "../upstream/huawei/chat";
+import { UpstreamAuthError } from "../utils/errors";
 import {
   getModelList,
   invalidateCache,

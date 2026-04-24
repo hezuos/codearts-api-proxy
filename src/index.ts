@@ -1,5 +1,7 @@
 import express from "express";
+import fs from "fs";
 import cookieParser from "cookie-parser";
+import rateLimit from "express-rate-limit";
 import type { NextFunction, Request, Response } from "express";
 import { bootstrapDefaultAuth, loadPersistedAuthStore } from "./auth/store";
 import {
@@ -8,7 +10,7 @@ import {
   setRefreshTaskEnabled,
 } from "./auth/huawei/refresh-task";
 import { loadAdminConfig } from "./auth/admin";
-import { config } from "./config";
+import { config, rateLimitChatMax, rateLimitModelsMax } from "./config";
 import { authenticateApiKey } from "./middleware/authenticate-api-key";
 import { withRequestContext } from "./middleware/request-context";
 import { requireUiAuth } from "./middleware/authenticate-ui";
@@ -64,11 +66,23 @@ app.use(express.static("public"));
 app.use(withRequestContext);
 
 loadPersistedAuthStore();
-bootstrapDefaultAuth(config.defaultApiKey);
+  bootstrapDefaultAuth();
 loadAdminConfig();
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
+});
+
+// Readiness probe — checks if the system can process requests
+app.get("/ready", (_req, res) => {
+  try {
+    const testFile = `${config.dataDir}/.ready-check`;
+    fs.writeFileSync(testFile, "ok");
+    fs.unlinkSync(testFile);
+    res.json({ status: "ok", checks: { store: true } });
+  } catch {
+    res.status(503).json({ status: "degraded", checks: { store: false } });
+  }
 });
 
 app.get("/", (_req, res) => {
@@ -84,9 +98,25 @@ app.post("/auth/huawei/login", authenticateApiKey, initiateHuaweiLogin);
 app.get("/callback", handleHuaweiCallback);
 app.get("/auth/callback", handleHuaweiCallback);
 
-// API routes
-app.get("/v1/models", authenticateApiKey, listModels);
-app.post("/v1/chat/completions", authenticateApiKey, createChatCompletion);
+// API routes with rate limiting (keyed by API Key ID)
+const chatLimiter = rateLimit({
+  windowMs: 60_000,
+  max: rateLimitChatMax,
+  keyGenerator: (req) => req.auth?.apiKeyId ?? "anonymous",
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const modelsLimiter = rateLimit({
+  windowMs: 60_000,
+  max: rateLimitModelsMax,
+  keyGenerator: (req) => req.auth?.apiKeyId ?? "anonymous",
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+app.get("/v1/models", authenticateApiKey, modelsLimiter, listModels);
+app.post("/v1/chat/completions", authenticateApiKey, chatLimiter, createChatCompletion);
 app.get("/provider-accounts", authenticateApiKey, listBoundProviderAccounts);
 app.post(
   "/provider-accounts/:providerAccountId/default",

@@ -43,7 +43,9 @@ export const config: AppConfig = {
   dataDir: process.env.DATA_DIR ?? "data",
   encryptionKey: requireEnv(
     "ENCRYPTION_KEY",
-    "dev-only-32-byte-encryption-key!",
+    (process.env.NODE_ENV ?? "development") === "production"
+      ? undefined // Production MUST set ENCRYPTION_KEY — no insecure fallback
+      : "dev-only-32-byte-encryption-key!",
   ),
   defaultApiKey: process.env.DEFAULT_API_KEY ?? "dev-openai-compatible-key",
   huaweiApiHost:
@@ -65,6 +67,15 @@ export const config: AppConfig = {
     process.env.HUAWEI_AGENT_ID ?? "", // empty = derive from isInnerVersion
   modelCacheTtl: Number(process.env.MODEL_CACHE_TTL ?? 300),
 };
+
+/** Whether the process is running in production mode. */
+export const isProduction = config.nodeEnv === "production";
+
+/** Rate limit: max chat completion requests per window per API key. */
+export const rateLimitChatMax = Number(process.env.RATE_LIMIT_CHAT_MAX ?? 60);
+
+/** Rate limit: max model list requests per window per API key. */
+export const rateLimitModelsMax = Number(process.env.RATE_LIMIT_MODELS_MAX ?? 120);
 
 /**
  * Derive the GPTs (agent-center) URL from config.

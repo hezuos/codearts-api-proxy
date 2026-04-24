@@ -3,7 +3,7 @@ import { randomUUID } from "crypto";
 import { encryptString } from "../auth/crypto/encryption";
 import { createHuaweiLoginFlow } from "../auth/huawei/login-flow";
 import { storeSession } from "../auth/huawei/session-store";
-import { config } from "../config";
+import { config, isProduction } from "../config";
 import { getRequestAuth } from "../middleware/authenticate-api-key";
 import { getTraceId } from "../middleware/request-context";
 import {
@@ -18,6 +18,7 @@ import {
   type HuaweiTicketExchangeResponse,
 } from "../upstream/huawei/ticket";
 import { createOpenAIError } from "../utils/openai-error";
+import { maskValue } from "../utils/mask";
 
 let exchangeHuaweiTicket = waitForHuaweiTicketExchange;
 
@@ -54,18 +55,6 @@ const loginFlows = new Map<
   LoginFlowRecord
 >();
 const browserExchangeTasks = new Map<string, Promise<void>>();
-
-function maskValue(value: string | undefined): string {
-  if (!value) {
-    return "missing";
-  }
-
-  if (value.length <= 8) {
-    return `${value.slice(0, 2)}***`;
-  }
-
-  return `${value.slice(0, 6)}...${value.slice(-4)}`;
-}
 
 function isTerminalBrowserStatus(status: BrowserLoginStatus | undefined): boolean {
   return status === "completed" || status === "failed" || status === "expired";
@@ -151,7 +140,6 @@ function getCallbackHost(req: Request): string {
 }
 
 function setAuthKeyCookie(res: Response, apiKey: string): void {
-  const isProduction = process.env.NODE_ENV === "production";
   res.cookie("auth_key", apiKey, {
     httpOnly: true,
     secure: isProduction,
@@ -161,9 +149,8 @@ function setAuthKeyCookie(res: Response, apiKey: string): void {
 }
 
 function setAuthKeyIdCookie(res: Response, apiKeyId: string): void {
-  const isProduction = process.env.NODE_ENV === "production";
   res.cookie("auth_key_id", apiKeyId, {
-    httpOnly: false,
+    httpOnly: true,
     secure: isProduction,
     sameSite: "lax",
     maxAge: 30 * 24 * 60 * 60 * 1000,
@@ -171,7 +158,6 @@ function setAuthKeyIdCookie(res: Response, apiKeyId: string): void {
 }
 
 function setBrowserLoginTicketCookie(res: Response, ticketId: string): void {
-  const isProduction = process.env.NODE_ENV === "production";
   res.cookie("huawei_login_ticket", ticketId, {
     httpOnly: true,
     secure: isProduction,
@@ -181,7 +167,6 @@ function setBrowserLoginTicketCookie(res: Response, ticketId: string): void {
 }
 
 function clearBrowserLoginTicketCookie(res: Response): void {
-  const isProduction = process.env.NODE_ENV === "production";
   res.clearCookie("huawei_login_ticket", {
     httpOnly: true,
     secure: isProduction,
