@@ -22,12 +22,12 @@ export function authenticateApiKey(
     return;
   }
 
-  Reflect.set(req, "auth", auth);
+  req.auth = auth;
   next();
 }
 
 export function getRequestAuth(req: Request): AuthContext {
-  return Reflect.get(req, "auth") as AuthContext;
+  return req.auth!;
 }
 
 export { type AuthContext };

@@ -1,9 +1,11 @@
+import { randomBytes } from "crypto";
 import type { Request, Response, NextFunction } from "express";
 import { isAdminConfigured } from "../auth/admin";
+import { isProduction } from "../config";
 
-// Simple session token stored in cookie
-// In production, this should be a proper session token with expiration
-const ADMIN_SESSION_TOKEN = "admin-authenticated";
+// Cryptographically random session token generated at startup.
+// Different across process restarts — prevents cookie forgery.
+const ADMIN_SESSION_TOKEN = randomBytes(32).toString("hex");
 
 export function requireAdminAuth(
   req: Request,
@@ -41,7 +43,7 @@ export function requireAdminAuth(
 export function setAdminSession(res: Response): void {
   res.cookie("admin_session", ADMIN_SESSION_TOKEN, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
+    secure: isProduction,
     sameSite: "strict",
     maxAge: 24 * 60 * 60 * 1000, // 24 hours
   });
