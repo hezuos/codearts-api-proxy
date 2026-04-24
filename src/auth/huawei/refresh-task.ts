@@ -13,7 +13,7 @@ let started = false;
 let running = false;
 let timer: NodeJS.Timeout | null = null;
 let enableRefreshTask = true;
-let isMasterNode = true;
+const isMasterNode = true;
 
 function shouldRefresh(expiresAt?: string): boolean {
   if (!expiresAt) {
@@ -116,8 +116,4 @@ export function stopHuaweiRefreshTask(): void {
 
 export function setRefreshTaskEnabled(value: boolean): void {
   enableRefreshTask = value;
-}
-
-export function setMasterNode(value: boolean): void {
-  isMasterNode = value;
 }

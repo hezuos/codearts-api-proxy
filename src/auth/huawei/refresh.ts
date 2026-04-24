@@ -6,7 +6,7 @@
  *
  * Verified working 2026-04-16.
  */
-import axios from "axios";
+import https from "https";
 import { config } from "../../config";
 import { signRequest, type SigningCredentials } from "./sign";
 
@@ -44,14 +44,41 @@ export async function refreshHuaweiSession(
     credentials,
   );
 
-  const response = await axios.post(refreshUrl, body, {
-    timeout: 15000,
-    headers: {
-      "Content-Type": "application/json",
-      "Access-Key": session.accessKey,
-      ...signedHeaders,
-    },
+  const url = new URL(refreshUrl);
+  const allHeaders: Record<string, string> = {
+    "Content-Type": "application/json",
+    "Access-Key": session.accessKey,
+    ...signedHeaders,
+    "Content-Length": String(Buffer.byteLength(body)),
+  };
+
+  const rawData = await new Promise<string>((resolve, reject) => {
+    const req = https.request(
+      {
+        hostname: url.hostname,
+        port: url.port || 443,
+        path: url.pathname + url.search,
+        method: "POST",
+        headers: allHeaders,
+      },
+      (res) => {
+        let data = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk: string) => { data += chunk; });
+        res.on("end", () => resolve(data));
+        res.on("error", reject);
+      },
+    );
+    req.on("error", reject);
+    req.setTimeout(15_000, () => {
+      req.destroy();
+      reject(new Error(`Refresh request timeout: ${refreshUrl}`));
+    });
+    req.write(body);
+    req.end();
   });
 
-  return { raw: response.data };
+  let parsed: unknown;
+  try { parsed = JSON.parse(rawData); } catch { parsed = rawData; }
+  return { raw: parsed };
 }

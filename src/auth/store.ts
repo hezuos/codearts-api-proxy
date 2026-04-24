@@ -12,7 +12,6 @@ import {
   getApiKey,
   setApiKey,
   findApiKeyByValue,
-  removeApiKeyFromValueIndex as _removeApiKeyFromValueIndex,
   getSessionByKeyId,
   setSession,
   deleteKey,
@@ -205,7 +204,7 @@ export function listApiKeysByUser(userId: string): ApiKey[] {
 // Bootstrap (no default key — only creates user)
 // ---------------------------------------------------------------------------
 
-export function bootstrapDefaultAuth(_rawApiKey: string): void {
+export function bootstrapDefaultAuth(): void {
   let user = getDefaultUser();
   if (!user) {
     user = createUser({

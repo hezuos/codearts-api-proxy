@@ -29,11 +29,6 @@ export function storeSession(
   setSession(keyId, session);
 }
 
-export function deleteSession(_keyId: string): void {
-  // Session deletion is handled by deleteKey cascade in hierarchical-store
-  // This function is kept for API compatibility but is a no-op
-}
-
 // ---------------------------------------------------------------------------
 // Refresh
 // ---------------------------------------------------------------------------

@@ -78,9 +78,3 @@ export function updateLastLogin(): void {
     }
   }
 }
-
-export function getAdminSource(): "env" | "setup" | null {
-  if (adminPasswordFromEnv !== null) return "env";
-  if (adminConfig !== null) return adminConfig.source;
-  return null;
-}
