@@ -179,11 +179,16 @@ export function deleteKey(
   // Update in-memory caches
   const apiKey = apiKeys.get(keyId);
   if (apiKey) {
-    apiKeysByValue.delete(apiKey.keyHash);
-    // Also clean hash index — try all possible hashes
-    // (keyHash may be plaintext or hash depending on migration state)
+    // Clean hash index
     if (isHashedKey(apiKey.keyHash)) {
       apiKeysByHash.delete(apiKey.keyHash);
+    }
+    // Clean legacy plaintext index — find by value reference
+    for (const [k, v] of apiKeysByValue) {
+      if (v.id === keyId) {
+        apiKeysByValue.delete(k);
+        break;
+      }
     }
   }
   apiKeys.delete(keyId);
@@ -273,7 +278,7 @@ export function getAllProviderAccounts(): ProviderAccount[] {
 }
 
 export function getAllSessions(): Map<string, StoredHuaweiSession> {
-  return sessions;
+  return new Map(sessions);
 }
 
 // ---------------------------------------------------------------------------
@@ -295,7 +300,6 @@ export function setApiKey(
   rawKeyValue: string,
 ): void {
   apiKeys.set(apiKey.id, apiKey);
-  apiKeysByValue.set(rawKeyValue, apiKey); // legacy plaintext index
   apiKeysByHash.set(hashApiKey(rawKeyValue), apiKey); // SHA-256 hash index
   keyLocation.set(apiKey.id, {
     userId: apiKey.userId,
@@ -316,12 +320,8 @@ export function setSession(
 }
 
 export function findApiKeyByValue(rawKey: string): ApiKey | undefined {
-  // Prefer SHA-256 hash lookup (secure, timing-safe)
-  const hashed = hashApiKey(rawKey);
-  const byHash = apiKeysByHash.get(hashed);
-  if (byHash) return byHash;
-  // Fallback to legacy plaintext index for backward compatibility
-  return apiKeysByValue.get(rawKey);
+  // SHA-256 hash lookup only (plaintext index removed at runtime)
+  return apiKeysByHash.get(hashApiKey(rawKey));
 }
 
 /** Write ApiKey to file using its location info */
@@ -347,43 +347,59 @@ export function loadAllEntities(): void {
 
   const userIds = listUsers();
   for (const userId of userIds) {
-    const user = readUserProfile(userId);
-    if (user) {
-      users.set(userId, user);
+    try {
+      const user = readUserProfile(userId);
+      if (user) {
+        users.set(userId, user);
+      }
+    } catch (error) {
+      logger.warn("Failed to load user profile, skipping", { userId, error: error instanceof Error ? error.message : String(error) });
     }
 
     const accountIds = listAccounts(userId);
     for (const accountId of accountIds) {
-      const account = readAccount(userId, accountId);
-      if (account) {
-        providerAccounts.set(accountId, account);
+      try {
+        const account = readAccount(userId, accountId);
+        if (account) {
+          providerAccounts.set(accountId, account);
+        }
+      } catch (error) {
+        logger.warn("Failed to load account, skipping", { userId, accountId, error: error instanceof Error ? error.message : String(error) });
       }
 
       const keyIds = listKeys(userId, accountId);
       for (const keyId of keyIds) {
-        const apiKey = readKey(userId, accountId, keyId);
-        if (apiKey) {
-          apiKeys.set(keyId, apiKey);
+        try {
+          const apiKey = readKey(userId, accountId, keyId);
+          if (apiKey) {
+            apiKeys.set(keyId, apiKey);
 
-          // Migrate plaintext keyHash to SHA-256 hash
-          if (!isHashedKey(apiKey.keyHash)) {
-            // keyHash contains plaintext — keep in legacy index and add hash index
-            apiKeysByValue.set(apiKey.keyHash, apiKey);
-            apiKeysByHash.set(hashApiKey(apiKey.keyHash), apiKey);
-            // Persist the migration: update keyHash to the hash value
-            apiKey.keyHash = hashApiKey(apiKey.keyHash);
-            writeApiKey(apiKey);
-          } else {
-            // keyHash is already a hash — only populate hash index
-            apiKeysByHash.set(apiKey.keyHash, apiKey);
+            // Migrate plaintext keyHash to SHA-256 hash
+            if (!isHashedKey(apiKey.keyHash)) {
+              // keyHash contains plaintext — keep in legacy index and add hash index
+              apiKeysByValue.set(apiKey.keyHash, apiKey);
+              apiKeysByHash.set(hashApiKey(apiKey.keyHash), apiKey);
+              // Persist the migration: update keyHash to the hash value
+              apiKey.keyHash = hashApiKey(apiKey.keyHash);
+              writeApiKey(apiKey);
+            } else {
+              // keyHash is already a hash — only populate hash index
+              apiKeysByHash.set(apiKey.keyHash, apiKey);
+            }
+
+            keyLocation.set(keyId, { userId, accountId });
           }
-
-          keyLocation.set(keyId, { userId, accountId });
+        } catch (error) {
+          logger.warn("Failed to load API key, skipping", { userId, accountId, keyId, error: error instanceof Error ? error.message : String(error) });
         }
 
-        const session = readSession(userId, accountId, keyId);
-        if (session) {
-          sessions.set(keyId, session);
+        try {
+          const session = readSession(userId, accountId, keyId);
+          if (session) {
+            sessions.set(keyId, session);
+          }
+        } catch (error) {
+          logger.warn("Failed to load session, skipping", { userId, accountId, keyId, error: error instanceof Error ? error.message : String(error) });
         }
       }
     }
