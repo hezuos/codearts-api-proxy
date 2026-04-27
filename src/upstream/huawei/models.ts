@@ -184,7 +184,9 @@ function httpsGet(
     );
     req.on("error", reject);
     req.setTimeout(10_000, () => {
-      req.destroy(new Error("Model list fetch timed out (10s)"));
+      const err = new Error("Model list fetch timed out (10s)");
+      req.destroy(err);
+      reject(err);
     });
   });
 }
