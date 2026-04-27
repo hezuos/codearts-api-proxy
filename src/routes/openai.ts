@@ -120,9 +120,9 @@ export function createChatCompletion(req: Request, res: Response): void {
   log.debug("Incoming body (full)", { body: req.body });
 
   if (req.body.stream) {
-    void handleStreamingRequest(body, auth.apiKeyId, traceId, res);
+    void handleStreamingRequest(body, auth.session, auth.apiKeyId, traceId, res);
   } else {
-    void handleNonStreamingRequest(body, auth.apiKeyId, traceId, res);
+    void handleNonStreamingRequest(body, auth.session, auth.apiKeyId, traceId, res);
   }
 }
 
@@ -132,6 +132,7 @@ export function createChatCompletion(req: Request, res: Response): void {
 
 async function handleStreamingRequest(
   request: OpenAIChatCompletionRequest,
+  session: StoredHuaweiSession,
   keyId: string,
   traceId: string,
   res: Response,
@@ -144,7 +145,6 @@ async function handleStreamingRequest(
       log.info("Client disconnected, cancelling upstream request");
     }
   });
-  const session = getRequestAuth(res.req as Request).session;
   try {
     await streamHuaweiChatToResponse(request, session, traceId, res, ac.signal);
   } catch (error) {
@@ -168,6 +168,7 @@ async function handleStreamingRequest(
 
 async function handleNonStreamingRequest(
   request: OpenAIChatCompletionRequest,
+  session: StoredHuaweiSession,
   keyId: string,
   traceId: string,
   res: Response,
@@ -180,7 +181,6 @@ async function handleNonStreamingRequest(
       log.info("Client disconnected, cancelling upstream request");
     }
   });
-  const session = getRequestAuth(res.req as Request).session;
   try {
     const response = await sendHuaweiChatRequest(request, session, traceId, ac.signal);
     res.json(response);
