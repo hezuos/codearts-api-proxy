@@ -10,7 +10,7 @@ import {
   setRefreshTaskEnabled,
 } from "./auth/huawei/refresh-task";
 import { loadAdminConfig } from "./auth/admin";
-import { config, rateLimitChatMax, rateLimitModelsMax } from "./config";
+import { config, rateLimitChatMax, rateLimitModelsMax, isDevEncryptionKey } from "./config";
 import { authenticateApiKey } from "./middleware/authenticate-api-key";
 import { withRequestContext } from "./middleware/request-context";
 import { requireUiAuth } from "./middleware/authenticate-ui";
@@ -67,8 +67,12 @@ app.use(express.static("public"));
 app.use(withRequestContext);
 
 loadPersistedAuthStore();
-  bootstrapDefaultAuth();
+bootstrapDefaultAuth();
 loadAdminConfig();
+
+if (isDevEncryptionKey && fs.existsSync(config.dataDir) && fs.readdirSync(config.dataDir).length > 0) {
+  logger.warn("Using hardcoded dev encryption key with existing data — set ENCRYPTION_KEY for security");
+}
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
@@ -98,6 +102,14 @@ app.post("/auth/huawei/browser/finalize/:ticketId", finalizeBrowserHuaweiLogin);
 app.post("/auth/huawei/login", authenticateApiKey, initiateHuaweiLogin);
 app.get("/callback", handleHuaweiCallback);
 app.get("/auth/callback", handleHuaweiCallback);
+
+// Admin rate limiter for unauthenticated endpoints (IP-based, prevents brute force)
+const adminLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 // API routes with rate limiting (keyed by API Key ID)
 const chatLimiter = rateLimit({
@@ -155,9 +167,9 @@ app.post(
 
 // Admin routes
 app.get("/admin/setup", adminSetupPage);
-app.post("/admin/setup", adminSetup);
+app.post("/admin/setup", adminLimiter, adminSetup);
 app.get("/admin/login", adminLoginPage);
-app.post("/admin/login", adminLogin);
+app.post("/admin/login", adminLimiter, adminLogin);
 app.post("/admin/logout", adminLogout);
 app.get("/admin", requireAdminAuth, adminPanel);
 app.get("/admin/api/users", requireAdminAuth, getAllUsers);
