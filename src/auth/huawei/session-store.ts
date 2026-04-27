@@ -75,26 +75,31 @@ export async function refreshStoredSession(
     payload.credentials ??
     resultPayload) as Record<string, unknown>;
 
-  stored.accessKey =
-    typeof credential.access === "string"
-      ? credential.access
-      : stored.accessKey;
-  stored.securityToken =
-    typeof credential.securitytoken === "string"
-      ? credential.securitytoken
-      : stored.securityToken;
-  stored.expiresAt =
-    typeof credential.expires_at === "string"
-      ? credential.expires_at
-      : stored.expiresAt;
-  stored.lastRefreshedAt = new Date().toISOString();
+  // Update a copy first — if encryptString fails, the cached session remains intact
+  const updated: StoredHuaweiSession = {
+    ...stored,
+    accessKey:
+      typeof credential.access === "string"
+        ? credential.access
+        : stored.accessKey,
+    securityToken:
+      typeof credential.securitytoken === "string"
+        ? credential.securitytoken
+        : stored.securityToken,
+    expiresAt:
+      typeof credential.expires_at === "string"
+        ? credential.expires_at
+        : stored.expiresAt,
+    lastRefreshedAt: new Date().toISOString(),
+  };
+
   if (typeof credential.secret === "string") {
     const { encryptString } = await import("../crypto/encryption");
-    stored.secretKeyCiphertext = encryptString(credential.secret);
+    updated.secretKeyCiphertext = encryptString(credential.secret);
   }
 
-  setSession(keyId, stored);
-  return stored;
+  setSession(keyId, updated);
+  return updated;
 }
 
 // ---------------------------------------------------------------------------
