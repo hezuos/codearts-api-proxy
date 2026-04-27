@@ -59,7 +59,7 @@ The system SHALL persist admin password hash in `data/admin-config.json` file.
 
 ### REQ-ADMIN-AUTH-004: Admin login authentication
 
-The system SHALL authenticate admin login requests using bcrypt password comparison.
+The system SHALL authenticate admin login requests using constant-time password comparison to prevent timing side-channel attacks.
 
 #### Scenario: Successful admin login
 
@@ -73,6 +73,12 @@ The system SHALL authenticate admin login requests using bcrypt password compari
 - **WHEN** admin submits incorrect password on `/admin/login`
 - **THEN** system SHALL return error message "Invalid password"
 - **AND** system SHALL NOT set admin session cookie
+
+#### Scenario: Environment variable password uses timing-safe comparison
+
+- **WHEN** admin password is set via `ADMIN_PASSWORD` environment variable
+- **THEN** system SHALL compare submitted password using `crypto.timingSafeEqual`
+- **AND** comparison time SHALL NOT correlate with number of matching characters
 
 ### REQ-ADMIN-AUTH-005: Admin session cookie
 
