@@ -137,17 +137,23 @@ async function handleStreamingRequest(
   res: Response,
 ): Promise<void> {
   const log = logger.withTrace(traceId);
-  const auth = getRequestAuth(res.req as Request);
-  const session = auth.session;
+  const ac = new AbortController();
+  res.on("close", () => {
+    if (!res.writableEnded) {
+      ac.abort();
+      log.info("Client disconnected, cancelling upstream request");
+    }
+  });
+  const session = getRequestAuth(res.req as Request).session;
   try {
-    await streamHuaweiChatToResponse(request, session, traceId, res);
+    await streamHuaweiChatToResponse(request, session, traceId, res, ac.signal);
   } catch (error) {
     if (error instanceof UpstreamAuthError && !res.headersSent) {
       log.info("Auth error, refreshing credentials", { httpStatus: error.httpStatus });
       const refreshed = await tryRefreshSession(keyId, traceId);
       if (refreshed) {
         try {
-          await streamHuaweiChatToResponse(request, refreshed, traceId, res);
+          await streamHuaweiChatToResponse(request, refreshed, traceId, res, ac.signal);
           return;
         } catch (retryError) {
           log.error("Retry after refresh also failed", { error: retryError instanceof Error ? retryError.message : String(retryError) });
@@ -167,10 +173,16 @@ async function handleNonStreamingRequest(
   res: Response,
 ): Promise<void> {
   const log = logger.withTrace(traceId);
-  const auth = getRequestAuth(res.req as Request);
-  const session = auth.session;
+  const ac = new AbortController();
+  res.on("close", () => {
+    if (!res.writableEnded) {
+      ac.abort();
+      log.info("Client disconnected, cancelling upstream request");
+    }
+  });
+  const session = getRequestAuth(res.req as Request).session;
   try {
-    const response = await sendHuaweiChatRequest(request, session, traceId);
+    const response = await sendHuaweiChatRequest(request, session, traceId, ac.signal);
     res.json(response);
   } catch (error) {
     if (error instanceof UpstreamAuthError) {
@@ -182,6 +194,7 @@ async function handleNonStreamingRequest(
             request,
             refreshed,
             traceId,
+            ac.signal,
           );
           res.json(response);
           return;
