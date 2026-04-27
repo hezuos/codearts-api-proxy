@@ -8,10 +8,9 @@ updated: 2026-04-19
 
 # Status Page
 
-## Overview
+## Purpose
 
-The status page SHALL let authenticated users inspect and manage their bound Huawei accounts, token state, and active API key.
-
+Let authenticated users inspect and manage their bound Huawei accounts, token state, and active API key.
 ## Requirements
 
 ### REQ-STATUS-001: Status page displays all bound accounts
@@ -118,3 +117,13 @@ The system SHALL require valid `auth_key` cookie to access status page.
 
 - **WHEN** user accesses `/status` without valid `auth_key` cookie
 - **THEN** system SHALL redirect to home page `/`
+
+### Requirement: Status page visual design
+
+The status/success pages SHALL use CSS variable design tokens for all visual properties, enabling dark mode and consistent theming with the rest of the application.
+
+#### Scenario: Success page uses design tokens
+
+- **WHEN** the success page is rendered
+- **THEN** all colors, spacing, and radius values SHALL reference CSS variables from the design system
+

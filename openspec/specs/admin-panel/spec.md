@@ -8,10 +8,9 @@ updated: 2026-04-19
 
 # Admin Panel
 
-## Overview
+## Purpose
 
-The admin panel SHALL provide authenticated administrators with visibility into users, accounts, and API keys plus operational controls for account management.
-
+Provide authenticated administrators with visibility and control over users, accounts, and API keys.
 ## Requirements
 
 ### REQ-ADMIN-PANEL-001: Admin panel displays system status
@@ -116,3 +115,37 @@ The system SHALL allow admin to logout from the panel.
 - **WHEN** admin clicks "Logout" button
 - **THEN** system SHALL clear `admin_session` cookie
 - **AND** system SHALL redirect to home page `/`
+
+### Requirement: Admin panel styling
+
+The admin panel SHALL use shared CSS from style.css only. All component styles (modal, key-row, menu-wrap, action-popover, dropdown, session-badge, button variants) SHALL be defined in style.css using CSS variable design tokens. No inline `<style>` block SHALL exist in admin.html.
+
+#### Scenario: Admin uses design tokens
+
+- **WHEN** the admin page is rendered
+- **THEN** all visual properties SHALL reference CSS variables from the design system, enabling dark mode and consistent theming
+
+### Requirement: Admin panel mobile layout
+
+The admin panel SHALL provide a card-based layout for data tables on viewports below 768px, and allow key rows to wrap.
+
+#### Scenario: Accounts table becomes cards on mobile
+
+- **WHEN** viewport width is below 768px on the admin page
+- **THEN** the accounts table SHALL be hidden and a card list SHALL be shown, with each account rendered as a card containing all fields (username, domain, provider, status, keys, actions)
+
+#### Scenario: Users table becomes cards on mobile
+
+- **WHEN** viewport width is below 768px on the admin page
+- **THEN** the users table SHALL be hidden and a card list SHALL be shown
+
+#### Scenario: Desktop tables unchanged
+
+- **WHEN** viewport width is 768px or above
+- **THEN** admin tables SHALL render as normal tables and card lists SHALL be hidden
+
+#### Scenario: Key rows wrap on mobile
+
+- **WHEN** viewport width is below 768px
+- **THEN** `.key-row` SHALL allow `flex-wrap: wrap` so elements flow to the next line instead of overflowing
+
