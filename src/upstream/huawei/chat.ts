@@ -40,22 +40,21 @@ export async function sendHuaweiChatRequest(
   const log = logger.withTrace(traceId);
   const credentials = getCredentials(session);
   const chatUrl = `${config.huaweiChatHost}/v1/chat/chat`;
-  const body = buildRequestBody(request, session);
+  const { body: requestBody, json: body } = buildRequestBody(request, session);
   const headers = buildChatHeaders(chatUrl, body, credentials, traceId);
 
   // ── Outgoing request log ──────────────────────────────────────────────────
-  const parsedBody = JSON.parse(body) as Record<string, unknown>;
-  const tp = parsedBody.task_parameters as Record<string, unknown> | undefined;
+  const tp = requestBody.task_parameters as Record<string, unknown> | undefined;
   const toolResultCount = Array.isArray(tp?.tool_result)
     ? (tp.tool_result as unknown[]).length
     : 0;
-  const msgArr = parsedBody.messages as unknown[];
+  const msgArr = requestBody.messages as unknown[];
 
   log.info("OUTGOING REQUEST → CodeArts (non-stream)", {
     url: `POST ${chatUrl}`,
-    model_id: parsedBody.model_id,
-    chat_id: parsedBody.chat_id,
-    parent_message_id: parsedBody.parent_message_id,
+    model_id: requestBody.model_id,
+    chat_id: requestBody.chat_id,
+    parent_message_id: requestBody.parent_message_id,
     messagesCount: msgArr.length,
     toolResultCount,
   });
@@ -63,12 +62,12 @@ export async function sendHuaweiChatRequest(
 
   // ── Continuity info ───────────────────────────────────────────────────────
   if (!request.codearts?.chat_id) {
-    log.info("chat_id derived from message hash", { chat_id: parsedBody.chat_id });
+    log.info("chat_id derived from message hash", { chat_id: requestBody.chat_id });
   }
-  if (!request.codearts?.parent_message_id && parsedBody.parent_message_id) {
-    log.info("parent_message_id auto-filled from last turn", { parent_message_id: parsedBody.parent_message_id });
+  if (!request.codearts?.parent_message_id && requestBody.parent_message_id) {
+    log.info("parent_message_id auto-filled from last turn", { parent_message_id: requestBody.parent_message_id });
   }
-  if (toolResultCount > 0 && !parsedBody.parent_message_id) {
+  if (toolResultCount > 0 && !requestBody.parent_message_id) {
     log.warn("tool_result continuation but parent_message_id is empty");
   }
 
@@ -109,7 +108,11 @@ export async function sendHuaweiChatRequest(
       log.debug("SSE meta", { chat_id: event.chat_id, response_message_id: event.response_message_id });
     }
 
-    if (event.error_code && event.error_code !== "0") {
+    if (event.error_code && event.error_code !== "0" && event.error_code !== "ChatAgent.00000000") {
+      if (event.error_code === "PROTOCOL_ERROR") {
+        // Malformed SSE line — skip, don't fail the entire request
+        continue;
+      }
       sseHadError = true;
       log.error("SSE error from CodeArts", { code: event.error_code, msg: event.error_msg ?? "unknown" });
       throw new Error(
@@ -129,7 +132,9 @@ export async function sendHuaweiChatRequest(
       }
     }
     const mapped = mapToolCalls(event.delta?.tool_calls);
-    if (mapped) toolCalls = mapped;
+    if (mapped) {
+      toolCalls = toolCalls ? [...toolCalls, ...mapped] : mapped;
+    }
     if (event.prompt_tokens) promptTokens = event.prompt_tokens;
     if (event.completion_tokens) completionTokens = event.completion_tokens;
   }
