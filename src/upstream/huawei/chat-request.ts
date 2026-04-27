@@ -4,7 +4,7 @@
 
 import { randomUUID, createHash } from "crypto";
 import https from "https";
-import { config } from "../../config";
+import { config, upstreamTimeoutMs } from "../../config";
 import { getProviderAccount } from "../../auth/store";
 import { signRequest, type SigningCredentials } from "../../auth/huawei/credentials";
 import type { StoredHuaweiSession } from "../../auth/huawei/session-store";
@@ -85,13 +85,16 @@ export function setChatIdRole(chatId: string, role: "main" | "sub"): void {
 // Conversation ID derivation
 // ---------------------------------------------------------------------------
 
-function deriveConversationId(messages: OpenAIChatMessage[]): string {
+function deriveConversationId(
+  messages: OpenAIChatMessage[],
+  providerAccountId: string,
+): string {
   const firstMsg =
     messages.find((m) => m.role === "user") ??
     messages.find((m) => m.role === "system");
   if (!firstMsg) return randomUUID().replace(/-/g, "");
   const content = normalizeMessageContent(firstMsg.content);
-  return createHash("sha256").update(content).digest("hex").slice(0, 32);
+  return createHash("sha256").update(`${providerAccountId}:${content}`).digest("hex").slice(0, 32);
 }
 
 // ---------------------------------------------------------------------------
@@ -142,7 +145,7 @@ function buildTaskParameters(
 export function buildRequestBody(
   request: OpenAIChatCompletionRequest,
   session: StoredHuaweiSession,
-): string {
+): { body: Record<string, unknown>; json: string } {
   const toolResults = extractToolResults(request);
   const isToolContinuation = toolResults.length > 0;
   const subAgent = request.codearts?.sub_agent;
@@ -151,7 +154,7 @@ export function buildRequestBody(
   const modelId = resolveModelId(request);
 
   const chatId =
-    request.codearts?.chat_id?.trim() || deriveConversationId(request.messages);
+    request.codearts?.chat_id?.trim() || deriveConversationId(request.messages, session.providerAccountId);
 
   // Sub-agent / main-agent chat_id collision detection
   const currentRole = subAgent ? "sub" : "main";
@@ -202,7 +205,7 @@ export function buildRequestBody(
     model_id: modelId,
   };
 
-  return JSON.stringify(body);
+  return { body, json: JSON.stringify(body) };
 }
 
 // ---------------------------------------------------------------------------
@@ -247,8 +250,14 @@ export function httpsPost(
   urlStr: string,
   headers: Record<string, string>,
   body: string,
+  signal?: AbortSignal,
 ): Promise<{ status: number; stream: AsyncIterable<string> }> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error("Request aborted before start"));
+      return;
+    }
+
     const url = new URL(urlStr);
     const req = https.request(
       {
@@ -257,6 +266,7 @@ export function httpsPost(
         path: url.pathname + url.search,
         method: "POST",
         headers: { ...headers, "Content-Length": Buffer.byteLength(body) },
+        signal,
       },
       (res) => {
         res.setEncoding("utf8");
@@ -264,6 +274,7 @@ export function httpsPost(
           [Symbol.asyncIterator]() {
             let buf = "";
             let done = false;
+            let streamError: Error | null = null;
             const pending: Array<{
               resolve: (v: IteratorResult<string>) => void;
             }> = [];
@@ -297,7 +308,8 @@ export function httpsPost(
               done = true;
               flush();
             });
-            res.on("error", () => {
+            res.on("error", (err: Error) => {
+              streamError = err;
               done = true;
               flush();
             });
@@ -309,8 +321,10 @@ export function httpsPost(
                     value: lines.shift()!,
                     done: false,
                   });
-                if (done)
+                if (done) {
+                  if (streamError) return Promise.reject(streamError);
                   return Promise.resolve({ value: "", done: true as const });
+                }
                 return new Promise<IteratorResult<string>>((resolve) => {
                   pending.push({ resolve });
                 });
@@ -322,9 +336,9 @@ export function httpsPost(
       },
     );
     req.on("error", reject);
-    req.setTimeout(120_000, () => {
+    req.setTimeout(upstreamTimeoutMs, () => {
       req.destroy();
-      reject(new UpstreamTimeoutError(urlStr, 120_000));
+      reject(new UpstreamTimeoutError(urlStr, upstreamTimeoutMs));
     });
     req.write(body);
     req.end();
