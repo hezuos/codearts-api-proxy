@@ -23,6 +23,13 @@ export function loadPersistedAuthStore(): void {
 // ---------------------------------------------------------------------------
 
 export function createUser(input: Pick<User, "email" | "displayName">): User {
+  const existing = getDefaultUser();
+  if (existing) {
+    throw new Error(
+      "Single-user system: cannot create additional users. Use getDefaultUser() to access the existing user.",
+    );
+  }
+
   const now = new Date().toISOString();
   const user: User = {
     id: randomUUID(),
