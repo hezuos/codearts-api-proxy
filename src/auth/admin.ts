@@ -1,4 +1,5 @@
 import bcrypt from "bcryptjs";
+import { timingSafeEqual } from "crypto";
 import { readPlaintextFile, writePlaintextFile } from "../store/file-store";
 import { adminPath } from "../store/paths";
 import { logger } from "../utils/logger";
@@ -53,9 +54,12 @@ export function isAdminConfigured(): boolean {
 }
 
 export function checkAdminPassword(password: string): boolean {
-  // If password from environment, compare directly
+  // If password from environment, use timing-safe comparison
   if (adminPasswordFromEnv !== null) {
-    return password === adminPasswordFromEnv;
+    const a = Buffer.from(password, "utf8");
+    const b = Buffer.from(adminPasswordFromEnv, "utf8");
+    if (a.length !== b.length) return false;
+    return timingSafeEqual(a, b);
   }
 
   // If config from file, use bcrypt comparison
