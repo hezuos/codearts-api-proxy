@@ -55,6 +55,14 @@ The system SHALL issue and validate API keys for proxy users to authorize OpenAI
 - **AND** the system SHALL look up the key in the hash index
 - **AND** the system SHALL NOT access any plaintext value index at runtime
 
+#### Scenario: Backward compatibility with plaintext keyHash
+
+- **GIVEN** an existing deployment where `keyHash` field contains the plaintext API key
+- **WHEN** the system starts and loads existing keys
+- **THEN** the system SHALL detect plaintext keyHash values (not matching SHA-256 format)
+- **AND** the system SHALL migrate them to SHA-256 hash during startup
+- **AND** the system SHALL maintain both plaintext and hash indexes during transition
+
 ### Requirement: Session refresh atomicity
 
 The system SHALL update session credentials atomically — if refresh fails partway, the cached session SHALL remain in its pre-refresh state.

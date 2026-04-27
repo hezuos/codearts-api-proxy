@@ -28,7 +28,7 @@ The system SHALL provide an OpenAI-compatible models endpoint for clients integr
 
 ### REQ-API-002: Chat completions endpoint
 
-The system SHALL provide an OpenAI-compatible chat completions endpoint for non-streaming requests. The request body construction SHALL return a structured object to avoid double serialization. The conversation ID derivation SHALL include user identity to prevent cross-account collision.
+The system SHALL provide an OpenAI-compatible chat completions endpoint for non-streaming requests. The request body construction SHALL return a structured object to avoid double serialization. The conversation ID derivation SHALL include user identity to prevent cross-account collision. The implementation SHALL use a unified HTTP client (native `https` module) and shared request construction logic.
 
 **Rationale:** Non-streaming chat completions are the primary interface for LLM interactions. `buildRequestBody` returning JSON string then immediately `JSON.parse` wastes CPU on large request bodies. `deriveConversationId` using only message content causes collision when different accounts send the same first message.
 
@@ -53,7 +53,7 @@ The system SHALL provide an OpenAI-compatible chat completions endpoint for non-
 
 ### REQ-API-003: Streaming chat completions endpoint
 
-The system SHALL provide an OpenAI-compatible chat completions streaming mode. The upstream request timeout SHALL be configurable via environment variable.
+The system SHALL provide an OpenAI-compatible chat completions streaming mode. The upstream request timeout SHALL be configurable via environment variable. The implementation SHALL use a unified HTTP client and shared request construction logic, with no duplicated code between streaming and non-streaming paths.
 
 **Rationale:** Streaming responses enable real-time output for interactive applications. Hardcoded 120s timeout may be insufficient for long-running agent conversations.
 
@@ -63,8 +63,7 @@ The system SHALL provide an OpenAI-compatible chat completions streaming mode. T
 - **WHEN** the system processes the request
 - **THEN** the system SHALL return an OpenAI-compatible event stream
 - **AND** the stream SHALL represent incremental completion output
-
-#### Scenario: Upstream timeout is configurable
+- **AND** the request construction and logging SHALL be shared with the non-streaming path
 
 - **WHEN** the `UPSTREAM_TIMEOUT_MS` environment variable is set
 - **THEN** the system SHALL use that value as the upstream HTTPS request timeout
