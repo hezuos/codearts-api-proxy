@@ -36,6 +36,7 @@ export async function sendHuaweiChatRequest(
   request: OpenAIChatCompletionRequest,
   session: StoredHuaweiSession,
   traceId: string,
+  signal?: AbortSignal,
 ): Promise<OpenAIChatCompletion> {
   const log = logger.withTrace(traceId);
   const credentials = getCredentials(session);
@@ -71,7 +72,7 @@ export async function sendHuaweiChatRequest(
     log.warn("tool_result continuation but parent_message_id is empty");
   }
 
-  const { status, stream } = await httpsPost(chatUrl, headers, body);
+  const { status, stream } = await httpsPost(chatUrl, headers, body, signal);
 
   log.info("CodeArts HTTP response", { status });
 
