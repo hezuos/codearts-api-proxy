@@ -40,7 +40,10 @@
           <p>
             <input type="text" id="callback-url-input" placeholder="http://127.0.0.1:1455/callback?identifier=...&redirect=..." style="width: 100%; font-family: monospace; font-size: 0.85em;" />
           </p>
-          <p><button onclick="submitCallbackUrl()">Submit Callback URL</button></p>
+          <p>
+            <button id="paste-clipboard-btn" onclick="pasteFromClipboard()" title="Requires HTTPS or localhost to access clipboard">Paste from Clipboard</button>
+            <button onclick="submitCallbackUrl()">Submit Callback URL</button>
+          </p>
           <div id="callback-error" class="hidden" style="color: #c00;"></div>
         </div>
       </div>
@@ -73,6 +76,13 @@ openai chat.completions.create \
         if (hostname !== "localhost" && hostname !== "127.0.0.1") {
           const section = document.getElementById("paste-callback-section");
           if (section) section.classList.remove("hidden");
+        }
+
+        // Disable "Paste from Clipboard" button if clipboard API is not available (HTTP context)
+        const pasteBtn = document.getElementById("paste-clipboard-btn");
+        if (pasteBtn && !navigator.clipboard?.readText) {
+          pasteBtn.disabled = true;
+          pasteBtn.title = "Clipboard access requires HTTPS. Please paste manually (Ctrl+V) and click Submit.";
         }
       })();
 
@@ -123,6 +133,35 @@ openai chat.completions.create \
         if (!result.success) {
           errorDiv.textContent = result.error;
           errorDiv.classList.remove("hidden");
+        }
+      }
+
+      async function pasteFromClipboard() {
+        const input = document.getElementById("callback-url-input");
+        const errorDiv = document.getElementById("callback-error");
+        errorDiv.classList.add("hidden");
+        errorDiv.textContent = "";
+
+        try {
+          const text = await navigator.clipboard.readText();
+          if (!text || !text.trim()) {
+            errorDiv.textContent = "Clipboard is empty. Copy the callback URL from the browser address bar first.";
+            errorDiv.classList.remove("hidden");
+            return;
+          }
+          input.value = text.trim();
+
+          // Auto-validate and submit if format is correct
+          const result = pasteAndRedirectCallbackUrl(text.trim());
+          if (!result.success) {
+            errorDiv.textContent = result.error;
+            errorDiv.classList.remove("hidden");
+          }
+        } catch {
+          // clipboard-read permission denied or not available (HTTP context)
+          errorDiv.textContent = "Cannot read clipboard. Please paste the URL manually (Ctrl+V) and click Submit.";
+          errorDiv.classList.remove("hidden");
+          input.focus();
         }
       }
     </script>
