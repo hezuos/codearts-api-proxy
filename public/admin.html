@@ -115,7 +115,7 @@
       .action-popover {
         display: none;
         position: absolute;
-        right: calc(100% + 4px);
+        right: 100%;
         top: 50%;
         transform: translateY(-50%);
         background: white;
@@ -127,6 +127,7 @@
         align-items: center;
         gap: 4px;
         white-space: nowrap;
+        margin-right: -1px;
       }
       .menu-wrap:hover .action-popover,
       .menu-wrap.open .action-popover {
@@ -178,7 +179,8 @@
         display: none;
         position: absolute;
         right: 0;
-        top: calc(100% + 2px);
+        top: 100%;
+        margin-top: -1px;
         background: white;
         border: 1px solid #ddd;
         border-radius: 4px;
