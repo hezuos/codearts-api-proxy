@@ -27,10 +27,13 @@ export interface AppConfig {
   modelCacheTtl: number;
 }
 
-function requireEnv(name: string, fallback?: string): string {
+function requireEnv(name: string, fallback?: string, hint?: string): string {
   const value = process.env[name] ?? fallback;
   if (!value) {
-    throw new Error(`Missing required environment variable: ${name}`);
+    const message = hint
+      ? `Missing required environment variable: ${name}\n\n${hint}`
+      : `Missing required environment variable: ${name}`;
+    throw new Error(message);
   }
   return value;
 }
@@ -46,6 +49,9 @@ export const config: AppConfig = {
     (process.env.NODE_ENV ?? "development") === "production"
       ? undefined // Production MUST set ENCRYPTION_KEY — no insecure fallback
       : "dev-only-32-byte-encryption-key!",
+    "ENCRYPTION_KEY encrypts AK/SK credentials stored in the data/ directory.\n" +
+      "Generate a key: node -e \"console.log(require('crypto').randomBytes(32).toString('base64'))\"\n" +
+      "Set via: ENCRYPTION_KEY=<key> in environment or .env file",
   ),
   defaultApiKey: process.env.DEFAULT_API_KEY ?? "dev-openai-compatible-key",
   huaweiApiHost:
