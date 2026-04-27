@@ -12,6 +12,7 @@
 
       <div class="nav">
         <a href="/">Home</a>
+        <span class="version-badge"></span>
       </div>
 
       <div id="loading" class="loading">
@@ -170,6 +171,7 @@ response = client.chat.completions.create(
       }
 
       loadLoginResult();
+      loadAndShowVersion();
     </script>
   </body>
 </html>

@@ -226,15 +226,18 @@
       <h1>Admin Panel</h1>
 
       <div class="nav">
-        <a href="/">Home</a>
-        <a
-          href="#"
-          onclick="
-            logout();
-            return false;
-          "
-          >Logout</a
-        >
+        <div>
+          <a href="/">Home</a>
+          <a
+            href="#"
+            onclick="
+              logout();
+              return false;
+            "
+            >Logout</a
+          >
+        </div>
+        <span class="version-badge"></span>
       </div>
 
       <div id="loading" class="loading">
@@ -584,6 +587,7 @@
       }
 
       loadAdminData();
+      loadAndShowVersion();
     </script>
   </body>
 </html>

@@ -376,3 +376,31 @@ function pasteAndRedirectCallbackUrl(callbackUrl) {
   LoginWindowManager.open(url.toString());
   return { success: true };
 }
+
+/**
+ * Fetch version from /health and display in all .version-badge placeholders.
+ * Shows version, git commit hash, and build time.
+ * Silently hides placeholders if fetch fails.
+ */
+async function loadAndShowVersion() {
+  const badges = document.querySelectorAll(".version-badge");
+  if (!badges.length) return;
+  try {
+    const res = await fetch("/health");
+    if (!res.ok) throw new Error(res.statusText);
+    const data = await res.json();
+    if (data.version) {
+      const parts = ["v" + data.version];
+      if (data.gitCommit && data.gitCommit !== "unknown") parts.push(data.gitCommit);
+      if (data.buildTime) parts.push(data.buildTime);
+      const text = parts.join(" · ");
+      badges.forEach((b) => {
+        b.textContent = text;
+        b.title = "Version: " + data.version + (data.gitCommit ? "\nCommit: " + data.gitCommit : "") + (data.buildTime ? "\nBuilt: " + data.buildTime : "");
+        b.style.display = "";
+      });
+    }
+  } catch {
+    badges.forEach((b) => (b.style.display = "none"));
+  }
+}

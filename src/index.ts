@@ -3,6 +3,7 @@ import fs from "fs";
 import cookieParser from "cookie-parser";
 import rateLimit from "express-rate-limit";
 import type { NextFunction, Request, Response } from "express";
+import { APP_VERSION, GIT_COMMIT, BUILD_TIME } from "./version";
 import { bootstrapDefaultAuth, loadPersistedAuthStore } from "./auth/store";
 import {
   startHuaweiRefreshTask,
@@ -75,7 +76,7 @@ if (isDevEncryptionKey && fs.existsSync(config.dataDir) && fs.readdirSync(config
 }
 
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok" });
+  res.json({ status: "ok", version: APP_VERSION, gitCommit: GIT_COMMIT, buildTime: BUILD_TIME });
 });
 
 // Readiness probe — checks if the system can process requests
@@ -84,9 +85,9 @@ app.get("/ready", (_req, res) => {
     const testFile = `${config.dataDir}/.ready-check`;
     fs.writeFileSync(testFile, "ok");
     fs.unlinkSync(testFile);
-    res.json({ status: "ok", checks: { store: true } });
+    res.json({ status: "ok", version: APP_VERSION, gitCommit: GIT_COMMIT, buildTime: BUILD_TIME, checks: { store: true } });
   } catch {
-    res.status(503).json({ status: "degraded", checks: { store: false } });
+    res.status(503).json({ status: "degraded", version: APP_VERSION, gitCommit: GIT_COMMIT, buildTime: BUILD_TIME, checks: { store: false } });
   }
 });
 

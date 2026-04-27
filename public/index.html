@@ -11,11 +11,14 @@
       <h1>CodeArts Agent Proxy</h1>
 
       <div class="nav">
-        <h2>Welcome</h2>
-        <p>
-          This proxy allows you to use Huawei Cloud CodeArts as an
-          OpenAI-compatible API endpoint.
-        </p>
+        <div>
+          <h2>Welcome</h2>
+          <p>
+            This proxy allows you to use Huawei Cloud CodeArts as an
+            OpenAI-compatible API endpoint.
+          </p>
+        </div>
+        <span class="version-badge"></span>
       </div>
 
       <h2>Quick Start</h2>
@@ -164,6 +167,7 @@ openai chat.completions.create \
           input.focus();
         }
       }
+      loadAndShowVersion();
     </script>
   </body>
 </html>

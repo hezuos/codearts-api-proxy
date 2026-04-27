@@ -203,6 +203,9 @@ pre {
 }
 
 .nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   margin-bottom: 20px;
   padding-bottom: 20px;
   border-bottom: 1px solid #eee;
@@ -285,4 +288,15 @@ th {
 
 tr:hover {
   background-color: #fafafa;
+}
+
+.version-badge {
+  font-size: 0.8em;
+  color: #999;
+  font-family: "Courier New", Courier, monospace;
+  white-space: nowrap;
+}
+
+h1 .version-badge {
+  margin-left: 12px;
 }
