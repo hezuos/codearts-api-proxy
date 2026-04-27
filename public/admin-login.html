@@ -8,7 +8,7 @@
   </head>
   <body>
     <div class="container">
-      <h1>Admin Login <span class="version-badge"></span></h1>
+      <h1>Admin Login <span class="version-badge"></span> <button class="theme-toggle" onclick="toggleTheme()" title="Toggle dark mode">&#9790;</button></h1>
 
       <form id="login-form" onsubmit="return loginAdmin(event);">
         <div>
@@ -20,8 +20,6 @@
           <button type="submit">Login</button>
         </div>
       </form>
-
-      <div id="error" class="error-message hidden"></div>
     </div>
 
     <script src="/app.js"></script>

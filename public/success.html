@@ -13,6 +13,7 @@
       <div class="nav">
         <a href="/">Home</a>
         <span class="version-badge"></span>
+        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle dark mode">&#9790;</button>
       </div>
 
       <div id="loading" class="loading">
@@ -63,8 +64,6 @@ response = client.chat.completions.create(
     "messages": [{"role": "user", "content": "Hello!"}]
   }'</code></pre>
       </div>
-
-      <div id="error" class="error-message hidden"></div>
     </div>
 
     <script src="/app.js"></script>
@@ -210,9 +209,7 @@ response = client.chat.completions.create(
           document.getElementById("content").classList.remove("hidden");
         } catch (error) {
           document.getElementById("loading").classList.add("hidden");
-          document.getElementById("error").textContent =
-            "Failed to load session information: " + error.message;
-          document.getElementById("error").classList.remove("hidden");
+          showError("Failed to load session information: " + error.message);
         }
       }
 

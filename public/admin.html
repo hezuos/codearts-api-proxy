@@ -5,221 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Admin Panel - CodeArts Agent Proxy</title>
     <link rel="stylesheet" href="/style.css" />
-    <style>
-      .modal-overlay {
-        display: none;
-        position: fixed;
-        inset: 0;
-        background: rgba(0, 0, 0, 0.5);
-        z-index: 100;
-        align-items: center;
-        justify-content: center;
-      }
-      .modal-overlay.active {
-        display: flex;
-      }
-      .modal {
-        background: white;
-        border-radius: 8px;
-        padding: 2rem;
-        max-width: 600px;
-        width: 90%;
-        max-height: 80vh;
-        overflow-y: auto;
-      }
-      .modal h2 {
-        margin-top: 0;
-      }
-      .modal-close {
-        float: right;
-        cursor: pointer;
-        font-size: 1.5rem;
-        line-height: 1;
-      }
-
-      /* Key row layout */
-      .key-row {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        padding: 4px 0;
-      }
-      .key-row + .key-row {
-        border-top: 1px solid #eee;
-      }
-      .key-value {
-        font-family: "Courier New", Courier, monospace;
-        font-size: 0.85em;
-        background: #f8f8f8;
-        padding: 2px 6px;
-        border-radius: 3px;
-        user-select: all;
-      }
-
-      .session-badge {
-        font-size: 0.75em;
-        padding: 1px 6px;
-        border-radius: 3px;
-        font-weight: bold;
-      }
-      .session-badge.active { background: #d4edda; color: #155724; }
-      .session-badge.expiring { background: #fff3cd; color: #856404; }
-      .session-badge.expired { background: #f8d7da; color: #721c24; }
-      .session-badge.missing { background: #e2e3e5; color: #383d41; }
-
-      .revoked-label {
-        font-size: 0.75em;
-        color: #e74c3c;
-        font-weight: bold;
-      }
-
-      .session-badge.revoked { background: #f8d7da; color: #721c24; }
-
-      .key-name {
-        font-size: 0.8em;
-        color: #666;
-      }
-
-      /* Key: Copy button always visible */
-      .key-copy-btn {
-        padding: 2px 8px;
-        font-size: 0.75em;
-        cursor: pointer;
-        border: none;
-        border-radius: 3px;
-        color: white;
-        background: #3498db;
-        margin: 0;
-      }
-      .key-copy-btn:hover { background: #2980b9; }
-
-      /* ⋮ toggle + floating action bar (for key rows) */
-      .menu-wrap {
-        position: relative;
-        margin-left: auto;
-      }
-      .menu-toggle {
-        background: none;
-        border: 1px solid #ccc;
-        border-radius: 3px;
-        padding: 1px 8px;
-        cursor: pointer;
-        font-size: 1em;
-        color: #555;
-        line-height: 1.3;
-      }
-      .menu-toggle:hover,
-      .menu-wrap.open .menu-toggle {
-        background: #e8e8e8;
-      }
-      .action-popover {
-        display: none;
-        position: absolute;
-        right: 100%;
-        top: 50%;
-        transform: translateY(-50%);
-        background: white;
-        border: 1px solid #ddd;
-        border-radius: 4px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.12);
-        z-index: 50;
-        padding: 4px 6px;
-        align-items: center;
-        gap: 4px;
-        white-space: nowrap;
-        margin-right: -1px;
-      }
-      .menu-wrap:hover .action-popover,
-      .menu-wrap.open .action-popover {
-        display: flex;
-      }
-      .action-popover .btn-sm {
-        padding: 2px 8px;
-        font-size: 0.75em;
-        cursor: pointer;
-        border: none;
-        border-radius: 3px;
-        color: white;
-        margin: 0;
-      }
-      .btn-sm.btn-default { background: #3498db; }
-      .btn-sm.btn-default:hover { background: #2980b9; }
-      .btn-sm.btn-danger { background: #e74c3c; }
-      .btn-sm.btn-danger:hover { background: #c0392b; }
-      .btn-sm.btn-warn { background: #f39c12; }
-      .btn-sm.btn-warn:hover { background: #d68910; }
-      .btn-sm.btn-success { background: #27ae60; }
-      .btn-sm.btn-success:hover { background: #229954; }
-      .btn-sm:disabled { background: #bdc3c7; cursor: not-allowed; }
-
-      /* Account actions: View always visible, ⋮ dropdown menu */
-      .account-act-cell {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-      }
-      .dropdown-wrap {
-        position: relative;
-      }
-      .dropdown-toggle {
-        background: none;
-        border: 1px solid #ccc;
-        border-radius: 3px;
-        padding: 1px 8px;
-        cursor: pointer;
-        font-size: 1em;
-        color: #555;
-        line-height: 1.3;
-      }
-      .dropdown-toggle:hover,
-      .dropdown-wrap.open .dropdown-toggle {
-        background: #e8e8e8;
-      }
-      .dropdown-menu {
-        display: none;
-        position: absolute;
-        right: 0;
-        top: 100%;
-        margin-top: -1px;
-        background: white;
-        border: 1px solid #ddd;
-        border-radius: 4px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-        z-index: 50;
-        min-width: 130px;
-        padding: 4px 0;
-      }
-      .dropdown-wrap:hover .dropdown-menu,
-      .dropdown-wrap.open .dropdown-menu {
-        display: block;
-      }
-      .dropdown-menu button {
-        display: block;
-        width: 100%;
-        text-align: left;
-        background: none;
-        border: none;
-        padding: 6px 12px;
-        font-size: 0.8em;
-        cursor: pointer;
-        color: #333;
-        margin: 0;
-        border-radius: 0;
-      }
-      .dropdown-menu button:hover {
-        background: #f5f5f5;
-      }
-      .dropdown-menu button.danger-item {
-        color: #e74c3c;
-      }
-      .dropdown-menu button.danger-item:hover {
-        background: #fde8e8;
-      }
-      .dropdown-menu .sep {
-        border-top: 1px solid #eee;
-        margin: 2px 0;
-      }
-    </style>
   </head>
   <body>
     <div class="container">
@@ -238,6 +23,7 @@
           >
         </div>
         <span class="version-badge"></span>
+        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle dark mode">&#9790;</button>
       </div>
 
       <div id="loading" class="loading">
@@ -290,8 +76,6 @@
           <tbody id="users-table"></tbody>
         </table>
       </div>
-
-      <div id="error" class="error-message hidden"></div>
     </div>
 
     <!-- Account details modal -->
@@ -509,9 +293,7 @@
           document.getElementById("content").classList.remove("hidden");
         } catch (error) {
           document.getElementById("loading").classList.add("hidden");
-          document.getElementById("error").textContent =
-            "Failed to load admin data: " + error.message;
-          document.getElementById("error").classList.remove("hidden");
+          showError("Failed to load admin data: " + error.message);
         }
       }
 

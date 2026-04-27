@@ -107,17 +107,9 @@ function confirmAction(message) {
  */
 function showError(message, container = null) {
   const errorDiv = document.createElement("div");
-  errorDiv.className = "error-message";
+  errorDiv.className = "notify-toast error";
   errorDiv.textContent = message;
-
-  if (container) {
-    container.insertBefore(errorDiv, container.firstChild);
-  } else {
-    const mainContainer = document.querySelector(".container");
-    if (mainContainer) {
-      mainContainer.insertBefore(errorDiv, mainContainer.firstChild);
-    }
-  }
+  document.body.appendChild(errorDiv);
 
   // Auto-remove after 5 seconds
   setTimeout(() => {
@@ -132,17 +124,9 @@ function showError(message, container = null) {
  */
 function showSuccess(message, container = null) {
   const successDiv = document.createElement("div");
-  successDiv.className = "success-message";
+  successDiv.className = "notify-toast success";
   successDiv.textContent = message;
-
-  if (container) {
-    container.insertBefore(successDiv, container.firstChild);
-  } else {
-    const mainContainer = document.querySelector(".container");
-    if (mainContainer) {
-      mainContainer.insertBefore(successDiv, mainContainer.firstChild);
-    }
-  }
+  document.body.appendChild(successDiv);
 
   // Auto-remove after 3 seconds
   setTimeout(() => {
@@ -404,3 +388,24 @@ async function loadAndShowVersion() {
     badges.forEach((b) => (b.style.display = "none"));
   }
 }
+
+/**
+ * Theme management: load persisted theme, toggle between light/dark.
+ */
+function loadTheme() {
+  const stored = localStorage.getItem("theme");
+  if (stored === "dark" || stored === "light") {
+    document.documentElement.setAttribute("data-theme", stored);
+  }
+  // If no stored preference, CSS prefers-color-scheme handles it
+}
+
+function toggleTheme() {
+  const current = document.documentElement.getAttribute("data-theme");
+  const next = current === "dark" ? "light" : "dark";
+  document.documentElement.setAttribute("data-theme", next);
+  localStorage.setItem("theme", next);
+}
+
+// Apply theme immediately (before render) to avoid flash
+loadTheme();
