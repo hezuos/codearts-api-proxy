@@ -12,10 +12,19 @@ const LOG_LEVELS: Record<LogLevel, number> = {
   warn: 2,
   error: 3,
 };
+const VALID_LEVELS = new Set<string>(Object.keys(LOG_LEVELS));
 
-const currentLevel: LogLevel =
-  (process.env.LOG_LEVEL as LogLevel) ??
-  (process.env.NODE_ENV === "production" ? "info" : "debug");
+function resolveLogLevel(): LogLevel {
+  const env = process.env.LOG_LEVEL;
+  if (env && VALID_LEVELS.has(env)) return env as LogLevel;
+  if (env) {
+    // Invalid LOG_LEVEL — fallback and warn
+    process.stderr.write(`[logger] Invalid LOG_LEVEL="${env}", valid values: ${Object.keys(LOG_LEVELS).join(", ")}\n`);
+  }
+  return process.env.NODE_ENV === "production" ? "info" : "debug";
+}
+
+const currentLevel: LogLevel = resolveLogLevel();
 
 const isJsonOutput = process.env.NODE_ENV === "production";
 
