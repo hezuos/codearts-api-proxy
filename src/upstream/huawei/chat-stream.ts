@@ -29,27 +29,27 @@ export async function streamHuaweiChatToResponse(
   session: StoredHuaweiSession,
   traceId: string,
   res: Response,
+  signal?: AbortSignal,
 ): Promise<void> {
   const log = logger.withTrace(traceId);
   const credentials = getCredentials(session);
   const chatUrl = `${config.huaweiChatHost}/v1/chat/chat`;
-  const body = buildRequestBody(request, session);
+  const { body: requestBody, json: body } = buildRequestBody(request, session);
   const headers = buildChatHeaders(chatUrl, body, credentials, traceId);
 
   // ── Outgoing request log ──────────────────────────────────────────────────
-  const parsedBody = JSON.parse(body) as Record<string, unknown>;
-  const tp = parsedBody.task_parameters as Record<string, unknown> | undefined;
+  const tp = requestBody.task_parameters as Record<string, unknown> | undefined;
   const toolResultCount = Array.isArray(tp?.tool_result)
     ? (tp.tool_result as unknown[]).length
     : 0;
-  const msgArr = parsedBody.messages as unknown[];
+  const msgArr = requestBody.messages as unknown[];
   const envDetails = tp?.environmentDetails as Record<string, unknown> | undefined;
 
   log.info("OUTGOING REQUEST → CodeArts", {
     url: `POST ${chatUrl}`,
-    model_id: parsedBody.model_id,
-    chat_id: parsedBody.chat_id,
-    parent_message_id: parsedBody.parent_message_id,
+    model_id: requestBody.model_id,
+    chat_id: requestBody.chat_id,
+    parent_message_id: requestBody.parent_message_id,
     messagesCount: msgArr.length,
     toolResultCount,
     isSubAgent: (tp?.isSubAgent as boolean | undefined) ?? false,
@@ -59,18 +59,18 @@ export async function streamHuaweiChatToResponse(
 
   // ── Continuity info ───────────────────────────────────────────────────────
   if (!request.codearts?.chat_id) {
-    log.info("chat_id derived from message hash", { chat_id: parsedBody.chat_id });
+    log.info("chat_id derived from message hash", { chat_id: requestBody.chat_id });
   }
-  if (!request.codearts?.parent_message_id && parsedBody.parent_message_id) {
-    log.info("parent_message_id auto-filled from last turn", { parent_message_id: parsedBody.parent_message_id });
+  if (!request.codearts?.parent_message_id && requestBody.parent_message_id) {
+    log.info("parent_message_id auto-filled from last turn", { parent_message_id: requestBody.parent_message_id });
   }
-  if (toolResultCount > 0 && !parsedBody.parent_message_id) {
+  if (toolResultCount > 0 && !requestBody.parent_message_id) {
     log.warn("tool_result continuation but parent_message_id is empty — CodeArts may lack context");
   }
 
   // ── Tool continuation parent_message_id validation ────────────────────────
-  if (toolResultCount > 0 && parsedBody.parent_message_id) {
-    const cid = parsedBody.chat_id as string;
+  if (toolResultCount > 0 && requestBody.parent_message_id) {
+    const cid = requestBody.chat_id as string;
     const role = getChatIdRole(cid);
     if (role === "sub") {
       log.warn("Tool continuation for chat_id but last known role was sub — parent_message_id may point to sub-agent turn", { chat_id: cid });
@@ -78,11 +78,11 @@ export async function streamHuaweiChatToResponse(
     const toolResults = tp?.tool_result as Array<Record<string, unknown>> | undefined;
     if (toolResults) {
       const toolCallIds = toolResults.map((tr) => tr.toolCallId ?? "(none)").join(", ");
-      log.info("Tool continuation", { chat_id: cid, parent_message_id: parsedBody.parent_message_id, toolCallIds, role: role ?? "unknown" });
+      log.info("Tool continuation", { chat_id: cid, parent_message_id: requestBody.parent_message_id, toolCallIds, role: role ?? "unknown" });
     }
   }
 
-  const { status, stream } = await httpsPost(chatUrl, headers, body);
+  const { status, stream } = await httpsPost(chatUrl, headers, body, signal);
 
   // ── HTTP status log ───────────────────────────────────────────────────────
   log.info("CodeArts HTTP response", { status });
@@ -136,6 +136,10 @@ export async function streamHuaweiChatToResponse(
       event.error_code !== "0" &&
       event.error_code !== "ChatAgent.00000000"
     ) {
+      if (event.error_code === "PROTOCOL_ERROR") {
+        // Malformed SSE line — skip, don't terminate the stream
+        continue;
+      }
       sseHadError = true;
       log.error("SSE error from CodeArts", { code: event.error_code, msg: event.error_msg ?? "unknown" });
       const errChunk: OpenAIChatCompletionChunk = {
