@@ -20,11 +20,16 @@
       </div>
 
       <div id="content" class="hidden">
+        <div id="key-warning" class="key-warning">
+          <strong>Save your API key now!</strong> You will not be able to view the full key again after confirming. Copy it to a secure location before continuing.
+        </div>
+
         <h2>Your API Key</h2>
         <div class="api-key">
           <span id="api-key-display"></span>
           <button id="show-btn" onclick="toggleKey()">Show</button>
           <button id="copy-btn" onclick="copyKey()">Copy</button>
+          <button id="confirm-btn" class="confirm-btn" onclick="confirmSaved()">I've Saved My Key</button>
         </div>
 
         <h2>Account</h2>
@@ -73,6 +78,39 @@ response = client.chat.completions.create(
 
       let fullApiKey = "";
       let isMasked = true;
+      let keyConfirmed = false;
+
+      // IDs of spans that contain the API key in Usage Examples
+      const exampleKeyIds = ["api-key-env", "api-key-python", "api-key-curl"];
+
+      function maskKeyEverywhere() {
+        const masked = maskApiKey(fullApiKey);
+        document.getElementById("api-key-display").textContent = masked;
+        exampleKeyIds.forEach((id) => {
+          document.getElementById(id).textContent = masked;
+        });
+        isMasked = true;
+      }
+
+      function confirmSaved() {
+        keyConfirmed = true;
+
+        // Mask key everywhere
+        maskKeyEverywhere();
+
+        // Remove Show button
+        const showBtn = document.getElementById("show-btn");
+        if (showBtn) showBtn.remove();
+
+        // Hide warning
+        const warning = document.getElementById("key-warning");
+        if (warning) warning.style.display = "none";
+
+        // Update confirm button to show confirmed state
+        const confirmBtn = document.getElementById("confirm-btn");
+        confirmBtn.textContent = "Key Saved";
+        confirmBtn.disabled = true;
+      }
 
       async function loadLoginResult() {
         try {
@@ -85,10 +123,37 @@ response = client.chat.completions.create(
           fullApiKey = response.apiKey;
           const maskedKey = maskApiKey(fullApiKey);
 
-          document.getElementById("api-key-display").textContent = maskedKey;
-          document.getElementById("api-key-env").textContent = fullApiKey;
-          document.getElementById("api-key-python").textContent = fullApiKey;
-          document.getElementById("api-key-curl").textContent = fullApiKey;
+          if (keyConfirmed) {
+            // Already confirmed in this session — auto-mask
+            document.getElementById("api-key-display").textContent = maskedKey;
+            exampleKeyIds.forEach((id) => {
+              document.getElementById(id).textContent = maskedKey;
+            });
+            isMasked = true;
+
+            // Remove Show button
+            const showBtn = document.getElementById("show-btn");
+            if (showBtn) showBtn.remove();
+
+            // Hide warning
+            const warning = document.getElementById("key-warning");
+            if (warning) warning.style.display = "none";
+
+            // Update confirm button
+            const confirmBtn = document.getElementById("confirm-btn");
+            confirmBtn.textContent = "Key Saved";
+            confirmBtn.disabled = true;
+          } else {
+            // First view — show full key
+            document.getElementById("api-key-display").textContent = fullApiKey;
+            document.getElementById("api-key-env").textContent = fullApiKey;
+            document.getElementById("api-key-python").textContent = fullApiKey;
+            document.getElementById("api-key-curl").textContent = fullApiKey;
+            isMasked = false;
+
+            // Update Show button to Hide
+            document.getElementById("show-btn").textContent = "Hide";
+          }
 
           const baseUrl = window.location.origin;
           document.getElementById("base-url").textContent = baseUrl;
@@ -157,10 +222,17 @@ response = client.chat.completions.create(
 
         if (isMasked) {
           display.textContent = fullApiKey;
+          exampleKeyIds.forEach((id) => {
+            document.getElementById(id).textContent = fullApiKey;
+          });
           btn.textContent = "Hide";
           isMasked = false;
         } else {
-          display.textContent = maskApiKey(fullApiKey);
+          const masked = maskApiKey(fullApiKey);
+          display.textContent = masked;
+          exampleKeyIds.forEach((id) => {
+            document.getElementById(id).textContent = masked;
+          });
           btn.textContent = "Show";
           isMasked = true;
         }

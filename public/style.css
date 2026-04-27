@@ -300,3 +300,28 @@ tr:hover {
 h1 .version-badge {
   margin-left: 12px;
 }
+
+.key-warning {
+  background: #fff3cd;
+  border: 1px solid #ffc107;
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 20px;
+  color: #856404;
+  line-height: 1.5;
+}
+
+.key-warning strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.confirm-btn {
+  background-color: #f59e0b;
+  color: white;
+  font-weight: bold;
+}
+
+.confirm-btn:hover {
+  background-color: #d97706;
+}
