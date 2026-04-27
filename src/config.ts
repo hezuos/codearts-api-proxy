@@ -71,11 +71,20 @@ export const config: AppConfig = {
 /** Whether the process is running in production mode. */
 export const isProduction = config.nodeEnv === "production";
 
+/** Whether the encryption key is the hardcoded dev fallback. */
+export const isDevEncryptionKey = !isProduction && config.encryptionKey === "dev-only-32-byte-encryption-key!";
+
 /** Rate limit: max chat completion requests per window per API key. */
 export const rateLimitChatMax = Number(process.env.RATE_LIMIT_CHAT_MAX ?? 60);
 
 /** Rate limit: max model list requests per window per API key. */
 export const rateLimitModelsMax = Number(process.env.RATE_LIMIT_MODELS_MAX ?? 120);
+
+/** Upstream HTTPS request timeout in milliseconds (default: 120s). */
+export const upstreamTimeoutMs = Number(process.env.UPSTREAM_TIMEOUT_MS ?? 120_000);
+
+/** Whether this node is the master node for refresh tasks (default: true). */
+export const isMasterNode = (process.env.IS_MASTER_NODE ?? "true") === "true";
 
 /**
  * Derive the GPTs (agent-center) URL from config.

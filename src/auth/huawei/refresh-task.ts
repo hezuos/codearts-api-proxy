@@ -4,6 +4,7 @@ import {
   logSessionCacheSummary,
   refreshStoredSession,
 } from "./session-store";
+import { isMasterNode } from "../../config";
 import { logger } from "../../utils/logger";
 
 const REFRESH_INTERVAL_MS = 10 * 60 * 1000;
@@ -14,7 +15,6 @@ let started = false;
 let running = false;
 let timer: NodeJS.Timeout | null = null;
 let enableRefreshTask = true;
-const isMasterNode = true;
 
 function shouldRefresh(expiresAt?: string): boolean {
   if (!expiresAt) {
@@ -72,15 +72,17 @@ async function refreshOnce(): Promise<void> {
       }
 
       try {
+        let timeoutId: NodeJS.Timeout;
         await Promise.race([
           refreshStoredSession(keyId),
           new Promise((_, reject) => {
-            setTimeout(
+            timeoutId = setTimeout(
               () => reject(new Error("refresh timeout")),
               REFRESH_TIMEOUT_MS,
             );
           }),
         ]);
+        clearTimeout(timeoutId!);
         refreshed += 1;
       } catch (error) {
         logger.warn(`Refresh task failed for key ${keyId}`, { error: error instanceof Error ? error.message : String(error) });
