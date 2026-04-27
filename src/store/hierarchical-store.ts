@@ -405,6 +405,13 @@ export function loadAllEntities(): void {
     }
   }
 
+  // If all keys are hashed, the legacy plaintext index is no longer needed
+  if (apiKeysByValue.size === 0 && apiKeys.size > 0) {
+    logger.info("All API keys use hash index — legacy plaintext index empty");
+  } else if (apiKeysByValue.size > 0) {
+    logger.info("Legacy plaintext index still has entries (pre-migration keys)", { count: apiKeysByValue.size });
+  }
+
   logger.info("Loaded hierarchical store", { users: users.size, accounts: providerAccounts.size, keys: apiKeys.size, sessions: sessions.size });
 }
 
