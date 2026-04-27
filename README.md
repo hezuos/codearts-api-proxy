@@ -109,6 +109,17 @@ pnpm lint    # ESLint 检查
 
 ## 架构说明
 
+### 单用户模式
+
+当前系统运行在**单用户模式**：整个代理实例只服务于一个用户，所有 ProviderAccount、ApiKey、Session 都归属于该用户。
+
+- 启动时 `bootstrapDefaultAuth()` 确保唯一用户存在（无用户则自动创建，已有则跳过）
+- `createUser()` 内置守卫：如果用户已存在，调用将抛错，防止创建第二个用户
+- 数据模型保留了多用户结构（`User → ProviderAccount → ApiKey → Session`），Admin API 也保留了用户列表端点，为后续多用户扩展预留能力
+- 扩展为多用户时，需移除 `createUser()` 中的单用户守卫，并新增用户注册/创建入口
+
+### 最小有状态设计
+
 代理保持**最小有状态设计**：进程内仅维护一个 `Map<chat_id, response_message_id>`，用于自动填充 `parent_message_id`，不存储消息历史。
 
 - `src/upstream/huawei/chat.ts` — 核心逻辑：请求构造、签名、SSE 透传、tool 结果转发、sub-agent 处理
