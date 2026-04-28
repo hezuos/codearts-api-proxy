@@ -86,8 +86,44 @@ pnpm build && pnpm start
 | `HUAWEI_REDIRECT_HOST`  | `https://devcloud.cn-north-4.huaweicloud.com/codeartside` | 华为云登录入口域名         |
 | `ENABLE_REFRESH_TASK`   | `true`                                               | 是否自动刷新 Token               |
 | `REQUEST_BODY_LIMIT`    | `10mb`                                               | 请求体大小限制                   |
+| `LOG_LEVEL`             | `debug`（开发）/ `info`（生产）                      | 日志级别                         |
 
 完整变量列表见 `src/config.ts`。
+
+## 日志配置
+
+项目使用自研的轻量级结构化日志器（`src/utils/logger.ts`）。
+
+### 日志级别控制
+
+| 环境变量      | 说明                                           | 有效值                           |
+| ------------- | ---------------------------------------------- | -------------------------------- |
+| `LOG_LEVEL`   | 直接控制日志级别（优先级最高）                 | `debug`, `info`, `warn`, `error` |
+| `NODE_ENV`    | 间接控制（影响默认级别和输出格式）             | `production`, `development` 等   |
+
+**优先级**：`LOG_LEVEL` 环境变量 > `NODE_ENV` 默认值
+
+### 环境差异
+
+| 环境          | 默认日志级别 | 输出格式                       |
+| ------------- | ------------ | ------------------------------ |
+| `production`  | `info`       | JSON 格式（便于日志聚合）       |
+| `development` | `debug`      | 人类可读格式（带颜色）          |
+
+### 生产环境开启 Debug 日志
+
+```bash
+# 方法一：设置 LOG_LEVEL（推荐）
+LOG_LEVEL=debug pnpm start
+
+# 方法二：Docker 部署
+docker run -e LOG_LEVEL=debug ...
+
+# 方法三：.env 文件
+echo "LOG_LEVEL=debug" >> .env
+```
+
+> **注意**：即使设置 `LOG_LEVEL=debug`，在 production 环境下日志仍会输出为 JSON 格式。如需人类可读格式，需同时设置 `NODE_ENV=development`（但这会影响其他行为，不推荐）。
 
 ## 开发命令
 

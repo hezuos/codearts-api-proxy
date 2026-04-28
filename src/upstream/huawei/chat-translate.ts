@@ -2,6 +2,7 @@
  * Message and tool call translation between OpenAI and CodeArts formats.
  */
 
+import { randomUUID } from "crypto";
 import type {
   CodeArtsToolResult,
   OpenAIChatMessage,
@@ -160,11 +161,16 @@ function normalizeToolCallArguments(name: string, argsStr: string): string {
   return argsStr;
 }
 
+/** Generate a stable tool call ID when CodeArts doesn't provide one. */
+function generateToolCallId(): string {
+  return `call_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
+}
+
 export function mapToolCalls(
   raw: CodeArtsRawToolCall[] | null | undefined,
 ): OpenAIToolCall[] | undefined {
   if (!raw || raw.length === 0) return undefined;
-  return raw.map((tc, i) => {
+  return raw.map((tc) => {
     const name = tc.function?.name ?? tc.name ?? "unknown";
     const rawArgs =
       tc.function?.arguments ??
@@ -172,7 +178,7 @@ export function mapToolCalls(
         ? tc.arguments
         : JSON.stringify(tc.arguments ?? {}));
     return {
-      id: tc.id ?? `call_${i}`,
+      id: (tc.id && tc.id !== "-") ? tc.id : generateToolCallId(),
       type: "function",
       function: { name, arguments: normalizeToolCallArguments(name, rawArgs) },
     };
@@ -192,7 +198,7 @@ export function mapToolCallDeltas(
         : JSON.stringify(tc.arguments ?? {}));
     return {
       index: i,
-      id: tc.id ?? `call_${i}`,
+      id: (tc.id && tc.id !== "-") ? tc.id : generateToolCallId(),
       type: "function",
       function: { name, arguments: normalizeToolCallArguments(name, rawArgs) },
     };
