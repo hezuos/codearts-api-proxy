@@ -223,7 +223,7 @@ export function mapToolCallDeltas(
 ): OpenAIToolCallDelta[] | undefined {
   if (!raw || raw.length === 0) return undefined;
   return raw.map((tc, i) => {
-    const name = tc.function?.name ?? tc.name ?? "unknown";
+    const name = tc.function?.name ?? tc.name;
     const rawArgs =
       tc.function?.arguments ??
       (typeof tc.arguments === "string"
@@ -232,11 +232,16 @@ export function mapToolCallDeltas(
     // In streaming mode, id only appears in the first chunk of each tool_call.
     // Subsequent chunks have no id — leave it undefined so the client uses index.
     const id = (tc.id && tc.id !== "-") ? tc.id : undefined;
+    // In streaming mode, name only appears in the first chunk.
+    // Subsequent chunks have no name — omit it so the client keeps the name from the first chunk.
+    const func: { name?: string; arguments?: string } = {};
+    if (name) func.name = name;
+    if (rawArgs) func.arguments = normalizeToolCallArguments(name ?? "unknown", rawArgs);
     return {
       index: i,
       ...(id ? { id } : {}),
       type: "function",
-      function: { name, arguments: normalizeToolCallArguments(name, rawArgs) },
+      function: func,
     };
   });
 }
