@@ -31,6 +31,7 @@ export interface CodeArtsSSEEvent {
 }
 
 export interface CodeArtsRawToolCall {
+  index?: number;
   id?: string;
   type?: string;
   function?: {

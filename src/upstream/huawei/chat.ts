@@ -168,6 +168,7 @@ export async function sendHuaweiChatRequest(
   const message: OpenAIChatMessage = {
     role: "assistant",
     content: fullContent,
+    refusal: null,
   };
   if (fullReasoning) message.reasoning_content = fullReasoning;
   if (toolCalls) message.tool_calls = toolCalls;
@@ -179,7 +180,7 @@ export async function sendHuaweiChatRequest(
     model: request.model,
     codearts: responseMetadata,
     choices: [
-      { index: 0, message, finish_reason: toolCalls ? "tool_calls" : "stop" },
+      { index: 0, message: message as OpenAIChatCompletion["choices"][number]["message"], finish_reason: toolCalls ? "tool_calls" : "stop", logprobs: null },
     ],
     usage: {
       prompt_tokens: promptTokens,

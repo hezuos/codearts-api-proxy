@@ -12,6 +12,7 @@ import { logger } from "../../utils/logger";
 import type {
   OpenAIChatCompletionRequest,
   OpenAIChatCompletionChunk,
+  OpenAIChatCompletionDelta,
 } from "../../types/openai";
 import { mapToolCallDeltas } from "./chat-translate";
 import { parseSSE } from "./chat-protocol";
@@ -107,6 +108,7 @@ export async function streamHuaweiChatToResponse(
   const created = Math.floor(Date.now() / 1000);
   const model = request.model;
   let sentRole = false;
+  let sentMetadata = false;
   const responseMetadata: Record<string, string | undefined> = {};
 
   // ── SSE event counters ────────────────────────────────────────────────────
@@ -207,12 +209,12 @@ export async function streamHuaweiChatToResponse(
             model,
             codearts: { ...responseMetadata },
             choices: [{ index: 0, delta: { role }, finish_reason: null }],
-          } satisfies OpenAIChatCompletionChunk)}\n\n`,
+          } as OpenAIChatCompletionChunk)}\n\n`,
         );
         sentRole = true;
       }
 
-      const delta: OpenAIChatCompletionChunk["choices"][number]["delta"] = {};
+      const delta: OpenAIChatCompletionDelta = {};
       if (event.delta.content) delta.content = event.delta.content;
       if (event.delta.reasoning_content)
         delta.reasoning_content = event.delta.reasoning_content;
@@ -238,7 +240,7 @@ export async function streamHuaweiChatToResponse(
             model,
             codearts: { ...responseMetadata },
             choices: [{ index: 0, delta, finish_reason: null }],
-          } satisfies OpenAIChatCompletionChunk)}\n\n`,
+          } as OpenAIChatCompletionChunk)}\n\n`,
         );
       }
     }
@@ -272,6 +274,10 @@ export async function streamHuaweiChatToResponse(
   });
   log.debug("[codearts→proxy] SSE full stream", { events: sseDebugLog });
 
+  // When LLM returns tool_calls, finish_reason must be "tool_calls" not "stop",
+  // otherwise the client treats the conversation as finished and won't execute tools.
+  const finishReason = sseToolCallCount > 0 ? "tool_calls" : "stop";
+
   res.write(
     `data: ${JSON.stringify({
       id: completionId,
@@ -279,7 +285,7 @@ export async function streamHuaweiChatToResponse(
       created,
       model,
       codearts: { ...responseMetadata },
-      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+      choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
     } satisfies OpenAIChatCompletionChunk)}\n\n`,
   );
   res.write("data: [DONE]\n\n");

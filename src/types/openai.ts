@@ -1,7 +1,21 @@
 /**
  * OpenAI API 兼容类型定义
- * 遵循 OpenAI API 规范: https://platform.openai.com/docs/api-reference
+ * 标准类型来自官方 openai npm 包 (import type)，CodeArts 扩展通过 intersection types 注入。
  */
+
+import type {
+  ChatCompletion,
+  ChatCompletionChunk,
+  ChatCompletionMessageFunctionToolCall,
+  ChatCompletionFunctionTool,
+  ChatCompletionRole,
+} from "openai/resources/chat/completions/completions";
+import type { Model } from "openai/resources/models";
+import type { CompletionUsage } from "openai/resources/completions";
+import type {
+  OpenAICodeArtsRequestOptions,
+  OpenAICodeArtsResponseMetadata,
+} from "./openai-codearts";
 
 // ==================== 基础类型 ====================
 
@@ -14,12 +28,7 @@ export interface OpenAIError {
 
 // ==================== 模型相关类型 ====================
 
-export interface OpenAIModel {
-  id: string;
-  object: "model";
-  created: number;
-  owned_by: string;
-}
+export type OpenAIModel = Model;
 
 export interface OpenAIModelsResponse {
   object: "list";
@@ -28,35 +37,34 @@ export interface OpenAIModelsResponse {
 
 // ==================== 消息相关类型 ====================
 
-export type OpenAIChatRole =
-  | "system"
-  | "user"
-  | "assistant"
-  | "function"
-  | "tool";
+export type OpenAIChatRole = ChatCompletionRole;
 
+/**
+ * 投影接口：包含代理实际访问的所有消息属性。
+ * 不使用官方 ChatCompletionMessageParam discriminated union，
+ * 因为代理遍历消息数组时需要统一访问跨 role 的属性。
+ */
 export interface OpenAIChatMessage {
-  role: OpenAIChatRole;
+  role: OpenAIChatRole | "developer";
   content: string | null;
+  refusal: string | null;
   name?: string;
   tool_calls?: OpenAIToolCall[];
   tool_call_id?: string;
   reasoning_content?: string;
 }
 
-export interface OpenAIToolCall {
-  id: string;
-  type: "function";
-  function: { name: string; arguments: string };
-}
+export type OpenAIToolCall = ChatCompletionMessageFunctionToolCall;
 
-export interface OpenAITool {
-  type: "function";
-  function: { name: string; description?: string; parameters?: Record<string, unknown> };
-}
+export type OpenAITool = ChatCompletionFunctionTool;
 
 // ==================== Chat Completion 相关类型 ====================
 
+/**
+ * 请求类型：基于官方 ChatCompletionCreateParamsNonStreaming，
+ * 但用 OpenAIChatMessage[] 替代 ChatCompletionMessageParam[]（投影接口兼容），
+ * 并注入 codearts 扩展。
+ */
 export interface OpenAIChatCompletionRequest {
   model: string;
   messages: OpenAIChatMessage[];
@@ -81,111 +89,36 @@ export interface OpenAIChatCompletionRequest {
   seed?: number | null;
 }
 
-export interface OpenAICodeArtsRequestOptions {
-  /** 会话 ID，调用方维护；缺失时代理自动生成新会话 */
-  chat_id?: string | null;
-  /** 上一轮响应的 response_message_id，调用方维护；新对话首条消息传 "" 或不传 */
-  parent_message_id?: string | null;
-  preferred_language?: string | null;
-  project_level_prompt?: string | null;
-  codebase_search?: boolean | null;
-  enable_code_interpreter?: boolean | null;
-  workspace_root?: string | null;
-  current_working_directory?: string | null;
-  os_version?: string | null;
-  contexts?: unknown[] | null;
-  expert_rules?: unknown[] | null;
-  model_id?: string | null;
-  tool_results?: CodeArtsToolResult[] | null;
-  sub_agent?: OpenAICodeArtsSubAgentOptions | null;
-}
-
-export interface OpenAICodeArtsSubAgentOptions {
-  type: string;
-  prompt?: string | null;
-}
-
-export interface CodeArtsToolResult {
-  feedback?: string;
-  result: string;
-  name: string;
-  arguments?: Record<string, unknown>;
-  status?: string;
-  executeStatus?: string;
-  toolCallId?: string;
-}
-
-export interface OpenAIChatCompletionChoice {
-  index: number;
-  message: OpenAIChatMessage;
-  finish_reason:
-    | "stop"
-    | "length"
-    | "function_call"
-    | "tool_calls"
-    | "content_filter"
-    | null;
-}
-
-export interface OpenAIChatCompletion {
-  id: string;
-  object: "chat.completion";
-  created: number;
-  model: string;
+export type OpenAIChatCompletion = ChatCompletion & {
   codearts?: OpenAICodeArtsResponseMetadata;
-  choices: OpenAIChatCompletionChoice[];
-  usage?: OpenAIUsage;
-  system_fingerprint?: string;
-}
+};
 
-export interface OpenAICodeArtsResponseMetadata {
-  chat_id?: string;
-  response_message_id?: string;
-  request_message_id?: string;
-  model_id?: string;
-}
-
-export interface OpenAIUsage {
-  prompt_tokens: number;
-  completion_tokens: number;
-  total_tokens: number;
-}
+export type OpenAIUsage = CompletionUsage;
 
 // ==================== 流式响应相关类型 ====================
 
-export interface OpenAIChatCompletionChunk {
-  id: string;
-  object: "chat.completion.chunk";
-  created: number;
-  model: string;
+export type OpenAIChatCompletionChunk = ChatCompletionChunk & {
   codearts?: OpenAICodeArtsResponseMetadata;
-  choices: OpenAIChatCompletionChunkChoice[];
-  system_fingerprint?: string;
-}
+};
 
-export interface OpenAIChatCompletionChunkChoice {
-  index: number;
-  delta: OpenAIChatCompletionDelta;
-  finish_reason:
-    | "stop"
-    | "length"
-    | "function_call"
-    | "tool_calls"
-    | "content_filter"
-    | null;
-}
-
+/**
+ * 流式 delta：基于官方 Delta，增加 reasoning_content 扩展。
+ */
 export interface OpenAIChatCompletionDelta {
-  role?: OpenAIChatRole;
+  role?: OpenAIChatRole | "developer";
   content?: string | null;
   reasoning_content?: string | null;
   function_call?: { name?: string; arguments?: string };
   tool_calls?: OpenAIToolCallDelta[];
 }
 
-export interface OpenAIToolCallDelta {
-  index: number;
-  id?: string;
-  type?: "function";
-  function?: { name?: string; arguments?: string };
-}
+export type OpenAIToolCallDelta = ChatCompletionChunk.Choice.Delta.ToolCall;
+
+// ==================== CodeArts 扩展类型重新导出 ====================
+
+export type {
+  OpenAICodeArtsRequestOptions,
+  OpenAICodeArtsSubAgentOptions,
+  OpenAICodeArtsResponseMetadata,
+  CodeArtsToolResult,
+} from "./openai-codearts";
