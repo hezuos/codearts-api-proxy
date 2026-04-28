@@ -14,7 +14,7 @@ import type {
   OpenAIChatCompletionChunk,
   OpenAIChatCompletionDelta,
 } from "../../types/openai";
-import { mapToolCallDeltas } from "./chat-translate";
+import { cleanToolCallDeltas } from "./chat-translate";
 import { parseSSE } from "./chat-protocol";
 import {
   buildRequestBody,
@@ -190,35 +190,12 @@ export async function streamHuaweiChatToResponse(
         sseTextChars += event.delta.content.length;
       }
 
-      if (!sentRole && event.delta.role) {
-        const role = [
-          "assistant",
-          "user",
-          "system",
-          "tool",
-          "function",
-        ].includes(event.delta.role)
-          ? (event.delta
-              .role as OpenAIChatCompletionChunk["choices"][number]["delta"]["role"])
-          : "assistant";
-        res.write(
-          `data: ${JSON.stringify({
-            id: completionId,
-            object: "chat.completion.chunk",
-            created,
-            model,
-            codearts: { ...responseMetadata },
-            choices: [{ index: 0, delta: { role }, finish_reason: null }],
-          } as OpenAIChatCompletionChunk)}\n\n`,
-        );
-        sentRole = true;
-      }
-
+      // Build delta content
       const delta: OpenAIChatCompletionDelta = {};
       if (event.delta.content) delta.content = event.delta.content;
       if (event.delta.reasoning_content)
         delta.reasoning_content = event.delta.reasoning_content;
-      const toolCallDeltas = mapToolCallDeltas(event.delta.tool_calls);
+      const toolCallDeltas = cleanToolCallDeltas(event.delta.tool_calls);
       if (toolCallDeltas) {
         delta.tool_calls = toolCallDeltas;
         log.debug("[proxy→client] tool_call delta", {
@@ -231,16 +208,34 @@ export async function streamHuaweiChatToResponse(
         });
       }
 
+      // Merge role into first content delta (instead of sending a separate role-only chunk)
+      if (!sentRole) {
+        const role = event.delta.role && [
+          "assistant",
+          "user",
+          "system",
+          "tool",
+          "function",
+        ].includes(event.delta.role)
+          ? (event.delta.role as OpenAIChatCompletionChunk["choices"][number]["delta"]["role"])
+          : "assistant";
+        delta.role = role;
+        sentRole = true;
+      }
+
       if (Object.keys(delta).length > 0) {
+        // codearts metadata only in the first chunk
+        const chunk = {
+          id: completionId,
+          object: "chat.completion.chunk" as const,
+          created,
+          model,
+          ...(sentMetadata ? {} : { codearts: { ...responseMetadata } }),
+          choices: [{ index: 0, delta, finish_reason: null }],
+        };
+        sentMetadata = true;
         res.write(
-          `data: ${JSON.stringify({
-            id: completionId,
-            object: "chat.completion.chunk",
-            created,
-            model,
-            codearts: { ...responseMetadata },
-            choices: [{ index: 0, delta, finish_reason: null }],
-          } as OpenAIChatCompletionChunk)}\n\n`,
+          `data: ${JSON.stringify(chunk as OpenAIChatCompletionChunk)}\n\n`,
         );
       }
     }
@@ -284,9 +279,8 @@ export async function streamHuaweiChatToResponse(
       object: "chat.completion.chunk",
       created,
       model,
-      codearts: { ...responseMetadata },
       choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
-    } satisfies OpenAIChatCompletionChunk)}\n\n`,
+    } as OpenAIChatCompletionChunk)}\n\n`,
   );
   res.write("data: [DONE]\n\n");
   res.end();

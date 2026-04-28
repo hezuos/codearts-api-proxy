@@ -165,7 +165,7 @@ export function resolveTools(
 }
 
 // ---------------------------------------------------------------------------
-// Tool call mapping (CodeArts → OpenAI)
+// Tool call cleaning (CodeArts → OpenAI) — minimal, transparent
 // ---------------------------------------------------------------------------
 
 const SUBAGENT_CASE_REPAIR: Record<string, string> = {
@@ -176,14 +176,14 @@ const SUBAGENT_CASE_REPAIR: Record<string, string> = {
   "general-purpose": "general",
 };
 
-function normalizeToolCallArguments(name: string, argsStr: string): string {
-  if (name !== "Task") return argsStr;
+/** Repair Task tool's subagent_type case variants. */
+function repairSubagentType(argsStr: string): string {
   try {
     const args = JSON.parse(argsStr) as Record<string, unknown>;
     if (typeof args.subagent_type === "string") {
       const repaired = SUBAGENT_CASE_REPAIR[args.subagent_type];
       if (repaired && repaired !== args.subagent_type) {
-        logger.debug("normalizeToolCall: Task.subagent_type repaired", { from: args.subagent_type, to: repaired });
+        logger.debug("cleanToolCall: Task.subagent_type repaired", { from: args.subagent_type, to: repaired });
         args.subagent_type = repaired;
         return JSON.stringify(args);
       }
@@ -194,54 +194,72 @@ function normalizeToolCallArguments(name: string, argsStr: string): string {
   return argsStr;
 }
 
-/** Generate a stable tool call ID when CodeArts doesn't provide one (non-streaming only). */
-function generateToolCallId(): string {
-  return `call_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
+/** Get arguments string from a CodeArtsRawToolCall, handling both nested and top-level forms. */
+function extractArguments(tc: CodeArtsRawToolCall): string | undefined {
+  if (tc.function?.arguments) return tc.function.arguments;
+  if (typeof tc.arguments === "string") return tc.arguments;
+  if (tc.arguments && typeof tc.arguments === "object") return JSON.stringify(tc.arguments);
+  return undefined;
 }
 
-export function mapToolCalls(
+/**
+ * Clean CodeArts streaming tool_call deltas into OpenAI-compatible format.
+ * Minimal cleaning: remove null values, use CodeArts index, omit redundant top-level fields.
+ * Only modifies content for Task tool's subagent_type repair.
+ */
+export function cleanToolCallDeltas(
+  raw: CodeArtsRawToolCall[] | null | undefined,
+): OpenAIToolCallDelta[] | undefined {
+  if (!raw || raw.length === 0) return undefined;
+  return raw.map((tc, fallbackIndex) => {
+    const result: OpenAIToolCallDelta = {
+      index: tc.index ?? fallbackIndex,
+    };
+
+    // id: only include when present and non-placeholder
+    if (tc.id && tc.id !== "-") result.id = tc.id;
+
+    // type: only include when explicitly "function" (omit null/undefined)
+    if (tc.type === "function") result.type = "function";
+
+    // function: build from nested form, omit null values
+    const name = tc.function?.name; // null → undefined via truthiness
+    const rawArgs = extractArguments(tc);
+    if (name || rawArgs) {
+      const func: { name?: string; arguments?: string } = {};
+      if (name) func.name = name;
+      if (rawArgs) {
+        func.arguments = name === "Task" ? repairSubagentType(rawArgs) : rawArgs;
+      }
+      result.function = func;
+    }
+
+    return result;
+  });
+}
+
+/**
+ * Clean CodeArts non-streaming tool_calls into OpenAI format.
+ * Same as cleanToolCallDeltas but generates an id when missing (non-streaming requires stable IDs).
+ */
+export function cleanToolCalls(
   raw: CodeArtsRawToolCall[] | null | undefined,
 ): OpenAIToolCall[] | undefined {
   if (!raw || raw.length === 0) return undefined;
   return raw.map((tc) => {
-    const name = tc.function?.name ?? tc.name ?? "unknown";
-    const rawArgs =
-      tc.function?.arguments ??
-      (typeof tc.arguments === "string"
-        ? tc.arguments
-        : JSON.stringify(tc.arguments ?? {}));
+    const name = tc.function?.name ?? "unknown";
+    const rawArgs = extractArguments(tc) ?? "{}";
     return {
-      id: (tc.id && tc.id !== "-") ? tc.id : generateToolCallId(),
-      type: "function",
-      function: { name, arguments: normalizeToolCallArguments(name, rawArgs) },
+      id: (tc.id && tc.id !== "-") ? tc.id : `call_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
+      type: "function" as const,
+      function: {
+        name,
+        arguments: name === "Task" ? repairSubagentType(rawArgs) : rawArgs,
+      },
     };
   });
 }
 
-export function mapToolCallDeltas(
-  raw: CodeArtsRawToolCall[] | null | undefined,
-): OpenAIToolCallDelta[] | undefined {
-  if (!raw || raw.length === 0) return undefined;
-  return raw.map((tc, i) => {
-    const name = tc.function?.name ?? tc.name;
-    const rawArgs =
-      tc.function?.arguments ??
-      (typeof tc.arguments === "string"
-        ? tc.arguments
-        : JSON.stringify(tc.arguments ?? {}));
-    // In streaming mode, id only appears in the first chunk of each tool_call.
-    // Subsequent chunks have no id — leave it undefined so the client uses index.
-    const id = (tc.id && tc.id !== "-") ? tc.id : undefined;
-    // In streaming mode, name only appears in the first chunk.
-    // Subsequent chunks have no name — omit it so the client keeps the name from the first chunk.
-    const func: { name?: string; arguments?: string } = {};
-    if (name) func.name = name;
-    if (rawArgs) func.arguments = normalizeToolCallArguments(name ?? "unknown", rawArgs);
-    return {
-      index: i,
-      ...(id ? { id } : {}),
-      type: "function",
-      function: func,
-    };
-  });
-}
+// Backward-compatible aliases
+export const mapToolCallDeltas = cleanToolCallDeltas;
+export const mapToolCalls = cleanToolCalls;

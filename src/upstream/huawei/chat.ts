@@ -13,7 +13,7 @@ import type {
   OpenAIChatCompletionRequest,
   OpenAIChatMessage,
 } from "../../types/openai";
-import { mapToolCalls } from "./chat-translate";
+import { cleanToolCalls } from "./chat-translate";
 import { parseSSE } from "./chat-protocol";
 import {
   buildRequestBody,
@@ -132,7 +132,7 @@ export async function sendHuaweiChatRequest(
         }
       }
     }
-    const mapped = mapToolCalls(event.delta?.tool_calls);
+    const mapped = cleanToolCalls(event.delta?.tool_calls);
     if (mapped) {
       toolCalls = toolCalls ? [...toolCalls, ...mapped] : mapped;
     }
