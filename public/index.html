@@ -58,8 +58,8 @@
 GET  /v1/models</code></pre>
 
       <h2>Usage Example</h2>
-      <pre><code>export OPENAI_API_KEY="your-api-key"
-export OPENAI_BASE_URL="http://localhost:3000"
+      <pre><code id="usage-example">export OPENAI_API_KEY="your-api-key"
+export OPENAI_BASE_URL="http://localhost:1455"
 
 openai chat.completions.create \
   --model "codearts-model" \
@@ -161,6 +161,18 @@ openai chat.completions.create \
           input.focus();
         }
       }
+      // Update usage example with current host:port
+      (function() {
+        const codeEl = document.getElementById("usage-example");
+        if (codeEl) {
+          const baseUrl = `${window.location.protocol}//${window.location.host}`;
+          codeEl.textContent = codeEl.textContent.replace(
+            /export OPENAI_BASE_URL="[^"]*"/,
+            `export OPENAI_BASE_URL="${baseUrl}"`
+          );
+        }
+      })();
+
       loadAndShowVersion();
     </script>
   </body>
