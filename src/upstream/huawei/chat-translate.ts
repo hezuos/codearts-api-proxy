@@ -14,8 +14,6 @@ import type {
   CodeArtsRawToolCall,
 } from "./chat-protocol";
 import {
-  DEFAULT_TOOLS,
-  SUB_AGENT_TOOLS,
   convertOpenAIToolsToCodeArts,
   deriveSubAgentTools,
   type ToolDefinition,
@@ -126,9 +124,23 @@ export function resolveTools(
     : undefined;
 
   if (callerTools) {
-    return subAgent ? deriveSubAgentTools(callerTools) : callerTools;
+    const toolNames = callerTools.map((t) => t.function.name);
+    logger.info("Client provided tools", { count: toolNames.length, names: toolNames });
+    const resolved = subAgent ? deriveSubAgentTools(callerTools) : callerTools;
+    if (subAgent && resolved.length !== callerTools.length) {
+      logger.info("Sub-agent tool filtering", {
+        before: callerTools.length,
+        after: resolved.length,
+        names: resolved.map((t) => t.function.name),
+      });
+    }
+    return resolved;
   }
-  return subAgent ? SUB_AGENT_TOOLS : DEFAULT_TOOLS;
+
+  // 客户端未传 tools → 不传工具定义给 CodeArts
+  // 避免客户端收到不认识的 tool_call 报 "unknown tool"
+  logger.info("No tools from client — sending empty tool list to CodeArts");
+  return [];
 }
 
 // ---------------------------------------------------------------------------
