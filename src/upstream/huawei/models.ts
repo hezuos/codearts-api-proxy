@@ -11,43 +11,104 @@
  *               models filtered by supported_clients
  *   - External: URL without PromptCenterService, response used directly,
  *               no supported_clients filtering
+ *
+ * Caching strategy:
+ *   - Dynamic success → write to data/model-cache.json
+ *   - Cache file mtime < 1 hour → use cache
+ *   - Dynamic fail + cache exists → use cache (ignore time)
+ *   - Dynamic fail + no cache → use static fallback
  */
+import fs from "fs";
+import path from "path";
 import https from "https";
 import { config, getGptsUrl } from "../../config";
 import { getCredentials, signRequest } from "../../auth/huawei/credentials";
 import type { StoredHuaweiSession } from "../../auth/huawei/session-store";
 import type { OpenAIModel } from "../../types/openai";
-import { MODEL_MAP } from "./chat";
 import { logger } from "../../utils/logger";
 
 // Re-export MODEL_MAP for any other consumers
 export { MODEL_MAP } from "./chat";
 
 // ---------------------------------------------------------------------------
-// Per-account TTL cache
+// File-based cache (1 hour TTL based on file mtime)
 // ---------------------------------------------------------------------------
 
-interface CacheEntry {
+const CACHE_FILE = "model-cache.json";
+const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+interface CacheFileContent {
   models: OpenAIModel[];
   fetchedAt: number;
 }
 
-/** accountId → cached model list */
-const modelCache = new Map<string, CacheEntry>();
-
-function isCacheFresh(accountId: string): boolean {
-  const entry = modelCache.get(accountId);
-  if (!entry) return false;
-  const ageSeconds = (Date.now() - entry.fetchedAt) / 1000;
-  return ageSeconds < config.modelCacheTtl;
+function getCacheFilePath(): string {
+  return path.join(config.dataDir, CACHE_FILE);
 }
 
-export function invalidateCache(accountId?: string): void {
-  if (accountId) {
-    modelCache.delete(accountId);
-  } else {
-    modelCache.clear();
+/** Check if cache file exists and is fresh (< 1 hour old) */
+function isCacheFileFresh(): boolean {
+  const filePath = getCacheFilePath();
+  if (!fs.existsSync(filePath)) return false;
+  try {
+    const stat = fs.statSync(filePath);
+    return Date.now() - stat.mtimeMs < CACHE_TTL_MS;
+  } catch {
+    return false;
   }
+}
+
+/** Read cache file, return null if not exists or invalid */
+function readCacheFile(): OpenAIModel[] | null {
+  const filePath = getCacheFilePath();
+  if (!fs.existsSync(filePath)) return null;
+  try {
+    const content = fs.readFileSync(filePath, "utf8");
+    const data = JSON.parse(content) as CacheFileContent;
+    if (Array.isArray(data.models) && data.models.length > 0) {
+      return data.models;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Write models to cache file */
+function writeCacheFile(models: OpenAIModel[]): void {
+  const filePath = getCacheFilePath();
+  try {
+    // Ensure data directory exists
+    if (!fs.existsSync(config.dataDir)) {
+      fs.mkdirSync(config.dataDir, { recursive: true });
+    }
+    const content: CacheFileContent = {
+      models,
+      fetchedAt: Date.now(),
+    };
+    fs.writeFileSync(filePath, JSON.stringify(content, null, 2));
+    logger.info(`Model cache written to ${filePath}`);
+  } catch (error) {
+    logger.error("Failed to write model cache file", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+/** Delete cache file (for force refresh) */
+function deleteCacheFile(): void {
+  const filePath = getCacheFilePath();
+  try {
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+  } catch {
+    // Ignore deletion errors
+  }
+}
+
+export function invalidateCache(): void {
+  deleteCacheFile();
 }
 
 // ---------------------------------------------------------------------------
@@ -313,21 +374,19 @@ function httpsGet(
 }
 
 // ---------------------------------------------------------------------------
-// Model list composition: dynamic + static aliases
+// Model list composition: dynamic only (no static aliases mixed in)
 // ---------------------------------------------------------------------------
 
 /**
- * Build the final model list by merging dynamic models with static MODEL_MAP aliases.
- * - Dynamic models take precedence on ID collision
- * - Static aliases (gpt-4, gpt-4o, etc.) always appear
+ * Build model list from dynamic model IDs.
+ * Does NOT include static MODEL_MAP aliases — those are only for name resolution.
  */
-function composeModelList(dynamicModelIds: string[]): OpenAIModel[] {
+function buildModelList(modelIds: string[]): OpenAIModel[] {
   const now = Math.floor(Date.now() / 1000);
   const seen = new Set<string>();
   const result: OpenAIModel[] = [];
 
-  // 1. Add dynamic models first (they take precedence)
-  for (const id of dynamicModelIds) {
+  for (const id of modelIds) {
     if (!seen.has(id)) {
       seen.add(id);
       result.push({
@@ -339,39 +398,23 @@ function composeModelList(dynamicModelIds: string[]): OpenAIModel[] {
     }
   }
 
-  // 2. Add static MODEL_MAP entries (both aliases and their resolved targets)
-  for (const [alias, target] of Object.entries(MODEL_MAP)) {
-    // Add the alias itself (e.g., "gpt-4")
-    if (!seen.has(alias)) {
-      seen.add(alias);
-      result.push({
-        id: alias,
-        object: "model",
-        created: now,
-        owned_by: "codearts-agent-proxy",
-      });
-    }
-    // Add the target if not already present (e.g., "Glm-4.7-internal")
-    if (!seen.has(target)) {
-      seen.add(target);
-      result.push({
-        id: target,
-        object: "model",
-        created: now,
-        owned_by: "codearts",
-      });
-    }
-  }
-
   return result;
 }
 
 // ---------------------------------------------------------------------------
-// Static fallback
+// Static fallback (only GLM-5.1)
 // ---------------------------------------------------------------------------
 
 function getStaticModels(): OpenAIModel[] {
-  return composeModelList([]);
+  const now = Math.floor(Date.now() / 1000);
+  return [
+    {
+      id: "GLM-5.1",
+      object: "model",
+      created: now,
+      owned_by: "codearts-agent-proxy",
+    },
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -379,46 +422,57 @@ function getStaticModels(): OpenAIModel[] {
 // ---------------------------------------------------------------------------
 
 /**
- * Get the model list for a given provider account.
- * Uses per-account TTL cache. Falls back to static models on fetch failure.
+ * Get the model list.
+ *
+ * Caching strategy:
+ *   1. If cache file is fresh (< 1 hour), use it
+ *   2. Try dynamic fetch from upstream
+ *   3. On success: write to cache, return dynamic models
+ *   4. On failure: use cache file if exists (ignore time), else static fallback
  */
 export async function getModelList(
-  accountId: string,
+  _accountId: string,
   session: StoredHuaweiSession,
   traceId: string,
   forceRefresh = false,
 ): Promise<OpenAIModel[]> {
-  // Check cache
-  if (!forceRefresh && isCacheFresh(accountId)) {
-    const cached = modelCache.get(accountId)!;
-    logger.info(`[${traceId}] Model list cache hit for account ${accountId}`);
-    return cached.models;
+  // 1. Check cache file (skip if forceRefresh)
+  if (!forceRefresh && isCacheFileFresh()) {
+    const cached = readCacheFile();
+    if (cached) {
+      logger.info(`[${traceId}] Model list cache hit (file is fresh)`);
+      return cached;
+    }
   }
 
-  // Fetch from upstream
+  // 2. Try dynamic fetch
   try {
     logger.info(
-      `[${traceId}] Fetching model list from upstream for account ${accountId} (innerVersion=${config.isInnerVersion})`,
+      `[${traceId}] Fetching model list from upstream (innerVersion=${config.isInnerVersion})`,
     );
     const dynamicIds = await fetchUpstreamModels(session, traceId);
-    logger.info(
-      `[${traceId}] Fetched ${dynamicIds.length} model(s) from upstream`,
-    );
+    logger.info(`[${traceId}] Fetched ${dynamicIds.length} model(s) from upstream`);
 
-    const models = composeModelList(dynamicIds);
+    const models = buildModelList(dynamicIds);
 
-    // Update cache
-    modelCache.set(accountId, { models, fetchedAt: Date.now() });
+    // 3. Write to cache file
+    writeCacheFile(models);
 
     return models;
   } catch (error) {
-    logger.error(
-      `[${traceId}] Failed to fetch model list from upstream`,
-      { error: error instanceof Error ? error.message : String(error) },
-    );
-    logger.info(`[${traceId}] Falling back to static model list`);
+    logger.error(`[${traceId}] Failed to fetch model list from upstream`, {
+      error: error instanceof Error ? error.message : String(error),
+    });
 
-    // Return static models as fallback (don't cache the fallback)
+    // 4. Try cache file (ignore time)
+    const cached = readCacheFile();
+    if (cached) {
+      logger.info(`[${traceId}] Using cached model list (dynamic fetch failed)`);
+      return cached;
+    }
+
+    // 5. Static fallback
+    logger.info(`[${traceId}] Falling back to static model list`);
     return getStaticModels();
   }
 }

@@ -50,7 +50,7 @@ export async function listModels(req: Request, res: Response): Promise<void> {
   // Check for cache refresh request
   const forceRefresh = req.query.refresh === "true";
   if (forceRefresh) {
-    invalidateCache(accountId);
+    invalidateCache();
   }
 
   const traceId = getTraceId(req);

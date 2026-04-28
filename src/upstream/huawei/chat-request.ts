@@ -17,18 +17,11 @@ import { extractUserMessage, extractToolResults, resolveTools, normalizeMessageC
 // Model mapping
 // ---------------------------------------------------------------------------
 
-export const DEFAULT_MODEL_ID = "Glm-4.7-internal";
+export const DEFAULT_MODEL_ID = "GLM-5.1";
 
 export const MODEL_MAP: Record<string, string> = {
-  "gpt-4": DEFAULT_MODEL_ID,
-  "gpt-4o": DEFAULT_MODEL_ID,
-  "gpt-3.5-turbo": DEFAULT_MODEL_ID,
-  "glm-4.7": DEFAULT_MODEL_ID,
-  "glm-4.7-internal": "Glm-4.7-internal",
-  "glm-5": "Glm-5-internal",
-  "glm-5-internal": "Glm-5-internal",
   "glm-5.1": "GLM-5.1",
-  "deepseek-v3.2": "deepseek-v3.2"
+  "GLM-5.1": "GLM-5.1",
 };
 
 function resolveModelId(request: OpenAIChatCompletionRequest): string {
