@@ -71,7 +71,18 @@ export function extractToolResults(
   request: OpenAIChatCompletionRequest,
 ): CodeArtsToolResult[] {
   const explicit = request.codearts?.tool_results ?? [];
-  if (explicit.length > 0) return explicit;
+  if (explicit.length > 0) {
+    logger.debug("[client→proxy] tool_results (explicit codearts)", {
+      count: explicit.length,
+      details: explicit.map((tr) => ({
+        name: tr.name,
+        toolCallId: tr.toolCallId,
+        status: tr.status,
+        result_preview: tr.result?.slice(0, 200),
+      })),
+    });
+    return explicit;
+  }
 
   const lastMsg = request.messages[request.messages.length - 1];
   if (!lastMsg || lastMsg.role !== "tool") return [];
@@ -89,26 +100,36 @@ export function extractToolResults(
   if (assistantIndex === -1) return [];
 
   const byId = new Map(recentToolCalls.map((tc) => [tc.id, tc]));
-  return request.messages
+  const toolMsgs = request.messages
     .slice(assistantIndex + 1)
     .filter(
       (msg) =>
         msg.role === "tool" && !!msg.tool_call_id && byId.has(msg.tool_call_id),
-    )
-    .map((msg) => {
-      const tc = byId.get(msg.tool_call_id!);
-      return {
-        feedback: "",
-        result: normalizeMessageContent(msg.content),
-        name: tc?.function.name ?? msg.name ?? "unknown",
-        arguments: tc?.function.arguments
-          ? parseToolArguments(tc.function.arguments)
-          : {},
-        status: "APPROVE",
-        executeStatus: "success",
-        toolCallId: msg.tool_call_id,
-      } satisfies CodeArtsToolResult;
-    });
+    );
+
+  logger.debug("[client→proxy→codearts] tool_results extraction", {
+    assistantToolCalls: recentToolCalls.map((tc) => ({ id: tc.id, name: tc.function.name })),
+    toolMessages: request.messages
+      .slice(assistantIndex + 1)
+      .filter((m) => m.role === "tool")
+      .map((m) => ({ tool_call_id: m.tool_call_id, matched: byId.has(m.tool_call_id ?? "") })),
+    matchedCount: toolMsgs.length,
+  });
+
+  return toolMsgs.map((msg) => {
+    const tc = byId.get(msg.tool_call_id!);
+    return {
+      feedback: "",
+      result: normalizeMessageContent(msg.content),
+      name: tc?.function.name ?? msg.name ?? "unknown",
+      arguments: tc?.function.arguments
+        ? parseToolArguments(tc.function.arguments)
+        : {},
+      status: "APPROVE",
+      executeStatus: "success",
+      toolCallId: msg.tool_call_id,
+    } satisfies CodeArtsToolResult;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -125,10 +146,10 @@ export function resolveTools(
 
   if (callerTools) {
     const toolNames = callerTools.map((t) => t.function.name);
-    logger.info("Client provided tools", { count: toolNames.length, names: toolNames });
+    logger.info("[client→proxy→codearts] tools", { count: toolNames.length, names: toolNames });
     const resolved = subAgent ? deriveSubAgentTools(callerTools) : callerTools;
     if (subAgent && resolved.length !== callerTools.length) {
-      logger.info("Sub-agent tool filtering", {
+      logger.info("[proxy→codearts] sub-agent tool filtering", {
         before: callerTools.length,
         after: resolved.length,
         names: resolved.map((t) => t.function.name),
@@ -139,7 +160,7 @@ export function resolveTools(
 
   // 客户端未传 tools → 不传工具定义给 CodeArts
   // 避免客户端收到不认识的 tool_call 报 "unknown tool"
-  logger.info("No tools from client — sending empty tool list to CodeArts");
+  logger.info("[proxy→codearts] no tools from client — sending empty tool list");
   return [];
 }
 

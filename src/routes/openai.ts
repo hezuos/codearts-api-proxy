@@ -106,7 +106,7 @@ export function createChatCompletion(req: Request, res: Response): void {
           ? `[tool_calls count=${lastMsg.tool_calls.length}]`
           : "(empty)";
 
-  log.info("INCOMING REQUEST", {
+  log.info("[client→proxy] REQUEST", {
     model: body.model,
     stream: !!body.stream,
     provider_account: accountId,
@@ -117,7 +117,38 @@ export function createChatCompletion(req: Request, res: Response): void {
     codearts_tool_results_count: body.codearts?.tool_results?.length ?? 0,
     codearts_sub_agent_type: body.codearts?.sub_agent?.type,
   });
-  log.debug("Incoming body (full)", { body: req.body });
+  log.debug("[client→proxy] body (full)", { body: req.body });
+
+  // ── Tool-specific debug logs ──────────────────────────────────────────────
+  if (body.tools?.length) {
+    log.debug("[client→proxy] tools", {
+      count: body.tools.length,
+      names: body.tools.map((t) => t.function?.name ?? "(unnamed)"),
+    });
+  }
+  const toolMessages = body.messages?.filter((m) => m.role === "tool") ?? [];
+  if (toolMessages.length > 0) {
+    log.debug("[client→proxy] tool messages", {
+      count: toolMessages.length,
+      details: toolMessages.map((m) => ({
+        tool_call_id: m.tool_call_id,
+        content_preview: typeof m.content === "string" ? m.content.slice(0, 200) : "(non-string)",
+      })),
+    });
+  }
+  const assistantWithTools = body.messages?.filter((m) => m.tool_calls?.length) ?? [];
+  if (assistantWithTools.length > 0) {
+    log.debug("[client→proxy] assistant tool_calls", {
+      count: assistantWithTools.length,
+      details: assistantWithTools.flatMap((m) =>
+        (m.tool_calls ?? []).map((tc) => ({
+          id: tc.id,
+          name: tc.function?.name,
+          arguments_preview: tc.function?.arguments?.slice(0, 200),
+        }))
+      ),
+    });
+  }
 
   if (req.body.stream) {
     void handleStreamingRequest(body, auth.session, auth.apiKeyId, traceId, res);

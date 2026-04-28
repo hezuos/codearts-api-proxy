@@ -45,7 +45,7 @@ export async function streamHuaweiChatToResponse(
   const msgArr = requestBody.messages as unknown[];
   const envDetails = tp?.environmentDetails as Record<string, unknown> | undefined;
 
-  log.info("OUTGOING REQUEST → CodeArts", {
+  log.info("[proxy→codearts] REQUEST", {
     url: `POST ${chatUrl}`,
     model_id: requestBody.model_id,
     chat_id: requestBody.chat_id,
@@ -55,7 +55,7 @@ export async function streamHuaweiChatToResponse(
     isSubAgent: (tp?.isSubAgent as boolean | undefined) ?? false,
     cwd: envDetails?.currentWorkingDirectory ?? "",
   });
-  log.debug("Outgoing body (full)", { body });
+  log.debug("[proxy→codearts] body (full)", { body });
 
   // ── Continuity info ───────────────────────────────────────────────────────
   if (!request.codearts?.chat_id) {
@@ -85,12 +85,12 @@ export async function streamHuaweiChatToResponse(
   const { status, stream } = await httpsPost(chatUrl, headers, body, signal);
 
   // ── HTTP status log ───────────────────────────────────────────────────────
-  log.info("CodeArts HTTP response", { status });
+  log.info("[codearts→proxy] HTTP response", { status });
 
   if (status !== 200) {
     let errorBody = "";
     for await (const line of stream) errorBody += line;
-    log.error("CodeArts error body", { status, body: errorBody.slice(0, 500) });
+    log.error("[codearts→proxy] error body", { status, body: errorBody.slice(0, 500) });
     if (status === 401 || status === 403)
       throw new UpstreamAuthError(status, errorBody);
     throw new Error(
@@ -127,7 +127,7 @@ export async function streamHuaweiChatToResponse(
 
     // Log meta event
     if (event.chat_id || event.response_message_id) {
-      log.debug("SSE meta", { chat_id: event.chat_id, response_message_id: event.response_message_id, request_message_id: event.request_message_id });
+      log.debug("[codearts→proxy] SSE meta", { chat_id: event.chat_id, response_message_id: event.response_message_id, request_message_id: event.request_message_id });
     }
 
     // Log errors
@@ -141,7 +141,7 @@ export async function streamHuaweiChatToResponse(
         continue;
       }
       sseHadError = true;
-      log.error("SSE error from CodeArts", { code: event.error_code, msg: event.error_msg ?? "unknown" });
+      log.error("[codearts→proxy] SSE error", { code: event.error_code, msg: event.error_msg ?? "unknown" });
       const errChunk: OpenAIChatCompletionChunk = {
         id: completionId,
         object: "chat.completion.chunk",
@@ -170,7 +170,12 @@ export async function streamHuaweiChatToResponse(
           if (hasIdentity) {
             sseToolCallCount++;
           }
-          log.debug("SSE tool_call", { id: tc.id, name: tc.function?.name ?? tc.name, hasId: !!(tc.id && tc.id !== "-") });
+          log.debug("[codearts→proxy] SSE tool_call", {
+            id: tc.id,
+            name: tc.function?.name ?? tc.name,
+            hasId: !!(tc.id && tc.id !== "-"),
+            arguments_preview: (tc.function?.arguments ?? (typeof tc.arguments === "string" ? tc.arguments : "")).slice(0, 300),
+          });
         }
       }
       if (event.delta.content) {
@@ -206,7 +211,17 @@ export async function streamHuaweiChatToResponse(
       if (event.delta.reasoning_content)
         delta.reasoning_content = event.delta.reasoning_content;
       const toolCallDeltas = mapToolCallDeltas(event.delta.tool_calls);
-      if (toolCallDeltas) delta.tool_calls = toolCallDeltas;
+      if (toolCallDeltas) {
+        delta.tool_calls = toolCallDeltas;
+        log.debug("[proxy→client] tool_call delta", {
+          deltas: toolCallDeltas.map((d) => ({
+            index: d.index,
+            id: d.id,
+            name: d.function?.name,
+            arguments_preview: d.function?.arguments?.slice(0, 200),
+          })),
+        });
+      }
 
       if (Object.keys(delta).length > 0) {
         res.write(
