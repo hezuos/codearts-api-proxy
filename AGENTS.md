@@ -1,128 +1,122 @@
 # AGENTS.md
 
-## 使用中文
-- 文档使用中文
-- LLM 输出和think使用中文
-- 注释使用中文
+## 语言约定
 
-## Project overview
+- 文档、注释、LLM 输出均使用中文
 
-OpenAI-compatible proxy that wraps the Huawei CodeArts Agent LLM API.
-Clients (e.g. OpenCode) talk standard OpenAI `/v1/chat/completions`; the proxy signs requests with AK/SK and speaks the CodeArts SSE protocol upstream.
+## 项目概述
 
-## Package manager
+OpenAI 兼容代理，封装华为云 CodeArts Agent LLM API。客户端（如 OpenCode）使用标准 OpenAI `/v1/chat/completions` 协议，代理负责 AK/SK 签名并转换为 CodeArts SSE 协议转发上游。
 
-**Use `pnpm` for all package operations.**
+## 包管理器
+
+**使用 `pnpm`**（非 npm）：
 
 ```bash
-pnpm install        # Install dependencies
-pnpm run build      # Compile TypeScript
-pnpm run dev        # Development mode
-pnpm start          # Run compiled code
-pnpm test           # Run tests
-pnpm run lint       # Lint code
+pnpm install        # 安装依赖
+pnpm run build      # 编译 TypeScript
+pnpm run dev        # 开发模式（ts-node）
+pnpm start          # 运行编译后代码
+pnpm test           # 运行测试
+pnpm run lint       # ESLint 检查
 ```
 
-Always run `pnpm run build` after changes to verify zero TypeScript errors before committing.
+修改代码后务必执行 `pnpm run build` 确认零 TypeScript 错误。
 
-## Key commands
-
-```bash
-pnpm run build      # tsc — compile src/ → dist/
-pnpm run dev        # run via ts-node (no build needed)
-pnpm start          # run compiled dist/index.js
-pnpm test           # src/upstream/huawei/chat.test.ts via ts-node
-pnpm run lint       # eslint src/**/*.ts
-```
-
-## Architecture
+## 核心架构
 
 ```
 src/
-  index.ts                        # Express app wiring + startup
-  config.ts                       # All env vars with defaults
+  index.ts                        # Express 应用入口
+  config.ts                       # 环境变量配置（含默认值）
   auth/
-    store.ts                      # In-memory API-key store, persisted to data/auth-store.json
-    admin.ts                      # Admin password management (bcrypt)
+    store.ts                      # 认证存储门面（重导出各 store 模块）
+    admin.ts                      # Admin 密码管理（bcrypt）
     huawei/
-      sign.ts                     # AK/SK HMAC-SHA256 request signing (do not touch)
-      session-store.ts            # Persists Huawei sessions → data/huawei-sessions.json
-      refresh.ts / refresh-task.ts# Background token refresh
+      sign.ts                     # AK/SK HMAC-SHA256 签名（勿修改）
+      session-store.ts            # 华为会话持久化
+      refresh-task.ts             # 后台 Token 刷新任务
   middleware/
-    authenticate-api-key.ts       # Bearer token auth for API routes
-    authenticate-ui.ts            # Cookie auth for UI pages
-    authenticate-admin.ts         # Admin session auth
+    authenticate-api-key.ts       # API 路由 Bearer Token 认证
+    authenticate-ui.ts            # UI 页面 Cookie 认证
+    authenticate-admin.ts         # Admin 会话认证
   routes/
     openai.ts                     # POST /v1/chat/completions, GET /v1/models
-    huawei-auth.ts                # OAuth login flow routes
-    provider-accounts.ts          # Account management API
+    huawei-auth.ts                # OAuth 登录流程
+    provider-accounts.ts          # Provider 账号管理 API
+    web-ui.ts                     # Web UI API
+    admin.ts                      # Admin API
   upstream/huawei/
-    chat.ts                       # Core: buildRequestBody → httpsPost → SSE passthrough
-    tools.ts                      # DEFAULT_TOOLS / SUB_AGENT_TOOLS schemas
-  types/openai.ts                 # Shared request/response types (codearts extension fields here)
-public/                           # Static HTML/CSS/JS for Web UI
-  index.html                      # Home page
-  success.html                    # Post-login success page
-  status.html                     # Account status dashboard
-  admin.html                      # Admin control panel
-  admin-login.html                # Admin login page
-  admin-setup.html                # Admin password setup page
-  style.css                       # Minimal styling
-  app.js                          # Shared JavaScript utilities
+    chat-request.ts               # 请求体构建 + HTTP 传输
+    chat-stream.ts                # SSE 流式响应处理
+    chat-protocol.ts              # CodeArts SSE 协议解析
+    chat-translate.ts             # OpenAI ↔ CodeArts 消息转换
+    tools.ts                      # 工具定义（DEFAULT_TOOLS / SUB_AGENT_TOOLS）
+    models.ts                     # 模型列表获取（带缓存）
+  store/
+    hierarchical-store.ts         # 分层存储（User → Account → ApiKey → Session）
+    file-store.ts                 # 加密文件读写
+    paths.ts                      # 数据文件路径计算
+  types/openai.ts                 # OpenAI 类型定义 + codearts 扩展字段
+public/                           # Web UI 静态文件
 ```
 
-## Critical design rules (do not violate)
+## 关键设计规则（勿违反）
 
-- **Proxy is stateless except one Map**: `lastResponseMessageId: Map<chat_id, response_message_id>` in `chat.ts`. This is intentional — do not add more state.
-- **`chat_id` derivation**: SHA-256 of the first user/system message content (first 32 hex chars). Never use `randomUUID()` for `chat_id`.
-- **`parent_message_id`**: only update the Map on _successful_ SSE turns (no `error_code`). On error, preserve old value so retries work.
-- **`extractToolResults`**: only extracts tool messages when `messages[last].role === "tool"`. If last message is `user`, return `[]` — this is a new user turn, not a tool continuation.
-- **`task_parameters.environmentDetails.currentWorkingDirectory`**: must come from caller (`request.codearts.current_working_directory`). Never use `process.cwd()`.
-- **`osVersion`**: default `"win32"` (matches captures). Never use `process.platform`.
-- **`Task.subagent_type`**: normalize to lowercase via `normalizeToolCallArguments` — CodeArts LLM emits mixed case, OpenCode only accepts lowercase.
+- **最小有状态**：进程内仅维护 `Map<chat_id, response_message_id>`（`chat-request.ts`），用于自动填充 `parent_message_id`。不存储消息历史。
+- **`chat_id` 派生**：SHA-256 哈希（providerAccountId + 首条 user/system 消息内容）前 32 字符。勿用 `randomUUID()`。
+- **`parent_message_id` 更新**：仅在 SSE 成功响应（无 `error_code`）时更新 Map。错误时保留旧值以支持重试。
+- **`extractToolResults`**：仅当 `messages[last].role === "tool"` 时提取工具结果。若最后一条是 `user`，返回 `[]`（新对话轮次）。
+- **`currentWorkingDirectory`**：必须来自 `request.codearts.current_working_directory`，勿用 `process.cwd()`。
+- **`osVersion`**：默认 `"win32"`，勿用 `process.platform`。
+- **`Task.subagent_type`**：通过 `normalizeToolCallArguments` 归一化为小写（CodeArts LLM 输出混合大小写，OpenCode 仅接受小写）。
 
-## Environment variables
+## 环境变量
 
-All have defaults safe for local dev (see `src/config.ts`). Notable ones:
+完整列表见 `src/config.ts`。关键变量：
 
-| Var               | Default                            | Notes                                   |
-| ----------------- | ---------------------------------- | --------------------------------------- |
-| `PORT`            | `1455`                             |                                         |
-| `ENCRYPTION_KEY`  | `dev-only-32-byte-encryption-key!` | Change in production                    |
-| `DEFAULT_API_KEY` | `dev-openai-compatible-key`        | Bearer token clients must send          |
-| `IDE_VERSION`     | `26.3.11`                          | Must match CodeArts server expectations |
-| `PLUGIN_VERSION`  | `26.3.5`                           | Must match CodeArts server expectations |
-| `ADMIN_PASSWORD`  | (none)                             | Admin password (env takes precedence)   |
+| 变量                | 默认值                            | 说明                     |
+| ------------------- | --------------------------------- | ------------------------ |
+| `PORT`              | `1455`                            | 监听端口                 |
+| `ENCRYPTION_KEY`    | `dev-only-32-byte-encryption-key!`| 生产环境必须修改         |
+| `DEFAULT_API_KEY`   | `dev-openai-compatible-key`       | 客户端 Bearer Token      |
+| `IDE_VERSION`       | `26.3.11`                         | 需匹配 CodeArts 服务端   |
+| `PLUGIN_VERSION`    | `26.3.5`                          | 需匹配 CodeArts 服务端   |
+| `HUAWEI_IS_INNER_VERSION` | `false`                    | 是否为内部版本（影响 URL 路径） |
+| `ENABLE_REFRESH_TASK` | `true`                        | 是否自动刷新 Token       |
 
-## Data files (not in git)
+## 数据文件（不在 git 中）
 
-`data/` is gitignored. Contains:
+`data/` 目录（gitignored）按分层结构存储：
 
-- `auth-store.json` — API keys
-- `huawei-sessions.json` — AK/SK + tokens (sensitive)
-- `admin-config.json` — Admin password hash (bcrypt)
-- `conversation-store.json` — legacy, no longer used
+- `users/{userId}/profile.json` — 用户配置
+- `users/{userId}/accounts/{accountId}/account.json` — Provider 账号
+- `users/{userId}/accounts/{accountId}/keys/{keyId}/key.json` — API Key
+- `users/{userId}/accounts/{accountId}/keys/{keyId}/session.json` — 华为会话（含 AK/SK，敏感）
+
+所有文件使用 AES-256-GCM 加密（密钥来自 `ENCRYPTION_KEY`）。
+
+## 单用户模式
+
+当前为单用户模式：整个代理实例服务于一个用户。`bootstrapDefaultAuth()` 确保唯一用户存在。数据模型保留多用户结构，为后续扩展预留。
 
 ## Web UI
 
-The proxy serves static HTML pages from `public/` directory:
+静态页面（`public/`）：
 
-- `/` — Home page with login links
-- `/success` — Post-login page showing account info and API key (requires `auth_key` cookie)
-- `/status` — Account status dashboard (requires `auth_key` cookie)
-- `/admin` — Admin control panel (requires `admin_session` cookie)
-- `/admin/login` — Admin login page
-- `/admin/setup` — Admin password setup (shown if no admin configured)
+- `/` — 首页（登录入口）
+- `/success` — 登录成功页（显示 API Key）
+- `/status` — 账号状态仪表盘
+- `/admin` — Admin 控制面板
+- `/admin/login` — Admin 登录
+- `/admin/setup` — Admin 密码设置
 
-Authentication:
+认证方式：
+- 用户页面：`auth_key` Cookie（值同 API Key）
+- Admin 页面：`admin_session` Cookie
 
-- User pages use `auth_key` cookie (same value as API key)
-- Admin pages use `admin_session` cookie
-- Cookie attributes: `httpOnly`, `secure` (production), `sameSite`
+## 参考文档
 
-## Reference material
-
-- `docs/codearts-api-spec.md` — CodeArts chat API field reference
-- `docs/request-and-api.md` — field sourcing rules (PASSTHROUGH / PROTOCOL / CALLER_OR_DEFAULT)
-- `scripts/captured-request-*.json` — real IDE request captures (ground truth for request shape)
-- `simple-example/proxy.js` — minimal proxy style reference
+- `docs/codearts-api-spec.md` — CodeArts API 字段规范
+- `docs/request-and-api.md` — 字段来源规则
+- `scripts/captured-requests/` — IDE 请求捕获（ground truth）
