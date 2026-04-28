@@ -114,6 +114,7 @@ export async function streamHuaweiChatToResponse(
   let sseTextChars = 0;
   let sseToolCallCount = 0;
   let sseHadError = false;
+  const sseDebugLog: Array<{ event: number; delta?: string; error?: string; meta?: string }> = [];
 
   for await (const event of parseSSE(stream)) {
     sseEventCount++;
@@ -128,6 +129,7 @@ export async function streamHuaweiChatToResponse(
     // Log meta event
     if (event.chat_id || event.response_message_id) {
       log.debug("[codearts→proxy] SSE meta", { chat_id: event.chat_id, response_message_id: event.response_message_id, request_message_id: event.request_message_id });
+      sseDebugLog.push({ event: sseEventCount, meta: JSON.stringify({ chat_id: event.chat_id, response_message_id: event.response_message_id, request_message_id: event.request_message_id }) });
     }
 
     // Log errors
@@ -142,6 +144,7 @@ export async function streamHuaweiChatToResponse(
       }
       sseHadError = true;
       log.error("[codearts→proxy] SSE error", { code: event.error_code, msg: event.error_msg ?? "unknown" });
+      sseDebugLog.push({ event: sseEventCount, error: JSON.stringify({ code: event.error_code, msg: event.error_msg }) });
       const errChunk: OpenAIChatCompletionChunk = {
         id: completionId,
         object: "chat.completion.chunk",
@@ -163,6 +166,9 @@ export async function streamHuaweiChatToResponse(
     }
 
     if (event.delta) {
+      // Collect debug info for full stream dump
+      sseDebugLog.push({ event: sseEventCount, delta: JSON.stringify(event.delta) });
+
       if (event.delta.tool_calls && event.delta.tool_calls.length > 0) {
         for (const tc of event.delta.tool_calls) {
           const hasIdentity =
@@ -257,13 +263,14 @@ export async function streamHuaweiChatToResponse(
   }
 
   // ── Stream complete log ───────────────────────────────────────────────────
-  log.info("STREAM COMPLETE", {
+  log.info("[codearts→proxy→client] STREAM COMPLETE", {
     sse_events: sseEventCount,
     text_chars: sseTextChars,
     tool_calls: sseToolCallCount,
     response_message_id: responseMetadata.response_message_id ?? "(none)",
     chat_id: responseMetadata.chat_id ?? "(none)",
   });
+  log.debug("[codearts→proxy] SSE full stream", { events: sseDebugLog });
 
   res.write(
     `data: ${JSON.stringify({
