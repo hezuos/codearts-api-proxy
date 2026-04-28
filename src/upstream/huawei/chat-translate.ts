@@ -161,7 +161,7 @@ function normalizeToolCallArguments(name: string, argsStr: string): string {
   return argsStr;
 }
 
-/** Generate a stable tool call ID when CodeArts doesn't provide one. */
+/** Generate a stable tool call ID when CodeArts doesn't provide one (non-streaming only). */
 function generateToolCallId(): string {
   return `call_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
 }
@@ -196,9 +196,12 @@ export function mapToolCallDeltas(
       (typeof tc.arguments === "string"
         ? tc.arguments
         : JSON.stringify(tc.arguments ?? {}));
+    // In streaming mode, id only appears in the first chunk of each tool_call.
+    // Subsequent chunks have no id — leave it undefined so the client uses index.
+    const id = (tc.id && tc.id !== "-") ? tc.id : undefined;
     return {
       index: i,
-      id: (tc.id && tc.id !== "-") ? tc.id : generateToolCallId(),
+      ...(id ? { id } : {}),
       type: "function",
       function: { name, arguments: normalizeToolCallArguments(name, rawArgs) },
     };

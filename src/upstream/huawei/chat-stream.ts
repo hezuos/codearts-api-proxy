@@ -169,8 +169,8 @@ export async function streamHuaweiChatToResponse(
             (tc.id && tc.id !== "-") || (tc.function?.name ?? tc.name);
           if (hasIdentity) {
             sseToolCallCount++;
-            log.debug("SSE tool_call", { id: tc.id, name: tc.function?.name ?? tc.name });
           }
+          log.debug("SSE tool_call", { id: tc.id, name: tc.function?.name ?? tc.name, hasId: !!(tc.id && tc.id !== "-") });
         }
       }
       if (event.delta.content) {
