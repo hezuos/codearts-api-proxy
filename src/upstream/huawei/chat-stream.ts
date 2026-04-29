@@ -15,6 +15,7 @@ import type {
   OpenAIChatCompletionDelta,
 } from "../../types/openai";
 import { cleanToolCallDeltas } from "./chat-translate";
+import { buildRecoveryChunks, buildSyntheticRecoveryToolCalls } from "./chat-recovery";
 import { parseSSE } from "./chat-protocol";
 import {
   buildRequestBody,
@@ -147,6 +148,34 @@ export async function streamHuaweiChatToResponse(
       sseHadError = true;
       log.error("[codearts→proxy] SSE error", { code: event.error_code, msg: event.error_msg ?? "unknown" });
       sseDebugLog.push({ event: sseEventCount, error: JSON.stringify({ code: event.error_code, msg: event.error_msg }) });
+
+      const recoveryToolCalls = buildSyntheticRecoveryToolCalls(request);
+      if (recoveryToolCalls.length > 0) {
+        log.warn("[proxy→client] synthetic recovery tool_calls", {
+          code: event.error_code,
+          count: recoveryToolCalls.length,
+          names: recoveryToolCalls.map((tc) => tc.function.name),
+        });
+        const recovery = buildRecoveryChunks({
+          completionId,
+          created,
+          model,
+          responseMetadata,
+          sentRole,
+          sentMetadata,
+          errorCode: event.error_code,
+          errorMsg: event.error_msg ?? undefined,
+          recoveryToolCalls,
+        });
+        sentRole = recovery.sentRole;
+        sentMetadata = recovery.sentMetadata;
+        sseToolCallCount += recoveryToolCalls.length;
+        for (const chunk of recovery.chunks) {
+          res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+        }
+        break;
+      }
+
       const errChunk: OpenAIChatCompletionChunk = {
         id: completionId,
         object: "chat.completion.chunk",

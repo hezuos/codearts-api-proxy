@@ -19,6 +19,7 @@ import {
   type ToolDefinition,
 } from "./tools";
 import { logger } from "../../utils/logger";
+import { extractRecoveredToolResults } from "./chat-recovery";
 
 // ---------------------------------------------------------------------------
 // Message content normalization
@@ -58,15 +59,6 @@ export function extractUserMessage(messages: OpenAIChatMessage[]): string {
 // Tool result extraction
 // ---------------------------------------------------------------------------
 
-function parseToolArguments(argumentsText: string): Record<string, unknown> {
-  try {
-    const parsed = JSON.parse(argumentsText) as Record<string, unknown>;
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
 export function extractToolResults(
   request: OpenAIChatCompletionRequest,
 ): CodeArtsToolResult[] {
@@ -86,50 +78,7 @@ export function extractToolResults(
 
   const lastMsg = request.messages[request.messages.length - 1];
   if (!lastMsg || lastMsg.role !== "tool") return [];
-
-  let assistantIndex = -1;
-  let recentToolCalls: OpenAIToolCall[] = [];
-  for (let i = request.messages.length - 1; i >= 0; i--) {
-    const msg = request.messages[i];
-    if (msg.tool_calls && msg.tool_calls.length > 0) {
-      assistantIndex = i;
-      recentToolCalls = msg.tool_calls;
-      break;
-    }
-  }
-  if (assistantIndex === -1) return [];
-
-  const byId = new Map(recentToolCalls.map((tc) => [tc.id, tc]));
-  const toolMsgs = request.messages
-    .slice(assistantIndex + 1)
-    .filter(
-      (msg) =>
-        msg.role === "tool" && !!msg.tool_call_id && byId.has(msg.tool_call_id),
-    );
-
-  logger.debug("[client→proxy→codearts] tool_results extraction", {
-    assistantToolCalls: recentToolCalls.map((tc) => ({ id: tc.id, name: tc.function.name })),
-    toolMessages: request.messages
-      .slice(assistantIndex + 1)
-      .filter((m) => m.role === "tool")
-      .map((m) => ({ tool_call_id: m.tool_call_id, matched: byId.has(m.tool_call_id ?? "") })),
-    matchedCount: toolMsgs.length,
-  });
-
-  return toolMsgs.map((msg) => {
-    const tc = byId.get(msg.tool_call_id!);
-    return {
-      feedback: "",
-      result: normalizeMessageContent(msg.content),
-      name: tc?.function.name ?? msg.name ?? "unknown",
-      arguments: tc?.function.arguments
-        ? parseToolArguments(tc.function.arguments)
-        : {},
-      status: "APPROVE",
-      executeStatus: "success",
-      toolCallId: msg.tool_call_id,
-    } satisfies CodeArtsToolResult;
-  });
+  return extractRecoveredToolResults(request, normalizeMessageContent) ?? [];
 }
 
 // ---------------------------------------------------------------------------
