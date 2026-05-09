@@ -1,7 +1,7 @@
 # ── Stage 1: Build ──────────────────────────────────────────────
-FROM node:20-alpine AS builder
+FROM node:22-alpine AS builder
 
-# Enable pnpm via corepack (bundled with Node 20)
+# Enable pnpm via corepack (bundled with Node 22)
 RUN corepack enable && corepack prepare pnpm@latest --activate
 
 WORKDIR /app
@@ -17,7 +17,7 @@ COPY public/ public/
 RUN pnpm build
 
 # ── Stage 2: Production deps ───────────────────────────────────
-FROM node:20-alpine AS prod-deps
+FROM node:22-alpine AS prod-deps
 
 RUN corepack enable && corepack prepare pnpm@latest --activate
 
@@ -27,7 +27,7 @@ COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile --prod
 
 # ── Stage 3: Runtime ───────────────────────────────────────────
-FROM node:20-alpine AS runtime
+FROM node:22-alpine AS runtime
 
 WORKDIR /app
 
