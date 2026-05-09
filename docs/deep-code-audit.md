@@ -1,8 +1,10 @@
 # 深度代码审计：设计缺陷、潜在 Bug 与优化空间
 
-> 审计日期: 2026-04-24
+> 审计日期: 2026-04-24（首次），2026-05-09（复核更新）
 > 审计范围: 全部核心源码（src/），重点覆盖 upstream/、store/、auth/、routes/、middleware/
 > 前置文档: code-simplification-analysis.md（已实施的精简优化）、design-issues-analysis.md（第一轮设计问题）
+>
+> **复核说明**：自首次审计以来，多项问题已被修复。以下标注了各项的当前状态。
 
 ---
 
@@ -42,41 +44,15 @@
 
 ### C1. `refreshStoredSession` 原地修改缓存对象 — 刷新失败导致不一致状态
 
-**文件**: `src/auth/huawei/session-store.ts:78-96`
-**类别**: BUG
-
-```typescript
-const stored = getSessionByKeyId(keyId);  // ← 返回 Map 中的引用
-// ...
-stored.accessKey = ...;      // ← 直接修改了缓存中的对象！
-stored.securityToken = ...;  // ← 如果下面 encryptString 抛异常...
-stored.secretKeyCiphertext = encryptString(credential.secret);  // ← 这里失败
-setSession(keyId, stored);   // ← 永远不会执行
-```
-
-**后果**: 缓存中的 session 变成 新 AK + 旧 SK + 新 securityToken，后续所有请求签名失败（AK/SK 不匹配）。且这个不一致状态会**持久存在**，因为 `setSession` 没被调用所以磁盘没更新，但内存已经脏了。
-
-```
-正常流程:  stored(旧) → 修改字段 → setSession(新) → 写磁盘 ✓
-异常流程:  stored(旧) → 部分修改 → encryptString 抛异常 → 内存脏, 磁盘旧 ✗
-```
-
-**修复方案**: 先创建副本，修改副本，成功后再 `setSession`：
-
-```typescript
-const updated = { ...stored };  // 浅拷贝
-updated.accessKey = ...;
-updated.securityToken = ...;
-updated.secretKeyCiphertext = encryptString(credential.secret);
-setSession(keyId, updated);  // 原子更新
-```
+**文件**: `src/auth/huawei/session-store.ts:78-101`
+**当前状态**: ✅ **已修复** — 代码现在先创建副本 `const updated: StoredHuaweiSession = { ...stored, ... }`，修改副本，成功后再 `setSession(keyId, updated)` 原子更新。
 
 ---
 
 ### C2. `apiKeysByValue` 明文索引仍在填充 — 新 key 也写入明文
 
 **文件**: `src/store/hierarchical-store.ts:298`
-**类别**: SECURITY
+**当前状态**: ⚠️ **部分修复** — `apiKeysByHash`（SHA-256）索引已添加，验证优先走 hash 路径。`apiKeysByValue` 仍作为 legacy fallback 保留，用于向后兼容旧数据文件。`deleteKey` 中 hash/明文索引不一致的问题仍需关注。
 
 ```typescript
 export function setApiKey(apiKey: ApiKey, rawKeyValue: string): void {
@@ -196,37 +172,20 @@ const parsedBody = JSON.parse(body) as Record<string, unknown>;  // ← 反序�
 ### H3. `deriveConversationId` 碰撞导致跨对话上下文串扰
 
 **文件**: `src/upstream/huawei/chat-request.ts:88-95`
-**类别**: BUG
-
-```typescript
-function deriveConversationId(messages: OpenAIChatMessage[]): string {
-  const firstMsg = messages.find((m) => m.role === "user") ?? ...;
-  return createHash("sha256").update(content).digest("hex").slice(0, 32);
-  // ← SHA-256 前 128 bit，碰撞概率 ~2^-64（生日攻击）
-}
-```
-
-两个不同对话如果首条消息相同（如 "hello"、"帮我写个函数"），会得到相同的 `chat_id`，`parent_message_id` 互相覆盖。CodeArts 上游会把它们当作同一对话，导致上下文混乱。
-
-```
-用户A: "hello" → chat_id=abc123 → parent_message_id=msg_A
-用户B: "hello" → chat_id=abc123 → parent_message_id=msg_B  ← 覆盖!
-用户A 继续对话 → parent_message_id=msg_B ← 串扰!
-```
-
-**修复方案**: 在哈希输入中加入用户标识（`session.providerAccountId`）或随机盐，使相同消息在不同用户/会话间产生不同 chat_id。
+**当前状态**: ✅ **已修复** — `deriveConversationId` 现在将 system prompt 内容纳入哈希输入，不同 system prompt 的相同首条消息会产生不同 chat_id。
 
 ---
 
 ### H4. Admin 密码环境变量模式使用 `===` 比较 — timing attack
 
 **文件**: `src/auth/admin.ts:57-58`
-**类别**: SECURITY
+**当前状态**: ✅ **已修复** — 现在使用 `crypto.timingSafeEqual` 进行常量时间比较：
 
 ```typescript
-if (adminPasswordFromEnv !== null) {
-  return password === adminPasswordFromEnv;  // ← 精确比较，受 timing 影响
-}
+const a = Buffer.from(password, "utf8");
+const b = Buffer.from(adminPasswordFromEnv, "utf8");
+if (a.length !== b.length) return false;
+return timingSafeEqual(a, b);
 ```
 
 虽然 admin 登录的实际风险很低（网络延迟远大于比较时间差），但 `bcrypt.compareSync` 已经在 file 模式下使用了，env 模式应该也用 `crypto.timingSafeEqual` 保持一致。
@@ -246,20 +205,7 @@ return timingSafeEqual(a, b);
 ### H5. `refresh-task.ts` 中 `setTimeout` 超时 Promise 泄漏
 
 **文件**: `src/auth/huawei/refresh-task.ts:75-83`
-**类别**: BUG
-
-```typescript
-await Promise.race([
-  refreshStoredSession(keyId),
-  new Promise((_, reject) => {
-    setTimeout(() => reject(new Error("refresh timeout")), REFRESH_TIMEOUT_MS);
-    // ← 如果 refreshStoredSession 先完成，这个 timer 不会被清除
-    // ← 保持对 reject 闭包的引用，阻止 GC，15 秒后才触发
-  }),
-]);
-```
-
-每次刷新泄漏一个 15 秒 timer + 闭包。正确做法：
+**当前状态**: ✅ **已修复** — 现在使用 `clearTimeout` 清理 timer：
 
 ```typescript
 let timeoutId: NodeJS.Timeout;
@@ -312,31 +258,14 @@ export function getAllSessions(): Map<string, StoredHuaweiSession> {
 ### M2. `chat-request.ts` 中 `httpsPost` 的 120 秒超时不可配置
 
 **文件**: `src/upstream/huawei/chat-request.ts:325`
-
-```typescript
-req.setTimeout(120_000, () => { ... });  // ← 硬编码
-```
-
-长时间 agent 对话（复杂代码生成、多步推理）可能超过 120 秒。应支持 `UPSTREAM_TIMEOUT_MS` 环境变量。
+**当前状态**: ✅ **已修复** — 超时值现在从 `config.upstreamTimeoutMs` 读取，由 `UPSTREAM_TIMEOUT_MS` 环境变量控制（默认 120000ms）。
 
 ---
 
 ### M3. `config.ts` 开发模式硬编码加密密钥
 
 **文件**: `src/config.ts:44-49`
-
-```typescript
-encryptionKey: requireEnv(
-  "ENCRYPTION_KEY",
-  (process.env.NODE_ENV ?? "development") === "production"
-    ? undefined
-    : "dev-only-32-byte-encryption-key!",  // ← 公开密钥
-),
-```
-
-如果忘记设置 `NODE_ENV=production`，生产环境使用公开密钥，等于未加密。
-
-**修复方案**: 启动时如果检测到硬编码密钥且 `data/` 目录已有数据，打印 WARNING 并建议设置 `ENCRYPTION_KEY`。
+**当前状态**: ✅ **已修复** — 生产环境下 `ENCRYPTION_KEY` 无 fallback（`undefined`），`requireEnv` 会抛错。仅开发环境允许使用硬编码回退。同时导出 `isDevEncryptionKey` 标志用于启动时警告。
 
 ---
 
@@ -362,12 +291,7 @@ if (event.error_code && event.error_code !== "0") {
 ### M5. `isMasterNode` 硬编码为 `true` — 多实例部署时所有节点都刷新
 
 **文件**: `src/auth/huawei/refresh-task.ts:17`
-
-```typescript
-const isMasterNode = true;  // ← 永远为 true
-```
-
-多实例部署时所有节点都执行刷新，造成 N 倍上游请求。应支持 `IS_MASTER_NODE` 环境变量。
+**当前状态**: ✅ **已修复** — 现在从 `config.ts` 读取 `isMasterNode`（由 `IS_MASTER_NODE` 环境变量控制，默认 `true`）。
 
 ---
 
@@ -387,16 +311,7 @@ if (mapped) toolCalls = mapped;  // ← 覆盖而非合并
 ### M7. `logger.ts` 无效 `LOG_LEVEL` 导致静默失败
 
 **文件**: `src/utils/logger.ts:16-18`
-
-```typescript
-const currentLevel: LogLevel =
-  (process.env.LOG_LEVEL as LogLevel) ?? ...;
-// ← 如果 LOG_LEVEL="verbose"，as LogLevel 不报错
-// ← LOG_LEVELS["verbose"] = undefined
-// ← shouldLog: undefined >= number → false → 所有日志都不输出
-```
-
-**修复方案**: 启动时验证 `LOG_LEVEL` 是否为合法值，非法值 fallback 到默认并打印 WARNING。
+**当前状态**: ✅ **已修复** — `logger.ts` 现在在初始化时验证 `LOG_LEVEL` 是否为合法值，非法值 fallback 到默认并打印 WARNING。
 
 ---
 

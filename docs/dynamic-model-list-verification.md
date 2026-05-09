@@ -1,8 +1,10 @@
 # Dynamic Model List 验证报告
 
-> 日期: 2026-04-27
+> 日期: 2026-04-27（首次），2026-05-09（复核更新）
 > 变更: dynamic-model-list (20/20 tasks complete)
 > 结论: 实现存在 4 个关键问题，导致上游模型获取始终失败，fallback 到静态 MODEL_MAP
+>
+> **复核说明**：自首次验证以来，4 个问题中 3 个已完全修复，1 个部分修复。
 
 ## 验证环境
 
@@ -69,6 +71,8 @@ get selectDefaultAgentId() {
 
 新增 `/useragents` 端点调用，获取可用 agent 列表，取第一个 `is_primary_agent=true` 的 agent 的 `agent_id` (UUID)，再用此 UUID 调 `/detail`。
 
+**当前状态**: ⚠️ **部分修复** — `fetchPrimaryAgentId()` 已实现，会先调 `/useragents` 获取 UUID。但 `getAgentId()` 仍默认返回 `"Pangu_Doer_in_CodeArts"` 作为 fallback，当 `/useragents` 失败时仍会使用此硬编码值。
+
 ---
 
 ## 问题 2: 模型字段名错误
@@ -109,6 +113,8 @@ return filtered
 ### 修复方向
 
 将 `m.model_id` 改为 `m.model_alias`。
+
+**当前状态**: ✅ **已修复** — 代码现在使用 `m.model_alias ?? m.model_id`，优先取 `model_alias`，fallback 到 `model_id`。
 
 ---
 
@@ -171,6 +177,8 @@ async getGptListInfoRequest(e = 0, x = 100) {
 
 在 `models.ts` 中新增 `fetchUserAgents()` 函数，先获取 agent 列表，再调 `/detail`。
 
+**当前状态**: ✅ **已修复** — `fetchPrimaryAgentId()` 已实现，调用 `/useragents` 获取 `is_primary_agent=true` 的 agent UUID。
+
 ---
 
 ## 问题 4: supported_client 过滤导致空结果
@@ -194,6 +202,8 @@ supported_clients: ["IJ","IP","DS","QA","CL","GO","IC","IU","PS","PY","PC","RD",
 ### 修复方向
 
 调用 `/useragents` 时不传 `supported_client` 参数，或传空值。在获取到 agent 列表后，在客户端侧按 `metadata.client_support` 过滤。
+
+**当前状态**: ✅ **已修复** — `fetchPrimaryAgentId()` 调用 `/useragents` 时不传 `supported_client` 参数。
 
 ---
 

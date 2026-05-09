@@ -1,139 +1,38 @@
 # 项目设计问题分析与改进方案
 
-> 分析日期: 2026-04-24
+> 分析日期: 2026-04-24（首次），2026-05-09（复核更新）
 > 范围: 架构设计、安全性、可维护性、可测试性、运行时可靠性
+>
+> **复核说明**：自首次分析以来，多项问题已被修复。以下标注了各项的当前状态。
 
 ---
 
 ## D1. 无结构化日志系统 — 全部使用 console 直接输出
 
-### 问题
-
-全项目 118 处 `console.log/warn/error` 调用，无结构化日志框架。存在以下问题：
-
-1. **无法控制日志级别** — 生产环境无法关闭 debug 级别日志，大量请求/响应体全文输出（如 `chat.ts:643` 输出完整 JSON body）
-2. **无结构化输出** — 全部是模板字符串拼接，无法被日志收集系统（ELK、Loki）解析
-3. **敏感信息泄露风险** — 完整请求体日志可能包含用户代码、密钥等敏感内容
-4. **无请求关联** — traceId 靠手动拼接 `[${traceId}]` 前缀，容易遗漏
-
-### 改进方案
-
-引入轻量结构化日志（如 `pino`，或自建 wrapper）：
-
-```
-┌─────────────────────────────────────────────────────┐
-│  当前: console.log(`[${traceId}] model: ${model}`)  │
-│                                                     │
-│  改进: logger.info("request", {                     │
-│    traceId, model, chatId,                          │
-│    // body 仅在 debug 级别输出                       │
-│  })                                                 │
-└─────────────────────────────────────────────────────┘
-```
-
+**当前状态**: ✅ **已修复** — 引入了 `src/utils/logger.ts`（106行），支持：
 - 按 `config.nodeEnv` 控制级别：production=info, development=debug
-- 请求体全文仅在 debug 级别输出，且截断超长内容
-- 所有日志自动携带 traceId
+- `LOG_LEVEL` 环境变量覆盖
+- 请求体全文仅在 debug 级别输出
+- 所有日志自动携带 traceId（通过 `logger.withTrace(traceId)`）
+- 无效 `LOG_LEVEL` 值会 fallback 并打印 WARNING
 
 ---
 
 ## D2. Admin 认证使用硬编码 Session Token — 严重安全隐患
 
-### 问题
-
-`authenticate-admin.ts:6`:
-
-```typescript
-const ADMIN_SESSION_TOKEN = "admin-authenticated";
-```
-
-Admin 会话认证使用**硬编码的固定字符串**作为 cookie 值。这意味着：
-
-1. 任何知道这个值的人都可以伪造 admin cookie
-2. 值在源码中明文，无法轮换
-3. 无过期机制（cookie maxAge=24h，但 token 值永不过期）
-4. 多实例部署时所有实例共享同一 token，无法按实例隔离
-
-### 改进方案
-
-```typescript
-// 启动时生成随机 session token
-const adminSessionToken = randomBytes(32).toString("hex");
-
-// 或使用签名 JWT
-import jwt from "jsonwebtoken";
-const token = jwt.sign({ role: "admin" }, secret, { expiresIn: "24h" });
-```
+**当前状态**: ✅ **已修复** — `authenticate-admin.ts:8` 现在使用 `randomBytes(32).toString("hex")` 在启动时生成随机 token，每次进程重启都不同，防止 cookie 伪造。
 
 ---
 
 ## D3. API Key 存储使用明文值作为索引 — 安全隐患
 
-### 问题
-
-`auth/store.ts:143`:
-
-```typescript
-keyHash: input.rawKey,  // 字段名是 keyHash，但存的是明文 rawKey
-```
-
-`hierarchical-store.ts:32`:
-
-```typescript
-const apiKeysByValue = new Map<string, ApiKey>();  // 明文 API Key → ApiKey 映射
-```
-
-字段名为 `keyHash` 但实际存储的是**明文 API Key 值**。这导致：
-
-1. 内存中持有所有用户的明文 API Key
-2. 磁盘上加密存储的 JSON 中也包含明文 key（虽然整体文件加密，但语义上 keyHash 应该是 hash）
-3. 验证时直接明文比较，无时序安全比较（timing attack 理论上可行）
-
-### 改进方案
-
-```typescript
-// 生成时
-const keyHash = crypto.createHash("sha256").update(rawKey).digest("hex");
-
-// 验证时
-const lookupHash = crypto.createHash("sha256").update(rawKey).digest("hex");
-const apiKey = apiKeysByHash.get(lookupHash);
-```
+**当前状态**: ⚠️ **部分修复** — `hierarchical-store.ts` 现在同时维护 `apiKeysByValue`（legacy 明文索引，向后兼容）和 `apiKeysByHash`（SHA-256 hash 索引，新路径）。验证优先走 hash 路径，明文索引仅作 fallback。`keyHash` 字段名与实际存储内容的不一致仍然存在。
 
 ---
 
 ## D4. HTTP 客户端不统一 — axios 与原生 https 混用
 
-### 问题
-
-| 模块 | HTTP 客户端 | 用途 |
-|------|------------|------|
-| `refresh.ts` | axios | Token 刷新 |
-| `ticket.ts` | axios | Ticket 交换 |
-| `chat.ts` | 原生 `https.request` | SSE 流式聊天 |
-| `models.ts` | 原生 `https.get` | 模型列表获取 |
-
-两种 HTTP 客户端混用导致：
-
-1. 错误处理方式不一致（axios 用 `isAxiosError`，原生用 status code 判断）
-2. 超时配置方式不一致（axios 用 `timeout` 选项，原生用 `req.setTimeout`）
-3. 签名逻辑需要在两种客户端中分别适配
-4. 增加维护成本和理解难度
-
-### 改进方案
-
-统一为一种方案。推荐保留原生 `https` 用于 SSE 流式场景（axios 不原生支持 SSE），其余场景也用原生 `https` + 共享的 `httpHelper` 模块：
-
-```
-┌──────────────────────────────────────────────┐
-│  src/upstream/huawei/http.ts                 │
-│  ├── httpsPost(url, headers, body) → stream  │
-│  ├── httpsGet(url, headers) → { status, body}│
-│  └── httpsPostJSON(url, headers, body) → {}  │
-└──────────────────────────────────────────────┘
-```
-
-移除 `axios` 依赖，减少 bundle 大小。
+**当前状态**: ✅ **已修复** — `axios` 依赖已移除，全部统一使用原生 `https` 模块。`refresh.ts` 和 `ticket.ts` 已改用原生 `https`。
 
 ---
 
@@ -179,30 +78,7 @@ interface AppState {
 
 ## D6. 加密密钥管理 — 开发环境硬编码回退
 
-### 问题
-
-`config.ts:44-47`:
-
-```typescript
-encryptionKey: requireEnv(
-  "ENCRYPTION_KEY",
-  "dev-only-32-byte-encryption-key!",  // 硬编码回退
-),
-```
-
-`requireEnv` 函数在有 fallback 时永远不会抛错。这意味着：
-
-1. 如果忘记设置 `ENCRYPTION_KEY`，生产环境会静默使用硬编码密钥
-2. 所有用此密钥加密的数据（AK/SK、session）都可被任何持有源码的人解密
-3. `requireEnv` 的名字暗示"必需"，但 fallback 使其变成"可选"
-
-### 改进方案
-
-```typescript
-encryptionKey: process.env.NODE_ENV === "production"
-  ? requireEnv("ENCRYPTION_KEY")  // 生产环境必须设置，无 fallback
-  : (process.env.ENCRYPTION_KEY ?? "dev-only-32-byte-encryption-key!"),
-```
+**当前状态**: ✅ **已修复** — `config.ts:47-55` 现在在生产环境下 `ENCRYPTION_KEY` 无 fallback（`undefined`），`requireEnv` 会抛错。仅开发环境允许使用硬编码回退。同时导出 `isDevEncryptionKey` 标志用于启动时警告。
 
 ---
 
@@ -248,30 +124,7 @@ export async function readEncryptedFile<T>(filePath: string): Promise<T | null> 
 
 ## D8. 无请求限流/速率限制
 
-### 问题
-
-项目无任何速率限制机制。虽然 `types/openai.ts` 中定义了 `ProxyConfig.rateLimit` 类型，但从未被使用。
-
-任何持有有效 API Key 的客户端可以：
-1. 无限频率调用 `/v1/chat/completions`，耗尽上游 CodeArts 配额
-2. 无限频率调用登录/刷新接口
-3. 暴力枚举 API Key（虽然 Bearer token 有一定长度，但无限尝试仍是风险）
-
-### 改进方案
-
-使用 `express-rate-limit` 或类似中间件：
-
-```typescript
-import rateLimit from "express-rate-limit";
-
-const chatLimiter = rateLimit({
-  windowMs: 60_000,
-  max: 20,  // 每分钟 20 次
-  keyGenerator: (req) => getRequestAuth(req).apiKeyId,
-});
-
-app.post("/v1/chat/completions", authenticateApiKey, chatLimiter, createChatCompletion);
-```
+**当前状态**: ✅ **已修复** — 引入了 `express-rate-limit`，在 `index.ts` 中配置了按 API Key 粒度的速率限制（`RATE_LIMIT_CHAT_MAX` 和 `RATE_LIMIT_MODELS_MAX` 环境变量可配置）。
 
 ---
 
@@ -307,36 +160,7 @@ app.post("/v1/chat/completions", authenticateApiKey, chatLimiter, createChatComp
 
 ## D10. `auth/store.ts` 是"上帝模块" — 职责过重
 
-### 问题
-
-`auth/store.ts` 同时承担了：
-1. User CRUD
-2. ProviderAccount CRUD
-3. ApiKey CRUD + 验证
-4. Session 代理访问
-5. 启动引导（bootstrap）
-6. 从 `hierarchical-store` 的大量 re-export（22 个导入，11 个 re-export）
-
-它实际上是 `hierarchical-store` 的外观层（facade），但混入了业务逻辑（validateApiKey、revokeApiKey 等），导致：
-
-1. 任何需要存储访问的模块都导入 `auth/store`，即使只需要 `getProviderAccount`
-2. 循环依赖风险 — `chat.ts` 导入 `auth/store` 获取 `getProviderAccount`，但 `auth/store` 又间接依赖加密模块
-3. re-export 链过长：`routes → auth/store → hierarchical-store → file-store → encryption`
-
-### 改进方案
-
-按领域拆分：
-
-```
-src/store/
-  ├── user-store.ts      — User CRUD
-  ├── account-store.ts   — ProviderAccount CRUD
-  ├── api-key-store.ts   — ApiKey CRUD + 验证
-  ├── session-store.ts   — Session 读写（从 auth/huawei 移出）
-  └── hierarchical-store.ts — 底层文件 I/O（内部实现）
-```
-
-路由直接导入需要的 store，不再通过 `auth/store` 中转。
+**当前状态**: ✅ **已修复** — `auth/store.ts` 已改为纯 re-export 门面（53行），实际逻辑已按领域拆分到 `src/store/` 下的 `user-store.ts`、`account-store.ts`、`api-key-store.ts`、`session-store.ts`。
 
 ---
 
