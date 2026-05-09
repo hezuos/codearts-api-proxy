@@ -82,12 +82,19 @@ function deriveConversationId(
   messages: OpenAIChatMessage[],
   providerAccountId: string,
 ): string {
-  const firstMsg =
-    messages.find((m) => m.role === "user") ??
-    messages.find((m) => m.role === "system");
-  if (!firstMsg) return randomUUID().replace(/-/g, "");
-  const content = normalizeMessageContent(firstMsg.content);
-  return createHash("sha256").update(`${providerAccountId}:${content}`).digest("hex").slice(0, 32);
+  // Include system prompt in fingerprint to distinguish different opencode sessions.
+  // opencode's system prompt contains session/project/working-directory info,
+  // so different processes naturally produce different fingerprints even when
+  // sharing the same API key and sending similar first user messages.
+  const systemMsg = messages.find((m) => m.role === "system");
+  const firstUserMsg = messages.find((m) => m.role === "user");
+  if (!systemMsg && !firstUserMsg) return randomUUID().replace(/-/g, "");
+  const systemContent = systemMsg ? normalizeMessageContent(systemMsg.content) : "";
+  const userContent = firstUserMsg ? normalizeMessageContent(firstUserMsg.content) : "";
+  return createHash("sha256")
+    .update(`${providerAccountId}:${systemContent}:${userContent}`)
+    .digest("hex")
+    .slice(0, 32);
 }
 
 // ---------------------------------------------------------------------------

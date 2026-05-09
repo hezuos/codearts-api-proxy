@@ -75,18 +75,31 @@ pnpm build && pnpm start
 
 ## 环境变量
 
-| 变量                    | 默认值                                               | 说明                             |
-| ----------------------- | ---------------------------------------------------- | -------------------------------- |
-| `PORT`                  | `1455`                                               | 监听端口                         |
-| `CALLBACK_PORT`         | 同 `PORT`                                            | 传给华为登录 URL 的回调端口      |
-| `DEFAULT_API_KEY`       | `dev-openai-compatible-key`                          | 客户端 Bearer Token              |
-| `ENCRYPTION_KEY`        | `dev-only-32-byte-encryption-key!`                   | AK/SK 加密密钥，生产环境必须修改 |
-| `IDE_VERSION`           | `26.3.11`                                            | 需与 CodeArts 服务端匹配         |
-| `PLUGIN_VERSION`        | `26.3.5`                                             | 需与 CodeArts 服务端匹配         |
-| `HUAWEI_REDIRECT_HOST`  | `https://devcloud.cn-north-4.huaweicloud.com/codeartside` | 华为云登录入口域名         |
-| `ENABLE_REFRESH_TASK`   | `true`                                               | 是否自动刷新 Token               |
-| `REQUEST_BODY_LIMIT`    | `10mb`                                               | 请求体大小限制                   |
-| `LOG_LEVEL`             | `debug`（开发）/ `info`（生产）                      | 日志级别                         |
+| 变量                        | 默认值                                               | 说明                                       |
+| --------------------------- | ---------------------------------------------------- | ------------------------------------------ |
+| `PORT`                      | `1455`                                               | 监听端口                                   |
+| `CALLBACK_PORT`             | 同 `PORT`                                            | 传给华为登录 URL 的回调端口                |
+| `DEFAULT_API_KEY`           | `dev-openai-compatible-key`                          | 客户端 Bearer Token                        |
+| `ENCRYPTION_KEY`            | `dev-only-32-byte-encryption-key!`                   | AK/SK 加密密钥，生产环境必须设置           |
+| `IDE_VERSION`               | `26.3.11`                                            | 需与 CodeArts 服务端匹配                   |
+| `PLUGIN_VERSION`            | `26.3.5`                                             | 需与 CodeArts 服务端匹配                   |
+| `HUAWEI_REDIRECT_HOST`      | `https://devcloud.cn-north-4.huaweicloud.com/codeartside` | 华为云登录入口域名                   |
+| `HUAWEI_API_HOST`           | `https://ide.cn-north-4.myhuaweicloud.com`           | 华为云 API 主机（ticket/refresh）          |
+| `HUAWEI_CHAT_HOST`          | `https://snap-access.cn-north-4.myhuaweicloud.com`   | 华为云 Chat 主机（SSE 聊天/模型列表）      |
+| `HUAWEI_IAM_HOST`           | `https://iam.cn-north-4.myhuaweicloud.com`           | 华为云 IAM 主机                            |
+| `HUAWEI_GPTS_URL`           | `""`（自动派生）                                     | Agent Center URL，空则从 CHAT_HOST 推导    |
+| `HUAWEI_AGENT_ID`           | `""`（自动派生）                                     | Agent ID，空则根据版本推导                 |
+| `HUAWEI_IS_INNER_VERSION`   | `false`                                              | 是否为内部版本（影响 URL 路径和响应解析）  |
+| `ENABLE_REFRESH_TASK`       | `true`                                               | 是否自动刷新 Token                         |
+| `REQUEST_BODY_LIMIT`        | `10mb`                                               | 请求体大小限制                             |
+| `DATA_DIR`                  | `data`                                               | 运行时数据目录                             |
+| `MODEL_CACHE_TTL`           | `300`                                                | 模型列表缓存 TTL（秒）                     |
+| `RATE_LIMIT_CHAT_MAX`       | `60`                                                 | 每窗口每 Key 最大 chat 请求数              |
+| `RATE_LIMIT_MODELS_MAX`     | `120`                                                | 每窗口每 Key 最大 models 请求数            |
+| `UPSTREAM_TIMEOUT_MS`       | `120000`                                             | 上游 HTTPS 请求超时（毫秒）                |
+| `IS_MASTER_NODE`            | `true`                                               | 是否为刷新任务主节点（多实例部署时使用）    |
+| `ADMIN_PASSWORD`            | 无                                                   | Admin 密码（优先于文件存储的密码）         |
+| `LOG_LEVEL`                 | `debug`（开发）/ `info`（生产）                      | 日志级别                                   |
 
 完整变量列表见 `src/config.ts`。
 
@@ -138,10 +151,20 @@ pnpm lint    # ESLint 检查
 
 ## 数据文件
 
-运行时数据存放在 `data/`（已加入 `.gitignore`，不提交）：
+运行时数据存放在 `data/`（已加入 `.gitignore`，不提交），采用分层目录结构：
 
-- `auth-store.json` — API Key 存储
-- `huawei-sessions.json` — AK/SK 及会话 Token（敏感）
+```
+data/
+└── users/{userId}/
+    ├── profile.json              — 用户信息
+    └── accounts/{accountId}/
+        ├── account.json          — ProviderAccount 信息
+        └── keys/{keyId}/
+            ├── key.json          — API Key 元数据
+            └── session.json      — AK/SK 及会话 Token（敏感，加密存储）
+```
+
+另有 `data/model-cache.json` 为动态模型列表缓存文件。
 
 ## 架构说明
 
@@ -156,10 +179,24 @@ pnpm lint    # ESLint 检查
 
 ### 最小有状态设计
 
-代理保持**最小有状态设计**：进程内仅维护一个 `Map<chat_id, response_message_id>`，用于自动填充 `parent_message_id`，不存储消息历史。
+代理保持**最小有状态设计**：进程内维护 `Map<chat_id, response_message_id>`（含 4 小时 TTL 自动淘汰）和 `Map<chat_id, "main"|"sub">`，用于自动填充 `parent_message_id` 和区分主/子 Agent，不存储消息历史。
 
-- `src/upstream/huawei/chat.ts` — 核心逻辑：请求构造、签名、SSE 透传、tool 结果转发、sub-agent 处理
+核心模块：
+
+- `src/upstream/huawei/chat-request.ts` — 请求体构造、HTTP 传输、会话 ID 推导、parent_message_id 追踪
+- `src/upstream/huawei/chat-stream.ts` — 流式 SSE 处理、OpenAI chunk 包装
+- `src/upstream/huawei/chat-protocol.ts` — CodeArts SSE 协议解析
+- `src/upstream/huawei/chat-translate.ts` — OpenAI ↔ CodeArts 消息/工具调用转换
+- `src/upstream/huawei/chat-recovery.ts` — 上游错误恢复（合成 tool_call 继续）
+- `src/upstream/huawei/models.ts` — 动态模型列表获取（agent-center API + 文件缓存）
+- `src/upstream/huawei/tools.ts` — 工具定义（DEFAULT_TOOLS 11 个 + SUB_AGENT_TOOLS 5 个）
 - `src/auth/huawei/sign.ts` — AK/SK HMAC-SHA256 签名（勿修改）
+- `src/auth/huawei/credentials.ts` — 凭证提取 + 签名请求封装
+- `src/auth/huawei/session-store.ts` — 华为会话存储 + 刷新逻辑
+- `src/auth/huawei/refresh-task.ts` — 后台定时刷新任务（10 分钟间隔，2 小时阈值）
 - `src/routes/huawei-auth.ts` — 华为云 OAuth 认证流程（浏览器登录、回调处理）
-- `src/types/openai.ts` — 类型定义，含 `codearts` 扩展字段
+- `src/types/openai.ts` — OpenAI 类型定义，含 `codearts` 扩展字段
+- `src/types/openai-codearts.ts` — CodeArts 专有类型
+- `src/utils/logger.ts` — 自研结构化日志器
+- `src/utils/errors.ts` — 结构化错误分类（AppError / UpstreamAuthError / UpstreamTimeoutError / ProtocolError）
 - `docs/codearts-api-spec.md` — CodeArts API 字段规范

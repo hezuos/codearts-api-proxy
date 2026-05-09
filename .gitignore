@@ -10,3 +10,5 @@ data/
 *.swp
 *.log
 log/
+.sisyphus/
+src/version.ts
