@@ -2,6 +2,13 @@ import https from "https";
 import { config } from "../../config";
 import { maskValue } from "../../utils/mask";
 import { logger } from "../../utils/logger";
+import {
+  isNewIamLoginPayload,
+  extractNewIamCredentials,
+  extractRefreshToken,
+  extractUserInfo,
+  type CredentialFormat,
+} from "./extract-credentials";
 
 export interface HuaweiTicketExchangeRequest {
   ticketId: string;
@@ -21,6 +28,10 @@ export interface HuaweiTicketExchangeResponse {
   domainId?: string;
   businessToken?: string;
   credentials: HuaweiSessionCredentials;
+  /** v5.0.2 新增：IAM 刷新令牌（仅新格式） */
+  refreshToken?: string;
+  /** v5.0.2 新增：凭证格式标识 */
+  credentialFormat?: CredentialFormat;
   raw: unknown;
 }
 
@@ -148,6 +159,25 @@ export async function exchangeHuaweiTicket(
       ? (envelope.result as Record<string, unknown>)
       : envelope;
 
+  // v5.0.2: 检测新版 IAM 登录格式
+  if (isNewIamLoginPayload(payload)) {
+    const creds = extractNewIamCredentials(payload);
+    const userInfo = extractUserInfo(payload);
+    const refreshToken = extractRefreshToken(payload);
+
+    return {
+      userId: userInfo.userId,
+      userName: userInfo.userName,
+      domainId: userInfo.domainId,
+      businessToken: extractBusinessToken(payload),
+      credentials: creds,
+      refreshToken,
+      credentialFormat: "new_iam",
+      raw: payload,
+    };
+  }
+
+  // 旧格式（legacy）
   return {
     userId: typeof payload.user_id === "string" ? payload.user_id : undefined,
     userName:
@@ -156,6 +186,7 @@ export async function exchangeHuaweiTicket(
       typeof payload.domain_id === "string" ? payload.domain_id : undefined,
     businessToken: extractBusinessToken(payload),
     credentials: extractCredentials(payload),
+    credentialFormat: "legacy",
     raw: payload,
   };
 }

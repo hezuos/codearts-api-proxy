@@ -1,8 +1,9 @@
 import type { Request, Response } from "express";
 import { randomUUID } from "crypto";
 import { encryptString } from "../auth/crypto/encryption";
-import { createHuaweiLoginFlow } from "../auth/huawei/login-flow";
+import { createHuaweiLoginFlow, type PKCEPair } from "../auth/huawei/login-flow";
 import { storeSession } from "../auth/huawei/session-store";
+import { scheduleSessionRefresh } from "../auth/huawei/refresh-task";
 import { config, isProduction } from "../config";
 import { getRequestAuth } from "../middleware/authenticate-api-key";
 import { getTraceId } from "../middleware/request-context";
@@ -20,6 +21,10 @@ import {
 } from "../upstream/huawei/ticket";
 import { createOpenAIError } from "../utils/openai-error";
 import { maskValue } from "../utils/mask";
+import { isNewIamLoginPayload, extractNewIamCredentials, extractRefreshToken } from "../upstream/huawei/extract-credentials";
+import { resolveUserInfo } from "../upstream/huawei/user-info";
+import { getTokenByAuthorizationCode } from "../auth/huawei/token-exchange";
+import type { DpopKeyPair } from "../auth/huawei/dpop";
 
 let exchangeHuaweiTicket = waitForHuaweiTicketExchange;
 
@@ -46,6 +51,10 @@ interface LoginFlowRecord {
   accountId?: string;
   apiKeyId?: string;
   apiKey?: string;
+  /** PKCE 密钥对（新版登录流程使用） */
+  pkcePair?: PKCEPair;
+  /** DPoP 密钥对（OAuth2 token exchange 使用） */
+  dpopKeyPair?: DpopKeyPair;
 }
 
 const BROWSER_FLOW_MAX_AGE_MS = 5 * 60 * 1000;
@@ -114,6 +123,167 @@ function getPendingApiLoginFlow(ticketId?: string): LoginFlowRecord | null {
     .sort((left, right) => right.expiresAt - left.expiresAt);
 
   return pending[0] ?? null;
+}
+
+/**
+ * 获取任何类型的 pending 登录流程（API 或 browser）。
+ * 用于 OAuth2 回调处理，因为 UI 使用 browser 流程。
+ */
+function getAnyPendingLoginFlow(): LoginFlowRecord | null {
+  clearExpiredLoginFlows();
+
+  const pending = Array.from(loginFlows.values())
+    .filter((flow) => flow.expiresAt > Date.now())
+    .sort((left, right) => right.expiresAt - left.expiresAt);
+
+  return pending[0] ?? null;
+}
+
+/**
+ * 处理 OAuth2 授权码回调。
+ *
+ * 逆向自上游 LoginBackend.getTokenByAuthorizationCode()：
+ * 使用授权码 + code_verifier + DPoP 换取 token
+ */
+async function handleOAuth2AuthorizationCode(
+  flow: LoginFlowRecord,
+  code: string,
+  res: Response,
+): Promise<void> {
+  try {
+    logger.info(
+      `[huawei-auth] Processing OAuth2 authorization code for flow ticketId=${maskValue(flow.ticketId)}`,
+    );
+
+    // 验证必要的参数
+    if (!flow.pkcePair?.codeVerifier) {
+      throw new Error("Missing PKCE code_verifier in login flow");
+    }
+    if (!flow.dpopKeyPair) {
+      throw new Error("Missing DPoP key pair in login flow");
+    }
+
+    // 调用 OAuth2 token exchange
+    const tokenResponse = await getTokenByAuthorizationCode({
+      code,
+      codeVerifier: flow.pkcePair.codeVerifier,
+      port: config.callbackPort,
+      dpopKeyPair: flow.dpopKeyPair,
+    });
+
+    if (!tokenResponse.credentials) {
+      throw new Error("Token response missing credentials");
+    }
+
+    // 提取凭证
+    const { credentials, refresh_token } = tokenResponse;
+
+    // 获取用户信息（通过 IAM API）
+    const userInfo = await resolveUserInfo({
+      accessKey: credentials.access_key_id,
+      secretKey: credentials.secret_access_key,
+      securityToken: credentials.security_token,
+    }, refresh_token);
+
+    // 生成账号 ID
+    const accountId = userInfo.domainId
+      ? `huawei-${userInfo.domainId}`
+      : `huawei-${Date.now()}`;
+
+    // 确定是否为默认账号
+    const existingAccounts = listProviderAccounts(flow.userId);
+    const existingEntry = existingAccounts.find((a) => a.id === accountId);
+    const isFirstAccount = existingAccounts.length === 0;
+    const isDefault = isFirstAccount || (existingEntry?.isDefault ?? false);
+
+    // 创建/更新 Provider Account
+    upsertProviderAccount({
+      id: accountId,
+      userId: flow.userId,
+      provider: "huawei-codearts",
+      providerUserId: userInfo.userId,
+      providerUserName: userInfo.userName,
+      domainId: userInfo.domainId,
+      displayName: userInfo.userName ?? `Huawei ${userInfo.domainId?.slice(0, 8) ?? "Account"}`,
+      isDefault,
+      status: "active",
+    });
+
+    // 生成 API Key
+    const rawKey = `sk-${randomUUID()}`;
+    const apiKeyObj = issueApiKey({
+      userId: flow.userId,
+      providerAccountId: accountId,
+      name: userInfo.userName ?? `huawei-${userInfo.domainId?.slice(0, 8) ?? "account"}`,
+      rawKey,
+    });
+
+    // 存储 Session（包含 DPoP 和 PKCE 信息，用于 refresh）
+    storeSession(apiKeyObj.id, {
+      keyId: apiKeyObj.id,
+      providerAccountId: accountId,
+      accessKey: credentials.access_key_id,
+      secretKeyCiphertext: credentials.secret_access_key
+        ? encryptString(credentials.secret_access_key)
+        : undefined,
+      securityToken: credentials.security_token,
+      expiresAt: credentials.expiration,
+      refreshToken: refresh_token,
+      credentialFormat: "new_iam",
+      dpopKeyPair: flow.dpopKeyPair,
+      pkceCodeVerifier: flow.pkcePair.codeVerifier,
+    });
+
+    // 启动动态刷新调度
+    scheduleSessionRefresh(apiKeyObj.id);
+
+    logger.info(
+      `[huawei-auth] OAuth2 login successful accountId=${accountId} userId=${userInfo.userId} userName=${userInfo.userName}`,
+    );
+
+    // 如果是浏览器登录流程，更新状态为 completed
+    if (flow.kind === "browser") {
+      loginFlows.set(flow.ticketId, {
+        ...flow,
+        browserStatus: "completed",
+        completedAt: Date.now(),
+        error: undefined,
+        accountId,
+        apiKeyId: apiKeyObj.id,
+        apiKey: rawKey,
+      });
+      logger.info(
+        `[huawei-auth] Browser login flow updated to completed ticketId=${maskValue(flow.ticketId)}`,
+      );
+    }
+
+    // 返回成功
+    res.json({
+      success: true,
+      account_id: accountId,
+      api_key_id: apiKeyObj.id,
+      user_id: userInfo.userId,
+      user_name: userInfo.userName,
+    });
+  } catch (error) {
+    logger.error("[huawei-auth] OAuth2 authorization code processing failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+
+    // 如果是浏览器登录流程，更新状态为 failed
+    if (flow.kind === "browser") {
+      loginFlows.set(flow.ticketId, {
+        ...flow,
+        browserStatus: "failed",
+        completedAt: Date.now(),
+        error: error instanceof Error ? error.message : "OAuth2 processing failed",
+      });
+    }
+
+    res.status(500).json(createOpenAIError(
+      error instanceof Error ? error.message : "OAuth2 processing failed"
+    ));
+  }
 }
 
 function getBrowserLoginStatus(flow: LoginFlowRecord): {
@@ -188,8 +358,8 @@ function resolveBrowserLoginUserId(req: Request): string | null {
   return getDefaultUser()?.id ?? null;
 }
 
-function createBrowserLoginFlow(userId: string, callbackPort: number): LoginFlowRecord {
-  const flow = createHuaweiLoginFlow(callbackPort);
+async function createBrowserLoginFlow(userId: string, callbackPort: number): Promise<LoginFlowRecord> {
+  const flow = await createHuaweiLoginFlow(callbackPort);
   const record: LoginFlowRecord = {
     ticketId: flow.ticketId,
     loginUrl: flow.loginUrl,
@@ -198,12 +368,120 @@ function createBrowserLoginFlow(userId: string, callbackPort: number): LoginFlow
     userId,
     kind: "browser",
     browserStatus: "pending",
+    pkcePair: flow.pkcePair,
+    dpopKeyPair: flow.dpopKeyPair,
   };
   loginFlows.set(flow.ticketId, record);
   return record;
 }
 
-function provisionLoginResult(
+async function provisionLoginResult(
+  flow: LoginFlowRecord,
+  result: HuaweiTicketExchangeResponse,
+): Promise<{ accountId: string; apiKeyId: string; apiKey: string }> {
+  const rawPayload = result.raw as Record<string, unknown>;
+
+  // v5.0.2: 检测新版 IAM 登录格式，分派到不同处理函数
+  if (isNewIamLoginPayload(rawPayload)) {
+    return await provisionNewIamLoginResult(flow, rawPayload);
+  }
+
+  // 旧格式（legacy）走现有逻辑
+  return provisionLegacyLoginResult(flow, result);
+}
+
+/** 新版 IAM 登录格式处理（v5.0.2） */
+async function provisionNewIamLoginResult(
+  flow: LoginFlowRecord,
+  payload: import("../upstream/huawei/extract-credentials").NewIamLoginPayload,
+): Promise<{ accountId: string; apiKeyId: string; apiKey: string }> {
+  // 提取凭证
+  const creds = extractNewIamCredentials(payload);
+
+  // 提取 refresh_token
+  const refreshToken = extractRefreshToken(payload);
+
+  // 提取用户信息（优先从 payload 中提取，缺失则调用 IAM API）
+  let userId = payload.user_id;
+  let userName = payload.user_name;
+  let domainId = payload.domain_id;
+
+  if (!userId || !userName) {
+    // 调用 IAM API 获取用户信息
+    logger.info(
+      `[huawei-auth] NewIamLogin: user info missing from payload, calling resolveUserInfo`,
+    );
+    const userInfo = await resolveUserInfo({
+      accessKey: creds.accessKey,
+      secretKey: creds.secretKey,
+      securityToken: creds.securityToken,
+    }, refreshToken);
+    userId = userInfo.userId;
+    userName = userInfo.userName;
+    domainId = userInfo.domainId;
+  }
+
+  // Use domainId to generate a unique, stable accountId for each Huawei account
+  const accountId = domainId
+    ? `huawei-${domainId}`
+    : `huawei-${Date.now()}`;
+
+  // Determine isDefault: true if this is the first account for the user,
+  // or if this account already exists and was previously the default
+  const existingAccounts = listProviderAccounts(flow.userId);
+  const existingEntry = existingAccounts.find((a) => a.id === accountId);
+  const isFirstAccount = existingAccounts.length === 0;
+  const isDefault = isFirstAccount || (existingEntry?.isDefault ?? false);
+
+  upsertProviderAccount({
+    id: accountId,
+    userId: flow.userId,
+    provider: "huawei-codearts",
+    providerUserId: userId,
+    providerUserName: userName,
+    domainId,
+    displayName:
+      userName ?? `Huawei ${domainId?.slice(0, 8) ?? "Account"}`,
+    isDefault,
+    status: "active",
+  });
+
+  // Issue a dedicated API key for this account (Key↔Session 1:1)
+  const rawKey = `sk-${randomUUID()}`;
+  const apiKeyObj = issueApiKey({
+    userId: flow.userId,
+    providerAccountId: accountId,
+    name:
+      userName ?? `huawei-${domainId?.slice(0, 8) ?? "account"}`,
+    rawKey,
+  });
+
+  // Store session bound to this key (1:1) — v5.0.2 新增字段
+  storeSession(apiKeyObj.id, {
+    keyId: apiKeyObj.id,
+    providerAccountId: accountId,
+    accessKey: creds.accessKey,
+    secretKeyCiphertext: creds.secretKey
+      ? encryptString(creds.secretKey)
+      : undefined,
+    securityToken: creds.securityToken,
+    expiresAt: creds.expiresAt,
+    refreshToken,
+    credentialFormat: "new_iam",
+  });
+
+  logger.info(
+    `[huawei-auth] NewIamLogin session stored providerAccountId=${accountId} userId=${userId} userName=${userName} domainId=${domainId ?? "missing"} credentialFormat=new_iam`,
+  );
+
+  // 启动动态刷新调度
+  scheduleSessionRefresh(apiKeyObj.id);
+
+  return { accountId, apiKeyId: apiKeyObj.id, apiKey: rawKey };
+}
+
+/** 旧格式（legacy）登录处理 — 现有逻辑保持不变 */
+function provisionLegacyLoginResult(
   flow: LoginFlowRecord,
   result: HuaweiTicketExchangeResponse,
 ): { accountId: string; apiKeyId: string; apiKey: string } {
@@ -253,11 +531,15 @@ function provisionLoginResult(
       : undefined,
     securityToken: result.credentials.securityToken,
     expiresAt: result.credentials.expiresAt,
+    credentialFormat: "legacy",
   });
 
   logger.info(
     `[huawei-auth] login session stored providerAccountId=${accountId} userId=${result.userId ?? "missing"} userName=${result.userName ?? "missing"} domainId=${result.domainId ?? "missing"} businessToken=${maskValue(result.businessToken)} accessKey=${maskValue(result.credentials.accessKey)} securityToken=${maskValue(result.credentials.securityToken)} expiresAt=${result.credentials.expiresAt ?? "missing"}`,
   );
+
+  // 启动动态刷新调度
+  scheduleSessionRefresh(apiKeyObj.id);
 
   return { accountId, apiKeyId: apiKeyObj.id, apiKey: rawKey };
 }
@@ -298,7 +580,7 @@ function startBrowserFlowExchange(
         identifier,
         redirect,
       };
-      const { accountId, apiKeyId, apiKey } = provisionLoginResult(currentFlow, result);
+      const { accountId, apiKeyId, apiKey } = await provisionLoginResult(currentFlow, result);
 
       loginFlows.set(flow.ticketId, {
         ...currentFlow,
@@ -331,10 +613,10 @@ function startBrowserFlowExchange(
   browserExchangeTasks.set(flow.ticketId, task);
 }
 
-export function initiateHuaweiLogin(req: Request, res: Response): void {
+export async function initiateHuaweiLogin(req: Request, res: Response): Promise<void> {
   const auth = getRequestAuth(req);
   const callbackPort = Number(req.query.callback_port) || config.callbackPort;
-  const flow = createHuaweiLoginFlow(callbackPort);
+  const flow = await createHuaweiLoginFlow(callbackPort);
 
   loginFlows.set(flow.ticketId, {
     ticketId: flow.ticketId,
@@ -342,10 +624,12 @@ export function initiateHuaweiLogin(req: Request, res: Response): void {
     expiresAt: flow.expiresAt.getTime(),
     userId: auth.userId,
     kind: "api",
+    pkcePair: flow.pkcePair,
+    dpopKeyPair: flow.dpopKeyPair,
   });
 
   logger.info(
-    `[${getTraceId(req)}] Created Huawei login flow for user ${auth.userId}`,
+    `[${getTraceId(req)}] Created Huawei login flow for user ${auth.userId}, ticketId=${maskValue(flow.ticketId)}, expiresAt=${flow.expiresAt.toISOString()}, totalFlows=${loginFlows.size}`,
   );
 
   res.json({
@@ -357,7 +641,7 @@ export function initiateHuaweiLogin(req: Request, res: Response): void {
   });
 }
 
-export function authorizeHuaweiLogin(req: Request, res: Response): void {
+export async function authorizeHuaweiLogin(req: Request, res: Response): Promise<void> {
   clearExpiredLoginFlows();
 
   const userId = resolveBrowserLoginUserId(req);
@@ -367,7 +651,7 @@ export function authorizeHuaweiLogin(req: Request, res: Response): void {
   }
 
   const callbackPort = Number(req.query.callback_port) || config.callbackPort;
-  const flow = createBrowserLoginFlow(userId, callbackPort);
+  const flow = await createBrowserLoginFlow(userId, callbackPort);
   setBrowserLoginTicketCookie(res, flow.ticketId);
 
   logger.info(
@@ -377,7 +661,7 @@ export function authorizeHuaweiLogin(req: Request, res: Response): void {
   res.redirect(flow.loginUrl ?? "/");
 }
 
-export function startBrowserHuaweiLogin(req: Request, res: Response): void {
+export async function startBrowserHuaweiLogin(req: Request, res: Response): Promise<void> {
   clearExpiredLoginFlows();
 
   const userId = resolveBrowserLoginUserId(req);
@@ -387,7 +671,7 @@ export function startBrowserHuaweiLogin(req: Request, res: Response): void {
   }
 
   const callbackPort = Number(req.query.callback_port) || config.callbackPort;
-  const flow = createBrowserLoginFlow(userId, callbackPort);
+  const flow = await createBrowserLoginFlow(userId, callbackPort);
   setBrowserLoginTicketCookie(res, flow.ticketId);
 
   res.json({
@@ -441,7 +725,10 @@ export async function handleHuaweiCallback(
 ): Promise<void> {
   clearExpiredLoginFlows();
 
-  const identifier = req.query.identifier;
+  // 检测回调格式：新版 OAuth2 (code+state) 还是旧版 (identifier+ticket_id)
+  const code = typeof req.query.code === "string" ? req.query.code : undefined;
+  const state = typeof req.query.state === "string" ? req.query.state : undefined;
+  const identifier = typeof req.query.identifier === "string" ? req.query.identifier : undefined;
   const redirect =
     typeof req.query.redirect === "string" ? req.query.redirect : undefined;
   const preferredTicketId =
@@ -451,8 +738,48 @@ export async function handleHuaweiCallback(
         ? req.cookies.huawei_login_ticket
         : undefined;
 
+  // 新版 OAuth2 回调（code + state）
+  if (code && state) {
+    logger.info(
+      `[huawei-auth] OAuth2 callback received code=${maskValue(code)} state=${maskValue(state)}`,
+    );
+
+    // 打印当前所有 login flows 用于调试
+    const allFlows = Array.from(loginFlows.entries()).map(([id, f]) => ({
+      ticketId: maskValue(id),
+      kind: f.kind,
+      expiresAt: new Date(f.expiresAt).toISOString(),
+      expired: f.expiresAt <= Date.now(),
+      hasPkcePair: !!f.pkcePair,
+      hasDpopKeyPair: !!f.dpopKeyPair,
+    }));
+    logger.info(`[huawei-auth] Current login flows: ${allFlows.length}`, { flows: allFlows });
+
+    // 上游实现不使用 state 来匹配登录流程
+    // 它只是使用当前活跃的登录流程（通过 running promise）
+    // 我们使用类似的方式：找到最近的 pending 流程（API 或 browser）
+    const flow = getAnyPendingLoginFlow();
+
+    if (!flow) {
+      logger.warn(
+        `[huawei-auth] OAuth2 callback: no active login flow found`,
+      );
+      res.status(400).json(createOpenAIError("No active login flow. Please start a new login."));
+      return;
+    }
+
+    logger.info(
+      `[huawei-auth] OAuth2 callback: using active flow ticketId=${maskValue(flow.ticketId)} kind=${flow.kind}`,
+    );
+
+    // 处理 OAuth2 授权码
+    await handleOAuth2AuthorizationCode(flow, code, res);
+    return;
+  }
+
+  // 旧版回调（identifier）
   if (!identifier || typeof identifier !== "string") {
-    res.status(400).json(createOpenAIError("Missing identifier in callback"));
+    res.status(400).json(createOpenAIError("Missing identifier or code in callback"));
     return;
   }
 

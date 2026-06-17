@@ -103,6 +103,7 @@ app.post("/auth/huawei/browser/finalize/:ticketId", finalizeBrowserHuaweiLogin);
 app.post("/auth/huawei/login", authenticateApiKey, initiateHuaweiLogin);
 app.get("/callback", handleHuaweiCallback);
 app.get("/auth/callback", handleHuaweiCallback);
+app.get("/oauth/callback", handleHuaweiCallback);
 
 // Admin rate limiter for unauthenticated endpoints (IP-based, prevents brute force)
 const adminLimiter = rateLimit({
