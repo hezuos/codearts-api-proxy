@@ -344,17 +344,18 @@ function pasteAndRedirectCallbackUrl(callbackUrl) {
     return { success: false, error: "Invalid URL format. Please paste the full callback URL from the browser address bar." };
   }
 
-  if (!url.pathname.startsWith("/callback")) {
-    return { success: false, error: "URL does not appear to be a callback URL. Expected path starting with /callback." };
+  if (!url.pathname.startsWith("/oauth/callback")) {
+    return { success: false, error: "URL does not appear to be a callback URL. Expected path starting with /oauth/callback." };
   }
 
-  if (!url.searchParams.has("identifier")) {
-    return { success: false, error: "Callback URL is missing the 'identifier' parameter. Please copy the full URL from the browser address bar." };
+  if (!url.searchParams.has("code")) {
+    return { success: false, error: "Callback URL is missing the 'code' parameter. Please copy the full URL from the browser address bar." };
   }
 
   // Rewrite the origin (schema + host + port) to the current proxy
   url.host = window.location.host;
   url.protocol = window.location.protocol;
+  url.port = window.location.port;
 
   // Open in the login popup window — the existing /callback endpoint will handle the rest
   LoginWindowManager.open(url.toString());
