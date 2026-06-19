@@ -106,6 +106,14 @@ function buildTaskParameters(
   tools: ReturnType<typeof resolveTools>,
 ): Record<string, unknown> {
   const subAgent = request.codearts?.sub_agent;
+  const toolResults = extractToolResults(request);
+  const isToolContinuation = toolResults.length > 0;
+
+  // tool continuation: 只传 tool_result（和 spec 一致），其余字段由 CodeArts 从上下文获取
+  if (isToolContinuation) {
+    return { tool_result: toolResults };
+  }
+
   const params: Record<string, unknown> = {
     codebase_search: request.codearts?.codebase_search ?? false,
     preferred_language: request.codearts?.preferred_language?.trim() || "zh-cn",
@@ -129,7 +137,6 @@ function buildTaskParameters(
     expert_rules: request.codearts?.expert_rules ?? [],
   };
 
-  const toolResults = extractToolResults(request);
   if (toolResults.length > 0) {
     params.tool_result = toolResults;
   }
@@ -188,11 +195,33 @@ export function buildRequestBody(
     providerAccount?.providerUserId?.trim() ||
     session.providerAccountId;
 
+  // 对于非内置工具，把 tool result 内容合并到用户消息中
+  // CodeArts 无法处理非内置工具的 tool_result，直接以文本形式发送
+  let messagesBody: unknown[];
+  if (isToolContinuation) {
+    messagesBody = [];
+  } else {
+    const userMsg = extractUserMessage(request.messages);
+    const lastMsg = request.messages[request.messages.length - 1];
+    // 如果最后一条是 tool 消息（非内置工具的 result），追加到用户消息中
+    if (lastMsg?.role === "tool" && lastMsg.content) {
+      const toolContent = normalizeMessageContent(lastMsg.content);
+      if (toolContent) {
+        const combined = userMsg
+          ? `${userMsg}\n\n[工具执行结果]\n${toolContent}`
+          : `[工具执行结果]\n${toolContent}`;
+        messagesBody = [{ type: "text", content: combined }];
+      } else {
+        messagesBody = [{ type: "text", content: userMsg || "[工具执行结果为空]" }];
+      }
+    } else {
+      messagesBody = [{ type: "text", content: userMsg }];
+    }
+  }
+
   const body: Record<string, unknown> = {
     chat_id: chatId,
-    messages: isToolContinuation
-      ? []
-      : [{ type: "text", content: extractUserMessage(request.messages) }],
+    messages: messagesBody,
     client: "IDE",
     task: "plan-execute",
     task_parameters: buildTaskParameters(request, tools),

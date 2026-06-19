@@ -4,7 +4,6 @@
  */
 
 import { randomUUID } from "crypto";
-import path from "path";
 import { logger } from "../../utils/logger";
 import type {
   CodeArtsToolResult,
@@ -57,34 +56,12 @@ function parseToolArguments(argumentsText: string): Record<string, unknown> {
 }
 
 export function normalizeToolResultArguments(
-  request: OpenAIChatCompletionRequest,
-  toolName: string | undefined,
+  _request: OpenAIChatCompletionRequest,
+  _toolName: string | undefined,
   args: Record<string, unknown>,
 ): Record<string, unknown> {
-  if (toolName !== "read_file") return args;
-
-  const rawPath = args.path;
-  if (typeof rawPath !== "string" || rawPath.trim() === "" || path.isAbsolute(rawPath)) {
-    return args;
-  }
-
-  const baseDir =
-    request.codearts?.current_working_directory?.trim() ||
-    request.codearts?.workspace_root?.trim() ||
-    "";
-  if (!baseDir) return args;
-
-  const resolvedPath = path.resolve(baseDir, rawPath);
-  logger.debug("[client→proxy→codearts] read_file path normalized", {
-    from: rawPath,
-    to: resolvedPath,
-    baseDir,
-  });
-
-  return {
-    ...args,
-    path: resolvedPath,
-  };
+  // CodeArts 期望收到它原始发出的 arguments，不做任何修改
+  return args;
 }
 
 function normalizeToolArgumentsText(

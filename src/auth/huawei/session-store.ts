@@ -59,6 +59,37 @@ export async function refreshStoredSession(
     return null;
   }
 
+  // v5.0.2 新版 IAM session：优先使用 OAuth2 refresh_token
+  if (stored.credentialFormat === "new_iam" && stored.refreshToken && stored.dpopKeyPair && stored.pkceCodeVerifier) {
+    try {
+      logger.info(`[refresh] Using OAuth2 refresh for new IAM session ${keyId}`);
+      const result = await refreshHuaweiSessionByOAuth2(
+        stored.refreshToken,
+        stored.pkceCodeVerifier,
+        stored.dpopKeyPair,
+      );
+      if (result.credentials) {
+        const { encryptString } = await import("../crypto/encryption");
+        const updated: StoredHuaweiSession = {
+          ...stored,
+          accessKey: result.credentials.access_key_id,
+          secretKeyCiphertext: encryptString(result.credentials.secret_access_key),
+          securityToken: result.credentials.security_token,
+          expiresAt: result.credentials.expiration,
+          refreshToken: result.refresh_token ?? stored.refreshToken,
+          lastRefreshedAt: new Date().toISOString(),
+        };
+        setSession(keyId, updated);
+        return updated;
+      }
+    } catch (error) {
+      logger.warn(`OAuth2 refresh failed for key ${keyId}, trying AK/SK refresh`, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      // fall through to AK/SK refresh
+    }
+  }
+
   // 尝试 AK/SK 签名刷新（如果凭证可用）
   if (
     stored.accessKey &&

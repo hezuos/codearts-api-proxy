@@ -58,7 +58,7 @@ import {
   deleteAccount,
 } from "./routes/admin";
 import { createOpenAIError } from "./utils/openai-error";
-import { logger } from "./utils/logger";
+import { logger, closeLogger } from "./utils/logger";
 
 const app = express();
 
@@ -226,6 +226,7 @@ function shutdown(signal: string): void {
   stopHuaweiRefreshTask();
   server.close(() => {
     logger.info("HTTP server closed.");
+    closeLogger();
     process.exit(0);
   });
   // Force exit after 5 seconds if server doesn't close

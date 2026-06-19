@@ -32,7 +32,10 @@ export class RefreshScheduler {
    *   初始:  剩余 120min → 在 60min 后刷新
    *   刷新后: 新 token 也剩 120min → 在 60min 后刷新
    *
-   * @returns 延迟毫秒数，-1 表示已过期不需要调度
+   * 如果 token 已过期，仍返回 MIN_REFRESH_DELAY_MS（5分钟），
+   * 让 scheduler 继续重试，而不是永久放弃。
+   *
+   * @returns 延迟毫秒数，始终 >= MIN_REFRESH_DELAY_MS
    */
   calculateNextDelay(expiresAt?: string): number {
     if (!expiresAt) {

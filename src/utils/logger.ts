@@ -3,7 +3,11 @@
  * - Development: human-readable colored output
  * - Production: JSON output for log aggregation
  * - Supports traceId propagation via withTrace()
+ * - Supports file output via LOG_FILE env var
  */
+
+import fs from "fs";
+import path from "path";
 
 type LogLevel = "debug" | "info" | "warn" | "error";
 const LOG_LEVELS: Record<LogLevel, number> = {
@@ -18,20 +22,40 @@ function resolveLogLevel(): LogLevel {
   const env = process.env.LOG_LEVEL;
   if (env && VALID_LEVELS.has(env)) return env as LogLevel;
   if (env) {
-    // Invalid LOG_LEVEL — fallback and warn
     process.stderr.write(`[logger] Invalid LOG_LEVEL="${env}", valid values: ${Object.keys(LOG_LEVELS).join(", ")}\n`);
   }
   return process.env.NODE_ENV === "production" ? "info" : "debug";
 }
 
 const currentLevel: LogLevel = resolveLogLevel();
-
 const isJsonOutput = process.env.NODE_ENV === "production";
 
+// ── File output ────────────────────────────────────────────────────────────
+const logFile = process.env.LOG_FILE;
+let logStream: fs.WriteStream | null = null;
+if (logFile) {
+  try {
+    const dir = path.dirname(logFile);
+    if (dir) fs.mkdirSync(dir, { recursive: true });
+    logStream = fs.createWriteStream(logFile, { flags: "a" });
+    process.stderr.write(`[logger] Logging to file: ${logFile}\n`);
+  } catch (e) {
+    process.stderr.write(`[logger] Failed to open log file "${logFile}": ${e}\n`);
+  }
+}
+
+function writeToFile(line: string): void {
+  if (logStream) {
+    logStream.write(line + "\n");
+  }
+}
+
+// ── Level filter ───────────────────────────────────────────────────────────
 function shouldLog(level: LogLevel): boolean {
   return LOG_LEVELS[level] >= LOG_LEVELS[currentLevel];
 }
 
+// ── Formatters ─────────────────────────────────────────────────────────────
 function formatJson(level: LogLevel, traceId: string | undefined, msg: string, data?: Record<string, unknown>): string {
   const entry: Record<string, unknown> = {
     level,
@@ -91,6 +115,7 @@ export class Logger {
       ? formatJson(level, this._traceId, msg, data)
       : formatReadable(level, this._traceId, msg, data);
 
+    // Console output
     switch (level) {
       case "error":
         process.stderr.write(formatted + "\n");
@@ -99,8 +124,19 @@ export class Logger {
         process.stdout.write(formatted + "\n");
         break;
     }
+
+    // File output
+    writeToFile(formatted);
   }
 }
 
 /** Root logger without trace context. */
 export const logger = new Logger();
+
+/** Flush and close the log file (call on shutdown). */
+export function closeLogger(): void {
+  if (logStream) {
+    logStream.end();
+    logStream = null;
+  }
+}

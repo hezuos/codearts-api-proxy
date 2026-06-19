@@ -20,6 +20,7 @@ import {
 } from "./tools";
 import { logger } from "../../utils/logger";
 import { extractRecoveredToolResults } from "./chat-recovery";
+import { isCodeArtsBuiltinTool } from "./tools";
 
 // ---------------------------------------------------------------------------
 // Message content normalization
@@ -78,7 +79,20 @@ export function extractToolResults(
 
   const lastMsg = request.messages[request.messages.length - 1];
   if (!lastMsg || lastMsg.role !== "tool") return [];
-  return extractRecoveredToolResults(request, normalizeMessageContent) ?? [];
+  const toolResults = extractRecoveredToolResults(request, normalizeMessageContent) ?? [];
+
+  // CodeArts 只接受内置工具的 tool_result。对于客户端自定义工具（如 sequentialthinking、find_path），
+  // CodeArts 无法处理其结果，返回 ChatAgent.00009999 / ChatAgent.00001208。
+  // 过滤掉非内置工具，让其通过下一轮消息传递结果。
+  const builtinResults = toolResults.filter((tr) => isCodeArtsBuiltinTool(tr.name));
+  if (builtinResults.length !== toolResults.length) {
+    const skipped = toolResults.filter((tr) => !isCodeArtsBuiltinTool(tr.name));
+    logger.info("[client→proxy] skipping non-builtin tool_results", {
+      skipped: skipped.map((tr) => tr.name),
+    });
+  }
+
+  return builtinResults;
 }
 
 // ---------------------------------------------------------------------------

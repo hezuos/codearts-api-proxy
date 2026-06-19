@@ -200,6 +200,13 @@ export const SUB_AGENT_TOOLS: ToolDefinition[] = DEFAULT_TOOLS.filter((tool) =>
   SUB_AGENT_TOOL_NAMES.has(tool.function.name),
 );
 
+const BUILTIN_TOOL_NAMES = new Set(DEFAULT_TOOLS.map((t) => t.function.name));
+
+/** 判断工具名是否为 CodeArts 内置工具（包括 SubAgent 工具）。 */
+export function isCodeArtsBuiltinTool(name: string): boolean {
+  return BUILTIN_TOOL_NAMES.has(name) || SUB_AGENT_TOOL_NAMES.has(name);
+}
+
 /**
  * Convert OpenAI-format tools to CodeArts ToolDefinition format.
  * The formats are structurally identical (both use

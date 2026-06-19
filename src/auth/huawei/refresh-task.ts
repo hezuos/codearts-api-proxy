@@ -20,7 +20,7 @@ import { RefreshScheduler } from "./refresh-scheduler";
 import { isMasterNode } from "../../config";
 import { logger } from "../../utils/logger";
 
-const REFRESH_TIMEOUT_MS = 15 * 1000;
+const REFRESH_TIMEOUT_MS = 60 * 1000;
 
 let started = false;
 let enableRefreshTask = true;
@@ -71,10 +71,28 @@ async function refreshAndReschedule(keyId: string): Promise<void> {
 
     logSessionCacheSummary();
   } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
     logger.warn(`[refresh-task] Refresh failed for key ${keyId}`, {
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMsg,
     });
-    // 刷新失败也重新调度（使用原过期时间）
+
+    // 检测 refresh_token 是否永久失效（上游逻辑：ExpiredRefreshToken → 停止重试）
+    // 对应错误: STS5.1806 / APIG.0602 + "refresh code has expired" / "kid not found" / "security token has expired"
+    const isExpired =
+      errorMsg.includes("refresh code has expired") ||
+      errorMsg.includes("kid not found") ||
+      errorMsg.includes("security token has expired") ||
+      errorMsg.includes("Expired Refresh Token");
+
+    if (isExpired) {
+      logger.warn(
+        `[refresh-task] Refresh token permanently expired for key ${keyId}. Session will not be refreshed automatically. Please re-login.`,
+      );
+      schedulers.delete(keyId);
+      return;
+    }
+
+    // 非永久性失败：重新调度（使用原过期时间）
     const scheduler = schedulers.get(keyId);
     if (scheduler) {
       scheduler.schedule(session.expiresAt, () => refreshAndReschedule(keyId));
