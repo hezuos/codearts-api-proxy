@@ -75,7 +75,7 @@ async function testCreateAndPollBrowserTicket(): Promise<void> {
   const req = createRequest();
   const res = createResponse();
 
-  startBrowserHuaweiLogin(req, res);
+  await startBrowserHuaweiLogin(req, res);
 
   assert.equal(res.statusCode, 200);
   const body = res.body as { ticket_id: string; login_url: string };
@@ -95,9 +95,9 @@ async function testConcurrentBrowserTicketsRemainDistinct(): Promise<void> {
   __testHooks.resetLoginFlows();
 
   const res1 = createResponse();
-  startBrowserHuaweiLogin(createRequest(), res1);
+  await startBrowserHuaweiLogin(createRequest(), res1);
   const res2 = createResponse();
-  startBrowserHuaweiLogin(createRequest(), res2);
+  await startBrowserHuaweiLogin(createRequest(), res2);
 
   const body1 = res1.body as { ticket_id: string };
   const body2 = res2.body as { ticket_id: string };
@@ -151,7 +151,7 @@ async function testUnknownCallbackRejectedSafely(): Promise<void> {
 async function testCallbackReturnsImmediatelyAndFinalizeSetsCookie(): Promise<void> {
   __testHooks.resetLoginFlows();
   const startRes = createResponse();
-  startBrowserHuaweiLogin(createRequest(), startRes);
+  await startBrowserHuaweiLogin(createRequest(), startRes);
   const startBody = startRes.body as { ticket_id: string };
 
   __testHooks.setExchangeHuaweiTicketForTest(async () => ({
