@@ -1,122 +1,102 @@
-# AGENTS.md
+# PROJECT KNOWLEDGE BASE
 
-## 语言约定
+**Generated:** 2026-06-19
+**Version:** 1.8.0
 
-- 文档、注释、LLM 输出均使用中文
+## OVERVIEW
 
-## 项目概述
+OpenAI 兼容代理，封装华为云 CodeArts Agent LLM API。Express + TypeScript (CommonJS)，Node>=20，无 ORM，自研分层文件存储。
 
-OpenAI 兼容代理，封装华为云 CodeArts Agent LLM API。客户端（如 OpenCode）使用标准 OpenAI `/v1/chat/completions` 协议，代理负责 AK/SK 签名并转换为 CodeArts SSE 协议转发上游。
-
-## 包管理器
-
-**使用 `pnpm`**（非 npm）：
-
-```bash
-pnpm install        # 安装依赖
-pnpm run build      # 编译 TypeScript
-pnpm run dev        # 开发模式（ts-node）
-pnpm start          # 运行编译后代码
-pnpm test           # 运行测试
-pnpm run lint       # ESLint 检查
-```
-
-修改代码后务必执行 `pnpm run build` 确认零 TypeScript 错误。
-
-## 核心架构
+## STRUCTURE
 
 ```
 src/
-  index.ts                        # Express 应用入口
-  config.ts                       # 环境变量配置（含默认值）
-  auth/
-    store.ts                      # 认证存储门面（重导出各 store 模块）
-    admin.ts                      # Admin 密码管理（bcrypt）
-    huawei/
-      sign.ts                     # AK/SK HMAC-SHA256 签名（勿修改）
-      session-store.ts            # 华为会话持久化
-      refresh-task.ts             # 后台 Token 刷新任务
-  middleware/
-    authenticate-api-key.ts       # API 路由 Bearer Token 认证
-    authenticate-ui.ts            # UI 页面 Cookie 认证
-    authenticate-admin.ts         # Admin 会话认证
-  routes/
-    openai.ts                     # POST /v1/chat/completions, GET /v1/models
-    huawei-auth.ts                # OAuth 登录流程
-    provider-accounts.ts          # Provider 账号管理 API
-    web-ui.ts                     # Web UI API
-    admin.ts                      # Admin API
-  upstream/huawei/
-    chat-request.ts               # 请求体构建 + HTTP 传输
-    chat-stream.ts                # SSE 流式响应处理
-    chat-protocol.ts              # CodeArts SSE 协议解析
-    chat-translate.ts             # OpenAI ↔ CodeArts 消息转换
-    tools.ts                      # 工具定义（DEFAULT_TOOLS / SUB_AGENT_TOOLS）
-    models.ts                     # 模型列表获取（带缓存）
-  store/
-    hierarchical-store.ts         # 分层存储（User → Account → ApiKey → Session）
-    file-store.ts                 # 加密文件读写
-    paths.ts                      # 数据文件路径计算
-  types/openai.ts                 # OpenAI 类型定义 + codearts 扩展字段
-public/                           # Web UI 静态文件
+├── index.ts                    # Express 入口，29 路由注册，优雅关闭
+├── config.ts                   # 30+ 环境变量（华为云端点、版本号、限流参数）
+├── auth/
+│   ├── huawei/                 # OAuth2+PKCE+DPoP 登录，AK/SK 签名，Token 刷新
+│   ├── crypto/                 # AES-256-GCM 加解密
+│   ├── admin.ts                # Admin 会话管理
+│   └── store.ts                # [废弃] re-export facade → 用 src/store/
+├── middleware/                  # 三级认证：API Key / UI Cookie / Admin Session
+├── routes/                     # 29 端点（OpenAI API + OAuth + Admin + Web UI）
+├── upstream/huawei/            # 核心代理：协议转换、SSE 流、工具定义
+├── store/                      # 自研分层文件存储（内存缓存 + AES-256-GCM 加密持久化）
+├── db/models/                  # 纯类型定义（User/ProviderAccount/ApiKey）— 无数据库
+├── types/                      # OpenAI 兼容类型 + CodeArts 专有类型
+├── translation/                # OpenAI 响应格式构建器（openai-mock.ts 名不副实）
+└── utils/                      # 日志器、错误体系、脱敏工具
 ```
 
-## 关键设计规则（勿违反）
+## WHERE TO LOOK
 
-- **最小有状态**：进程内仅维护 `Map<chat_id, response_message_id>`（`chat-request.ts`），用于自动填充 `parent_message_id`。不存储消息历史。
-- **`chat_id` 派生**：SHA-256 哈希（providerAccountId + 首条 user/system 消息内容）前 32 字符。勿用 `randomUUID()`。
-- **`parent_message_id` 更新**：仅在 SSE 成功响应（无 `error_code`）时更新 Map。错误时保留旧值以支持重试。
-- **`extractToolResults`**：仅当 `messages[last].role === "tool"` 时提取工具结果。若最后一条是 `user`，返回 `[]`（新对话轮次）。
-- **`currentWorkingDirectory`**：必须来自 `request.codearts.current_working_directory`，勿用 `process.cwd()`。
-- **`osVersion`**：默认 `"win32"`，勿用 `process.platform`。
-- **`Task.subagent_type`**：通过 `normalizeToolCallArguments` 归一化为小写（CodeArts LLM 输出混合大小写，OpenCode 仅接受小写）。
+| 任务 | 位置 | 备注 |
+|------|------|------|
+| 添加新 API 端点 | `src/routes/` | 参考现有路由的认证中间件选择 |
+| 修改聊天协议转换 | `src/upstream/huawei/` | 见子目录 AGENTS.md |
+| 修改认证流程 | `src/auth/huawei/` | 见子目录 AGENTS.md |
+| 修改数据存储 | `src/store/` | 见子目录 AGENTS.md |
+| 添加新环境变量 | `src/config.ts` | 添加字段 + 默认值 |
+| 修改前端页面 | `public/` | 纯 HTML/JS/CSS，无框架 |
+| 调试请求签名 | `src/auth/huawei/sign.ts` | **勿修改** |
+| 理解 CodeArts 协议 | `docs/codearts-api-spec.md` | 字段规范 |
+| 查看真实请求样本 | `scripts/captured-requests/` | IDE 请求捕获 |
 
-## 环境变量
+## CONVENTIONS
 
-完整列表见 `src/config.ts`。关键变量：
+- **语言**: 文档、注释、LLM 输出均使用中文
+- **包管理器**: 强制 `pnpm`（非 npm/yarn）— 注意 package.json scripts 内部仍用 `npm run`，需统一
+- **`any` 类型**: ESLint error 级别禁止
+- **函数式架构**: 无类/装饰器/依赖注入，路由为独立 `export async function`
+- **测试**: 无框架，`assert` + `ts-node` 手动串联运行，co-location 模式（`.test.ts` 与源码同目录）
+- **`__testHooks`**: 生产代码导出测试钩子对象，避免修改内部可见性
+- **import 风格**: 全部使用相对路径（tsconfig 路径别名已定义但未使用，属死配置）
+- **日志**: 自研结构化日志器（`src/utils/logger.ts`），生产 JSON / 开发人类可读
+- **ESLint**: 旧格式 `.eslintrc.cjs`，env 含 `jest: true` 但项目无 jest
 
-| 变量                | 默认值                            | 说明                     |
-| ------------------- | --------------------------------- | ------------------------ |
-| `PORT`              | `1455`                            | 监听端口                 |
-| `ENCRYPTION_KEY`    | `dev-only-32-byte-encryption-key!`| 生产环境必须修改         |
-| `DEFAULT_API_KEY`   | `dev-openai-compatible-key`       | 客户端 Bearer Token      |
-| `IDE_VERSION`       | `26.3.11`                         | 需匹配 CodeArts 服务端   |
-| `PLUGIN_VERSION`    | `26.3.5`                          | 需匹配 CodeArts 服务端   |
-| `HUAWEI_IS_INNER_VERSION` | `false`                    | 是否为内部版本（影响 URL 路径） |
-| `ENABLE_REFRESH_TASK` | `true`                        | 是否自动刷新 Token       |
+## ANTI-PATTERNS (THIS PROJECT)
 
-## 数据文件（不在 git 中）
+- **勿修改 `sign.ts`** — AK/SK HMAC-SHA256 签名算法，与华为云 API 严格绑定
+- **勿用 `randomUUID()` 生成 chat_id** — 必须用 SHA-256 哈希派生（providerAccountId + 首条消息内容）前32字符
+- **勿用 `process.platform`** — `osVersion` 固定 `"win32"`
+- **勿用 `process.cwd()`** — `currentWorkingDirectory` 必须来自 `request.codearts.current_working_directory`
+- **勿创建第二个用户** — 单用户模式，`createUser()` 有硬守卫
+- **勿解绑最后一个 ProviderAccount** — 至少保留一个账号
+- **有 tool_calls 时 finish_reason 必须为 `"tool_calls"`** — 非 `"stop"`，否则客户端不执行工具
+- **生产环境必须设置 `ENCRYPTION_KEY`** — 无安全回退
+- **`IDE_VERSION`/`PLUGIN_VERSION` 必须匹配服务端** — 随意修改将导致请求被拒
+- **子代理工具列表不得包含 Edit/Write/Task** — 仅 Bash/Glob/Grep/Read/openBrowserInIDE
 
-`data/` 目录（gitignored）按分层结构存储：
+## UNIQUE STYLES
 
-- `users/{userId}/profile.json` — 用户配置
-- `users/{userId}/accounts/{accountId}/account.json` — Provider 账号
-- `users/{userId}/accounts/{accountId}/keys/{keyId}/key.json` — API Key
-- `users/{userId}/accounts/{accountId}/keys/{keyId}/session.json` — 华为会话（含 AK/SK，敏感）
+- **三路径 Token 刷新降级链**: OAuth2 refresh → AK/SK 签名 → legacy refresh_token
+- **per-session 刷新调度**: 每个 session 独立调度，基于 expiresAt 精准计算（过期前 2h + 随机抖动）
+- **错误恢复**: 上游错误时合成 tool_call 继续对话（`chat-recovery.ts`）
+- **模型缓存三级降级**: agent-center API → 文件缓存(1h TTL) → 静态列表
+- **SSE 畸形行容错**: 跳过而非断开整个流
+- **Admin 会话令牌每次重启随机生成**: 防止 cookie 伪造
 
-所有文件使用 AES-256-GCM 加密（密钥来自 `ENCRYPTION_KEY`）。
+## COMMANDS
 
-## 单用户模式
+```bash
+pnpm install          # 安装依赖
+pnpm run build        # 生成 version.ts + tsc 编译
+pnpm run dev          # ts-node 直接运行（开发用）
+pnpm start            # 运行编译后代码
+pnpm test             # 运行 3 个测试文件（手动串联）
+pnpm run lint         # ESLint 检查
+pnpm run format       # Prettier 格式化
+```
 
-当前为单用户模式：整个代理实例服务于一个用户。`bootstrapDefaultAuth()` 确保唯一用户存在。数据模型保留多用户结构，为后续扩展预留。
+## NOTES
 
-## Web UI
-
-静态页面（`public/`）：
-
-- `/` — 首页（登录入口）
-- `/success` — 登录成功页（显示 API Key）
-- `/status` — 账号状态仪表盘
-- `/admin` — Admin 控制面板
-- `/admin/login` — Admin 登录
-- `/admin/setup` — Admin 密码设置
-
-认证方式：
-- 用户页面：`auth_key` Cookie（值同 API Key）
-- Admin 页面：`admin_session` Cookie
-
-## 参考文档
-
-- `docs/codearts-api-spec.md` — CodeArts API 字段规范
-- `docs/request-and-api.md` — 字段来源规则
-- `scripts/captured-requests/` — IDE 请求捕获（ground truth）
+- `src/version.ts` 是构建时自动生成的，已 gitignore
+- `data/` 目录存储运行时数据（已 gitignore），分层结构：`users/{userId}/accounts/{accountId}/keys/{keyId}/`
+- `src/auth/store.ts` 是已废弃的 re-export facade，新代码应直接导入 `src/store/` 模块（但 index.ts 仍从它导入）
+- `src/translation/openai-mock.ts` 名为 "mock" 实为 OpenAI 响应格式构建器
+- `docs/adapters/` 下的 `.ts` 文件是参考代码，不参与编译
+- `src/db/models/` 仅含纯类型定义，无数据库操作
+- Docker 三阶段构建：builder → prod-deps → runtime（node:22-alpine）
+- CI 仅有 release workflow（`v*` tag 触发），无 PR 级别 CI
+- tsconfig 中 `experimentalDecorators`/`emitDecoratorMetadata` 已启用但项目无类/装饰器
+- `scripts/` 含敏感调试产物（密钥二进制、解密脚本），部分 gitignore
