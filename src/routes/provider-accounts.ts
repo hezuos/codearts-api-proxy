@@ -22,7 +22,7 @@ export function selectDefaultProviderAccount(
   res: Response,
 ): void {
   const auth = getRequestAuth(req);
-  const providerAccountId = req.params.providerAccountId;
+  const providerAccountId = String(req.params.providerAccountId);
   const providerAccount = setDefaultProviderAccount(
     auth.userId,
     providerAccountId,
@@ -37,7 +37,7 @@ export function selectDefaultProviderAccount(
 
 export function unbindProviderAccount(req: Request, res: Response): void {
   const auth = getRequestAuth(req);
-  const providerAccountId = req.params.providerAccountId;
+  const providerAccountId = String(req.params.providerAccountId);
   // deleteProviderAccount cascades to keys + sessions
   const ok = deleteProviderAccount(auth.userId, providerAccountId);
   if (!ok) {
@@ -53,7 +53,7 @@ export async function triggerProviderAccountRefresh(
   res: Response,
 ): Promise<void> {
   const auth = getRequestAuth(req);
-  const providerAccountId = req.params.providerAccountId;
+  const providerAccountId = String(req.params.providerAccountId);
   const providerAccount = getProviderAccount(providerAccountId);
 
   if (!providerAccount || providerAccount.userId !== auth.userId) {

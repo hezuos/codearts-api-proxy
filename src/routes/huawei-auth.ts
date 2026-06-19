@@ -683,7 +683,7 @@ export async function startBrowserHuaweiLogin(req: Request, res: Response): Prom
 }
 
 export function getBrowserHuaweiLoginStatus(req: Request, res: Response): void {
-  const flow = getBrowserLoginFlow(req.params.ticketId);
+  const flow = getBrowserLoginFlow(String(req.params.ticketId));
   if (!flow) {
     res.status(404).json({ error: "Login ticket not found" });
     return;
@@ -694,7 +694,7 @@ export function getBrowserHuaweiLoginStatus(req: Request, res: Response): void {
 
 
 export function finalizeBrowserHuaweiLogin(req: Request, res: Response): void {
-  const flow = getBrowserLoginFlow(req.params.ticketId);
+  const flow = getBrowserLoginFlow(String(req.params.ticketId));
   if (!flow) {
     res.status(404).json({ error: "Login ticket not found" });
     return;

@@ -201,7 +201,8 @@ export async function refreshAccountToken(
     return;
   }
 
-  const { accountId } = req.params;
+  const accountId = String(req.params.accountId);
+
   const account = getProviderAccount(accountId);
 
   if (!account || account.userId !== auth.userId) {
@@ -238,7 +239,7 @@ export function unbindAccount(req: Request, res: Response): void {
     return;
   }
 
-  const { accountId } = req.params;
+  const accountId = String(req.params.accountId);
 
   // Prevent unbinding the last account
   const accounts = listProviderAccounts(auth.userId);
@@ -267,7 +268,7 @@ export function setDefaultAccount(req: Request, res: Response): void {
     return;
   }
 
-  const { accountId } = req.params;
+  const accountId = String(req.params.accountId);
   const account = setDefaultProviderAccount(auth.userId, accountId);
 
   if (!account) {

@@ -208,7 +208,7 @@ export function getAllAccounts(_req: Request, res: Response): void {
  * POST /admin/api/keys/:id/revoke - Revoke API key
  */
 export function revokeApiKey(req: Request, res: Response): void {
-  const keyId = req.params.id;
+  const keyId = String(req.params.id);
   const ok = revokeStoreApiKey(keyId);
 
   if (!ok) {
@@ -223,7 +223,7 @@ export function revokeApiKey(req: Request, res: Response): void {
  * DELETE /admin/api/keys/:id - Delete API key (cascade deletes session)
  */
 export function deleteApiKey(req: Request, res: Response): void {
-  const keyId = req.params.id;
+  const keyId = String(req.params.id);
   const apiKey = getApiKey(keyId);
   if (!apiKey) {
     res.status(404).json({ error: "API key not found" });
@@ -248,7 +248,7 @@ export async function refreshApiKey(
   req: Request,
   res: Response,
 ): Promise<void> {
-  const keyId = req.params.id;
+  const keyId = String(req.params.id);
   const apiKey = getApiKey(keyId);
   if (!apiKey) {
     res.status(404).json({ error: "API key not found" });
@@ -272,7 +272,7 @@ export async function refreshApiKey(
  * GET /admin/api/accounts/:id - Get single account details
  */
 export function getAccountDetails(req: Request, res: Response): void {
-  const accountId = req.params.id;
+  const accountId = String(req.params.id);
   const owner = findAccountOwner(accountId);
 
   if (!owner) {
@@ -305,7 +305,7 @@ export async function forceRefreshAccount(
   req: Request,
   res: Response,
 ): Promise<void> {
-  const accountId = req.params.id;
+  const accountId = String(req.params.id);
   const owner = findAccountOwner(accountId);
 
   if (!owner) {
@@ -334,7 +334,7 @@ export async function forceRefreshAccount(
  * DELETE /admin/api/accounts/:id - Delete account (cascade deletes keys + sessions)
  */
 export function deleteAccount(req: Request, res: Response): void {
-  const accountId = req.params.id;
+  const accountId = String(req.params.id);
   const owner = findAccountOwner(accountId);
 
   if (!owner) {
