@@ -26,6 +26,25 @@ import {
   getChatIdRole,
 } from "./chat-request";
 
+// ---------------------------------------------------------------------------
+// Retryable SSE error detection
+// ---------------------------------------------------------------------------
+
+const MAX_SSE_RETRY = 1;
+const SSE_RETRY_DELAY_MS = 2000;
+
+/**
+ * Determine if an SSE error_code is retryable (e.g. rate-limit / 429).
+ * Matches patterns like "InferHub.ModelArts.81101.429" or any code
+ * ending in ".429" / containing "RateLimit".
+ */
+function isRetryableSSEError(errorCode: string): boolean {
+  if (errorCode.endsWith(".429") || errorCode === "429") return true;
+  const lower = errorCode.toLowerCase();
+  if (lower.includes("ratelimit") || lower.includes("rate_limit")) return true;
+  return false;
+}
+
 export async function streamHuaweiChatToResponse(
   request: OpenAIChatCompletionRequest,
   session: StoredHuaweiSession,
@@ -36,6 +55,8 @@ export async function streamHuaweiChatToResponse(
   const log = logger.withTrace(traceId);
   const credentials = getCredentials(session);
   const chatUrl = `${config.huaweiChatHost}/v1/chat/chat`;
+
+  // ── Build initial request ────────────────────────────────────────────────
   const { body: requestBody, json: body } = buildRequestBody(request, session);
   const headers = buildChatHeaders(chatUrl, body, credentials, traceId);
 
@@ -119,155 +140,224 @@ export async function streamHuaweiChatToResponse(
   let sseHadError = false;
   const sseDebugLog: Array<{ event: number; delta?: string; error?: string; meta?: string }> = [];
 
-  for await (const event of parseSSE(stream)) {
-    sseEventCount++;
+  // ── SSE stream processing (retriable on rate-limit errors) ────────────────
+  let retryCount = 0;
+  let currentStream = stream;
 
-    // Capture upstream session identifiers
-    if (event.chat_id) responseMetadata.chat_id = event.chat_id;
-    if (event.response_message_id)
-      responseMetadata.response_message_id = event.response_message_id;
-    if (event.request_message_id)
-      responseMetadata.request_message_id = event.request_message_id;
+  while (true) {
+    let shouldRetry = false;
 
-    // Log meta event
-    if (event.chat_id || event.response_message_id) {
-      log.debug("[codearts→proxy] SSE meta", { chat_id: event.chat_id, response_message_id: event.response_message_id, request_message_id: event.request_message_id });
-      sseDebugLog.push({ event: sseEventCount, meta: JSON.stringify({ chat_id: event.chat_id, response_message_id: event.response_message_id, request_message_id: event.request_message_id }) });
-    }
+    for await (const event of parseSSE(currentStream)) {
+      sseEventCount++;
 
-    // Log errors
-    if (
-      event.error_code &&
-      event.error_code !== "0" &&
-      event.error_code !== "ChatAgent.00000000"
-    ) {
-      if (event.error_code === "PROTOCOL_ERROR") {
-        // Malformed SSE line — skip, don't terminate the stream
-        continue;
+      // Capture upstream session identifiers
+      if (event.chat_id) responseMetadata.chat_id = event.chat_id;
+      if (event.response_message_id)
+        responseMetadata.response_message_id = event.response_message_id;
+      if (event.request_message_id)
+        responseMetadata.request_message_id = event.request_message_id;
+
+      // Log meta event
+      if (event.chat_id || event.response_message_id) {
+        log.debug("[codearts→proxy] SSE meta", { chat_id: event.chat_id, response_message_id: event.response_message_id, request_message_id: event.request_message_id });
+        sseDebugLog.push({ event: sseEventCount, meta: JSON.stringify({ chat_id: event.chat_id, response_message_id: event.response_message_id, request_message_id: event.request_message_id }) });
       }
-      sseHadError = true;
-      log.error("[codearts→proxy] SSE error", { code: event.error_code, msg: event.error_msg ?? "unknown" });
-      sseDebugLog.push({ event: sseEventCount, error: JSON.stringify({ code: event.error_code, msg: event.error_msg }) });
 
-      const recoveryToolCalls = buildSyntheticRecoveryToolCalls(request);
-      if (recoveryToolCalls.length > 0) {
-        log.warn("[proxy→client] synthetic recovery tool_calls", {
-          code: event.error_code,
-          count: recoveryToolCalls.length,
-          names: recoveryToolCalls.map((tc) => tc.function.name),
-        });
-        const recovery = buildRecoveryChunks({
-          completionId,
+      // Log errors
+      if (
+        event.error_code &&
+        event.error_code !== "0" &&
+        event.error_code !== "ChatAgent.00000000"
+      ) {
+        if (event.error_code === "PROTOCOL_ERROR") {
+          // Malformed SSE line — skip, don't terminate the stream
+          continue;
+        }
+        sseHadError = true;
+        log.error("[codearts→proxy] SSE error", { code: event.error_code, msg: event.error_msg ?? "unknown" });
+        sseDebugLog.push({ event: sseEventCount, error: JSON.stringify({ code: event.error_code, msg: event.error_msg }) });
+
+        // ── Retry on rate-limit errors ────────────────────────────────────
+        if (isRetryableSSEError(event.error_code) && retryCount < MAX_SSE_RETRY) {
+          retryCount++;
+          log.info("[codearts→proxy] Rate-limit SSE error, will retry", { code: event.error_code, retryCount });
+
+          // Send a notice chunk to the client so they know what's happening
+          const noticeChunk: OpenAIChatCompletionChunk = {
+            id: completionId,
+            object: "chat.completion.chunk",
+            created,
+            model,
+            ...(sentMetadata ? {} : { codearts: { ...responseMetadata } }),
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  ...(sentRole ? {} : { role: "assistant" as const }),
+                  content: `\n[上游限流: ${event.error_code} - ${event.error_msg ?? "unknown"}；正在重试...]\n`,
+                },
+                finish_reason: null,
+              },
+            ],
+          };
+          sentRole = true;
+          sentMetadata = true;
+          res.write(`data: ${JSON.stringify(noticeChunk)}\n\n`);
+
+          // Wait before retrying
+          await new Promise((resolve) => setTimeout(resolve, SSE_RETRY_DELAY_MS));
+          if (signal?.aborted) break;
+
+          // Rebuild request (parent_message_id may have been captured from meta events)
+          const retryBody = buildRequestBody(request, session);
+          const retryHeaders = buildChatHeaders(chatUrl, retryBody.json, credentials, traceId);
+
+          try {
+            const retryResult = await httpsPost(chatUrl, retryHeaders, retryBody.json, signal);
+            if (retryResult.status !== 200) {
+              let retryErrorBody = "";
+              for await (const line of retryResult.stream) retryErrorBody += line;
+              log.error("[codearts→proxy] retry HTTP error", { status: retryResult.status, body: retryErrorBody.slice(0, 500) });
+              // Fall through to normal error handling below
+              break;
+            }
+            currentStream = retryResult.stream;
+            shouldRetry = true;
+            sseHadError = false; // Reset — the retry might succeed
+            log.info("[codearts→proxy] retry request sent, continuing SSE stream");
+          } catch (retryErr) {
+            log.error("[codearts→proxy] retry request failed", { error: retryErr instanceof Error ? retryErr.message : String(retryErr) });
+            break;
+          }
+
+          break; // Exit the for-await loop to start consuming the new stream
+        }
+
+        // ── Recovery path (non-retryable or retry exhausted) ──────────────
+        const recoveryToolCalls = buildSyntheticRecoveryToolCalls(request);
+        if (recoveryToolCalls.length > 0) {
+          log.warn("[proxy→client] synthetic recovery tool_calls", {
+            code: event.error_code,
+            count: recoveryToolCalls.length,
+            names: recoveryToolCalls.map((tc) => tc.function.name),
+          });
+          const recovery = buildRecoveryChunks({
+            completionId,
+            created,
+            model,
+            responseMetadata,
+            sentRole,
+            sentMetadata,
+            errorCode: event.error_code,
+            errorMsg: event.error_msg ?? undefined,
+            recoveryToolCalls,
+          });
+          sentRole = recovery.sentRole;
+          sentMetadata = recovery.sentMetadata;
+          sseToolCallCount += recoveryToolCalls.length;
+          for (const chunk of recovery.chunks) {
+            res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+          }
+          break;
+        }
+
+        const errChunk: OpenAIChatCompletionChunk = {
+          id: completionId,
+          object: "chat.completion.chunk",
           created,
           model,
-          responseMetadata,
-          sentRole,
-          sentMetadata,
-          errorCode: event.error_code,
-          errorMsg: event.error_msg ?? undefined,
-          recoveryToolCalls,
-        });
-        sentRole = recovery.sentRole;
-        sentMetadata = recovery.sentMetadata;
-        sseToolCallCount += recoveryToolCalls.length;
-        for (const chunk of recovery.chunks) {
-          res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-        }
+          codearts: responseMetadata,
+          choices: [
+            {
+              index: 0,
+              delta: {
+                content: `[Error: ${event.error_code} - ${event.error_msg ?? "unknown"}]`,
+              },
+              finish_reason: null,
+            },
+          ],
+        };
+        res.write(`data: ${JSON.stringify(errChunk)}\n\n`);
         break;
       }
 
-      const errChunk: OpenAIChatCompletionChunk = {
-        id: completionId,
-        object: "chat.completion.chunk",
-        created,
-        model,
-        codearts: responseMetadata,
-        choices: [
-          {
-            index: 0,
-            delta: {
-              content: `[Error: ${event.error_code} - ${event.error_msg ?? "unknown"}]`,
-            },
-            finish_reason: null,
-          },
-        ],
-      };
-      res.write(`data: ${JSON.stringify(errChunk)}\n\n`);
-      break;
-    }
+      if (event.delta) {
+        // Collect debug info for full stream dump
+        sseDebugLog.push({ event: sseEventCount, delta: JSON.stringify(event.delta) });
 
-    if (event.delta) {
-      // Collect debug info for full stream dump
-      sseDebugLog.push({ event: sseEventCount, delta: JSON.stringify(event.delta) });
-
-      if (event.delta.tool_calls && event.delta.tool_calls.length > 0) {
-        for (const tc of event.delta.tool_calls) {
-          const hasIdentity =
-            (tc.id && tc.id !== "-") || (tc.function?.name ?? tc.name);
-          if (hasIdentity) {
-            sseToolCallCount++;
+        if (event.delta.tool_calls && event.delta.tool_calls.length > 0) {
+          for (const tc of event.delta.tool_calls) {
+            const hasIdentity =
+              (tc.id && tc.id !== "-") || (tc.function?.name ?? tc.name);
+            if (hasIdentity) {
+              sseToolCallCount++;
+            }
+            log.debug("[codearts→proxy] SSE tool_call", {
+              id: tc.id,
+              name: tc.function?.name ?? tc.name,
+              hasId: !!(tc.id && tc.id !== "-"),
+              arguments_preview: (tc.function?.arguments ?? (typeof tc.arguments === "string" ? tc.arguments : "")).slice(0, 300),
+            });
           }
-          log.debug("[codearts→proxy] SSE tool_call", {
-            id: tc.id,
-            name: tc.function?.name ?? tc.name,
-            hasId: !!(tc.id && tc.id !== "-"),
-            arguments_preview: (tc.function?.arguments ?? (typeof tc.arguments === "string" ? tc.arguments : "")).slice(0, 300),
+        }
+        if (event.delta.content) {
+          sseTextChars += event.delta.content.length;
+        }
+
+        // Build delta content
+        const delta: OpenAIChatCompletionDelta = {};
+        if (event.delta.content) delta.content = event.delta.content;
+        if (event.delta.reasoning_content)
+          delta.reasoning_content = event.delta.reasoning_content;
+        const toolCallDeltas = cleanToolCallDeltas(event.delta.tool_calls);
+        if (toolCallDeltas) {
+          delta.tool_calls = toolCallDeltas;
+          log.debug("[proxy→client] tool_call delta", {
+            deltas: toolCallDeltas.map((d) => ({
+              index: d.index,
+              id: d.id,
+              name: d.function?.name,
+              arguments_preview: d.function?.arguments?.slice(0, 200),
+            })),
           });
         }
-      }
-      if (event.delta.content) {
-        sseTextChars += event.delta.content.length;
-      }
 
-      // Build delta content
-      const delta: OpenAIChatCompletionDelta = {};
-      if (event.delta.content) delta.content = event.delta.content;
-      if (event.delta.reasoning_content)
-        delta.reasoning_content = event.delta.reasoning_content;
-      const toolCallDeltas = cleanToolCallDeltas(event.delta.tool_calls);
-      if (toolCallDeltas) {
-        delta.tool_calls = toolCallDeltas;
-        log.debug("[proxy→client] tool_call delta", {
-          deltas: toolCallDeltas.map((d) => ({
-            index: d.index,
-            id: d.id,
-            name: d.function?.name,
-            arguments_preview: d.function?.arguments?.slice(0, 200),
-          })),
-        });
-      }
+        // Merge role into first content delta (instead of sending a separate role-only chunk)
+        if (!sentRole) {
+          const role = event.delta.role && [
+            "assistant",
+            "user",
+            "system",
+            "tool",
+            "function",
+          ].includes(event.delta.role)
+            ? (event.delta.role as OpenAIChatCompletionChunk["choices"][number]["delta"]["role"])
+            : "assistant";
+          delta.role = role;
+          sentRole = true;
+        }
 
-      // Merge role into first content delta (instead of sending a separate role-only chunk)
-      if (!sentRole) {
-        const role = event.delta.role && [
-          "assistant",
-          "user",
-          "system",
-          "tool",
-          "function",
-        ].includes(event.delta.role)
-          ? (event.delta.role as OpenAIChatCompletionChunk["choices"][number]["delta"]["role"])
-          : "assistant";
-        delta.role = role;
-        sentRole = true;
-      }
-
-      if (Object.keys(delta).length > 0) {
-        // codearts metadata only in the first chunk
-        const chunk = {
-          id: completionId,
-          object: "chat.completion.chunk" as const,
-          created,
-          model,
-          ...(sentMetadata ? {} : { codearts: { ...responseMetadata } }),
-          choices: [{ index: 0, delta, finish_reason: null }],
-        };
-        sentMetadata = true;
-        res.write(
-          `data: ${JSON.stringify(chunk as OpenAIChatCompletionChunk)}\n\n`,
-        );
+        if (Object.keys(delta).length > 0) {
+          // codearts metadata only in the first chunk
+          const chunk = {
+            id: completionId,
+            object: "chat.completion.chunk" as const,
+            created,
+            model,
+            ...(sentMetadata ? {} : { codearts: { ...responseMetadata } }),
+            choices: [{ index: 0, delta, finish_reason: null }],
+          };
+          sentMetadata = true;
+          res.write(
+            `data: ${JSON.stringify(chunk as OpenAIChatCompletionChunk)}\n\n`,
+          );
+        }
       }
     }
+
+    // If we broke out to retry with a new stream, continue the while loop
+    if (shouldRetry) continue;
+    break;
   }
 
   // ── Update parent_message_id tracker ──────────────────────────────────────
@@ -293,6 +383,7 @@ export async function streamHuaweiChatToResponse(
     sse_events: sseEventCount,
     text_chars: sseTextChars,
     tool_calls: sseToolCallCount,
+    retries: retryCount,
     response_message_id: responseMetadata.response_message_id ?? "(none)",
     chat_id: responseMetadata.chat_id ?? "(none)",
   });
