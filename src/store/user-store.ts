@@ -50,9 +50,8 @@ export { getUser, getDefaultUser, getAllUsers as listAllUsers };
 // ---------------------------------------------------------------------------
 
 export function bootstrapDefaultAuth(): void {
-  let user = getDefaultUser();
-  if (!user) {
-    user = createUser({
+  if (!getDefaultUser()) {
+    createUser({
       email: "dev@codearts-agent-proxy.local",
       displayName: "Development User",
     });

@@ -95,7 +95,6 @@ export async function sendHuaweiChatRequest(
   const responseMetadata: Record<string, string | undefined> = {};
 
   let sseEventCount = 0;
-  let sseHadError = false;
 
   for await (const event of parseSSE(stream)) {
     sseEventCount++;
@@ -114,7 +113,6 @@ export async function sendHuaweiChatRequest(
         // Malformed SSE line — skip, don't fail the entire request
         continue;
       }
-      sseHadError = true;
       log.error("SSE error from CodeArts", { code: event.error_code, msg: event.error_msg ?? "unknown" });
       throw new Error(
         `CodeArts error ${event.error_code}: ${event.error_msg ?? "unknown"}`,
@@ -141,7 +139,7 @@ export async function sendHuaweiChatRequest(
   }
 
   // Update parent_message_id tracker only on successful turns
-  if (!sseHadError && responseMetadata.response_message_id) {
+  if (responseMetadata.response_message_id) {
     const cid = responseMetadata.chat_id;
     if (cid) {
       const prevValue = getLastResponseMessageId(cid);

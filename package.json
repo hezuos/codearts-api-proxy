@@ -10,7 +10,7 @@
     "start": "node dist/index.js",
     "dev": "npm run generate-version && node -r ts-node/register src/index.ts",
     "test": "node -r ts-node/register src/upstream/huawei/chat.test.ts && node -r ts-node/register src/upstream/huawei/tools.test.ts && node -r ts-node/register src/routes/huawei-auth.test.ts && node -r ts-node/register src/upstream/huawei/chat-translate.test.ts",
-    "lint": "node ./node_modules/eslint/bin/eslint.js src/**/*.ts",
+    "lint": "eslint src/**/*.ts",
     "format": "node ./node_modules/prettier/bin/prettier.cjs --write src/**/*.ts",
     "prepublishOnly": "npm run build"
   },
@@ -26,25 +26,26 @@
   "author": "",
   "license": "GPL-3.0",
   "dependencies": {
-    "bcryptjs": "^2.4.3",
+    "bcryptjs": "^3.0.3",
     "cookie-parser": "^1.4.6",
     "express": "^5.2.1",
-    "express-rate-limit": "^8.4.0",
+    "express-rate-limit": "^8.6.2",
     "jose": "^6.0.11"
   },
   "devDependencies": {
-    "@types/bcryptjs": "^2.4.6",
+    "@eslint/js": "^10.0.1",
     "@types/cookie-parser": "^1.4.6",
     "@types/express": "^5.0.6",
     "@types/express-rate-limit": "^6.0.2",
-    "@types/node": "^25.6.2",
-    "@typescript-eslint/eslint-plugin": "^6.10.0",
-    "@typescript-eslint/parser": "^6.10.0",
-    "eslint": "^8.53.0",
-    "openai": "^6.34.0",
-    "prettier": "^3.1.0",
+    "@types/node": "^25.9.1",
+    "@typescript-eslint/eslint-plugin": "^8.67.0",
+    "@typescript-eslint/parser": "^8.67.0",
+    "eslint": "^10.8.1",
+    "openai": "^6.44.0",
+    "prettier": "^3.8.3",
     "ts-node": "^10.9.1",
-    "typescript": "^5.2.2"
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.67.0"
   },
   "engines": {
     "node": ">=20.0.0"
