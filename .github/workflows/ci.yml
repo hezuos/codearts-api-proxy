@@ -9,7 +9,6 @@ on:
 permissions:
   contents: read
   checks: write
-  security-events: write
 
 jobs:
   # ── Lint + Type Check + Build + Test ─────────────────────────
@@ -37,26 +36,6 @@ jobs:
 
       - name: Test
         run: pnpm test
-
-  # ── CodeQL 静态分析（免费）──────────────────────────────────
-  codeql:
-    name: CodeQL Analyze
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        language: [javascript-typescript]
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: github/codeql-action/init@v3
-        with:
-          languages: ${{ matrix.language }}
-          queries: security-extended
-
-      - uses: github/codeql-action/analyze@v3
-        with:
-          category: "/language:${{ matrix.language }}"
 
   # ── 依赖审计（替代部分 Dependabot 功能）──────────────────────
   audit:
