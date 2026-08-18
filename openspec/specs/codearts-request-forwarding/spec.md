@@ -3,7 +3,7 @@ spec: codearts-request-forwarding
 status: implemented
 priority: high
 created: 2026-04-16
-updated: 2026-04-17
+updated: 2026-08-18
 ---
 
 # CodeArts Request Forwarding
@@ -34,22 +34,40 @@ The proxy SHALL preserve CodeArts conversation continuity across turns by reusin
 - **THEN** the proxy SHALL create a new upstream conversation state entry
 - **AND** the proxy SHALL persist the upstream conversation identifiers returned by CodeArts for future turns
 
+#### Scenario: Start a new upstream thread with full history
+
+- **GIVEN** a client sends a request with no existing proxy conversation state (no caller-provided `parent_message_id` and no tracked `lastResponseMessageId` for the resolved `chat_id`)
+- **AND** the client message history contains more than the current turn
+- **WHEN** the proxy processes the request
+- **THEN** the proxy SHALL create a new upstream conversation state entry
+- **AND** the proxy SHALL inject the folded full message history into the upstream `messages` payload instead of forwarding only the latest user message
+- **AND** the proxy SHALL persist the upstream conversation identifiers returned by CodeArts for future turns
+
 ### REQ-FWD-002: Forward request variants without flattening semantics
 
 The proxy SHALL build upstream request bodies that preserve the semantic request mode.
 
 **Rationale:** Different request types (standard, tool continuation, sub-agent) require different upstream request structures.
 
-#### Scenario: Standard user turn
+#### Scenario: Standard user turn with continuity
 
-- **GIVEN** a client sends a normal chat turn
+- **GIVEN** a client sends a normal chat turn with upstream continuity available (caller-provided `parent_message_id` or tracked `lastResponseMessageId` for the resolved `chat_id`)
 - **WHEN** the proxy constructs the upstream request
 - **THEN** the proxy SHALL send an upstream request with a `messages` payload representing the current user turn
+- **AND** the proxy SHALL include the task parameters required for a standard CodeArts turn
+
+#### Scenario: Standard user turn without continuity
+
+- **GIVEN** a client sends a normal chat turn with no upstream continuity available
+- **AND** the client message history contains more than the current turn
+- **WHEN** the proxy constructs the upstream request
+- **THEN** the proxy SHALL send an upstream request whose `messages` payload is a single folded `text` message containing the full history
 - **AND** the proxy SHALL include the task parameters required for a standard CodeArts turn
 
 #### Scenario: Tool continuation turn
 
 - **GIVEN** a client sends tool execution results for a prior upstream tool call
+- **AND** the proxy can confirm the `tool_call_id` matches a known CodeArts-issued call (caller-provided linkage or tracked `lastResponseMessageId` present)
 - **WHEN** the proxy constructs the upstream request
 - **THEN** the proxy SHALL send an upstream request with empty `messages`
 - **AND** the proxy SHALL place the structured tool execution results under upstream-compatible `task_parameters.tool_result`
@@ -100,7 +118,8 @@ The proxy SHALL translate upstream tool-call responses into OpenAI-compatible re
 
 #### Scenario: Process restart after a prior turn
 
-- **GIVEN** the proxy restarts after previously handling a conversation with stored upstream linkage metadata
-- **WHEN** the proxy initializes
-- **THEN** the proxy SHALL reload the persisted conversation state
-- **AND** the proxy SHALL be able to continue the upstream thread without requiring the user to restart the conversation manually
+- **GIVEN** the proxy restarts after previously handling a conversation with in-memory upstream linkage metadata
+- **WHEN** the proxy processes the next request for that conversation
+- **THEN** the proxy SHALL NOT assume the upstream thread can be resumed (in-memory linkage is lost on restart; there is no persisted conversation state for chat linkage)
+- **AND** the proxy SHALL treat the request per the full-context injection rules of the `full-context-injection` capability (inject folded history when the restart lost all linkage and the client history contains more than the current turn)
+- **AND** when the client provides `codearts.parent_message_id`, the proxy SHALL trust the caller-provided linkage and resume incrementally
