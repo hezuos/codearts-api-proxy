@@ -1,14 +1,19 @@
 
 .opencode/
+.agent/
+.agents/
 node_modules/
 dist/
 .env
 .env.*
 scripts/*.bin
 scripts/session-*.json
+scripts/spike-*.ts
+scripts/smoke-*.ts
 data/
 *.swp
 *.log
 log/
 .sisyphus/
 src/version.ts
+.pnpm-store/

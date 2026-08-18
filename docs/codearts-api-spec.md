@@ -214,6 +214,43 @@ Authorization: SDK-HMAC-SHA256 Access=<AccessKey>, SignedHeaders=content-type;ho
 
 当传递工具执行结果时，`messages` 为空数组 `[]`，工具结果通过 `task_parameters.tool_result` 传递。
 
+#### 3.3.3 全量上下文折叠注入（`messages.length == 1`，缓存未命中场景）
+
+当 proxy 缓存未命中（客户端未传 `codearts.parent_message_id` 且内存 Map 无该 `chat_id` 的 `lastResponseMessageId`）、非子代理请求、且客户端历史多于一轮时，proxy 将完整对话历史折叠为单条 `text` 消息注入上游 `messages`，替代默认的"只取最后一段用户消息"行为。由 `FULL_CONTEXT_INJECTION_ENABLED` 环境变量控制（默认 `false`）。
+
+折叠格式（带 role 标记的纯文本，design D2）：
+
+```
+[system]
+<system 内容>
+
+[user #1]
+<第一条用户消息>
+
+[assistant]
+<回复内容>
+[调用工具: <name>(<arguments>)]
+
+[tool result: <tool_name>]
+<工具输出>
+
+[user #2]
+<当前用户消息>
+
+[continuation]
+以下为历史对话上下文,请基于此继续响应最新用户请求。
+```
+
+**字段与限制：**
+- `messages` 仍为单元素数组 `[{type:"text",content:<折叠文本>}]`，不改变 CodeArts 协议结构
+- `parent_message_id` 为空字符串 `""`（新会话首条形态）
+- role 标记：`system`/`developer` → `[system]`；`user` → `[user #N]`；`assistant` → `[assistant]`；`tool` → `[tool result: <name>]`；未知 role → `[unknown: <role>]`
+- 工具轮次（`tool_calls`/`tool` 消息）折叠为文本标记，**不**映射到 `task_parameters.tool_result`（跨 provider 工具调用 ID 无法匹配 CodeArts 所发）
+- 截断阈值 `FULL_CONTEXT_MAX_CHARS`（默认 8000）：超阈值时保留 system + 第一条 user（锚点）+ 贪心保留最新轮次，裁剪中部；单条工具结果超阈值时保留头 2K + 尾 2K + 中部截断标记
+- 注入轮后 `response_message_id` 正常写入内存 Map，下一轮自动缓存命中 → 增量续传（一次性"上下文移植"）
+- 子代理请求**永不注入**（由 `subAgent_prompt` 承载上下文）
+- 工具续传路径不受影响（`isToolContinuation` 优先分流，`messages=[]` + `task_parameters.tool_result`）
+
 ---
 
 ### 3.4 `tools`（`task_parameters.tools`）字段结构
