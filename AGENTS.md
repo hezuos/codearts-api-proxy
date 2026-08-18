@@ -75,6 +75,7 @@ src/
 - **模型缓存三级降级**: agent-center API → 文件缓存(1h TTL) → 静态列表
 - **SSE 畸形行容错**: 跳过而非断开整个流
 - **Admin 会话令牌每次重启随机生成**: 防止 cookie 伪造
+- **全量上下文折叠注入（缓存未命中）**: 当无 `parent_message_id` 且内存 Map 未命中时，将完整对话历史折叠为带 role 标记的单条 text 注入上游（`foldFullConversation`），由 `FULL_CONTEXT_INJECTION_ENABLED` 控制（默认 false）。子代理永不注入；工具续传路径不受影响。详见 `docs/spike-full-context-injection.md` 与 `openspec/changes/full-context-injection-on-cache-miss/`
 
 ## COMMANDS
 
@@ -83,7 +84,7 @@ pnpm install          # 安装依赖
 pnpm run build        # 生成 version.ts + tsc 编译
 pnpm run dev          # ts-node 直接运行（开发用）
 pnpm start            # 运行编译后代码
-pnpm test             # 运行 3 个测试文件（手动串联）
+pnpm test             # 运行 4 个测试文件（手动串联）
 pnpm run lint         # ESLint 检查
 pnpm run format       # Prettier 格式化
 ```

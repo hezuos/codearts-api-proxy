@@ -25,6 +25,29 @@ export interface AppConfig {
   isInnerVersion: boolean;
   /** Model list cache TTL in seconds (default: 300 = 5 minutes) */
   modelCacheTtl: number;
+  /**
+   * Whether full-context injection is enabled on cache miss (default: false).
+   * When enabled, the proxy folds the complete client message history into a
+   * single text message and injects it upstream instead of forwarding only the
+   * last user message. See docs/spike-full-context-injection.md for the spike
+   * validation and openspec/changes/full-context-injection-on-cache-miss/design.md
+   * for the design (D1 trigger conditions, D2 fold format, D3 truncation).
+   */
+  fullContextInjectionEnabled: boolean;
+  /**
+   * Maximum character budget for the folded full-context injection text (default: 8000).
+   * Conservative default aligns with the smallest observed upstream context window
+   * (openpangu-2.0-flash ~9K tokens). Override per model via
+   * FULL_CONTEXT_MAX_CHARS_BY_MODEL JSON env var, e.g.
+   * `{"GLM-5.2":500000,"openpangu-2.0-pro":180000}`.
+   * See docs/spike-full-context-injection.md §3 for measured per-model limits.
+   */
+  fullContextMaxChars: number;
+  /**
+   * Per-model overrides for fullContextMaxChars (JSON map of model_id → char budget).
+   * Empty object = use fullContextMaxChars for all models.
+   */
+  fullContextMaxCharsByModel: Record<string, number>;
 }
 
 function requireEnv(name: string, fallback?: string, hint?: string): string {
@@ -72,7 +95,34 @@ export const config: AppConfig = {
   huaweiAgentId:
     process.env.HUAWEI_AGENT_ID ?? "", // empty = derive from isInnerVersion
   modelCacheTtl: Number(process.env.MODEL_CACHE_TTL ?? 300),
+  fullContextInjectionEnabled:
+    (process.env.FULL_CONTEXT_INJECTION_ENABLED ?? "false") === "true",
+  fullContextMaxChars: Number(process.env.FULL_CONTEXT_MAX_CHARS ?? 8000),
+  fullContextMaxCharsByModel: parseMaxCharsByModel(
+    process.env.FULL_CONTEXT_MAX_CHARS_BY_MODEL ?? "",
+  ),
 };
+
+/**
+ * Parse the FULL_CONTEXT_MAX_CHARS_BY_MODEL JSON env var into a model_id → char budget map.
+ * Returns empty object on missing/invalid input (falls back to fullContextMaxChars for all models).
+ */
+function parseMaxCharsByModel(raw: string): Record<string, number> {
+  if (!raw.trim()) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+    const result: Record<string, number> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+        result[key] = Math.floor(value);
+      }
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
 
 /** Whether the process is running in production mode. */
 export const isProduction = config.nodeEnv === "production";

@@ -11,7 +11,14 @@ import type { StoredHuaweiSession } from "../../auth/huawei/session-store";
 import { UpstreamTimeoutError } from "../../utils/errors";
 import { logger } from "../../utils/logger";
 import type { OpenAIChatCompletionRequest, OpenAIChatMessage } from "../../types/openai";
-import { extractUserMessage, extractToolResults, resolveTools, normalizeMessageContent } from "./chat-translate";
+import {
+  extractUserMessage,
+  extractToolResults,
+  resolveTools,
+  normalizeMessageContent,
+  foldFullConversation,
+  resolveFullContextMaxChars,
+} from "./chat-translate";
 
 // ---------------------------------------------------------------------------
 // Model mapping
@@ -198,24 +205,59 @@ export function buildRequestBody(
   // 对于非内置工具，把 tool result 内容合并到用户消息中
   // CodeArts 无法处理非内置工具的 tool_result，直接以文本形式发送
   let messagesBody: unknown[];
+  // Injection marker for logging (task 3.3); set when full-context injection fires
+  let fullContextInjected = false;
+  let fullContextChars = 0;
   if (isToolContinuation) {
     messagesBody = [];
   } else {
-    const userMsg = extractUserMessage(request.messages);
-    const lastMsg = request.messages[request.messages.length - 1];
-    // 如果最后一条是 tool 消息（非内置工具的 result），追加到用户消息中
-    if (lastMsg?.role === "tool" && lastMsg.content) {
-      const toolContent = normalizeMessageContent(lastMsg.content);
-      if (toolContent) {
-        const combined = userMsg
-          ? `${userMsg}\n\n[工具执行结果]\n${toolContent}`
-          : `[工具执行结果]\n${toolContent}`;
-        messagesBody = [{ type: "text", content: combined }];
+    // Full-context injection (design D1/D6): first sub-branch inside !isToolContinuation.
+    // Trigger = NOT(caller-provided parent_message_id)
+    //        AND NOT(tracked lastResponseMessageId for this chat_id)
+    //        AND NOT(sub-agent request)
+    //        AND messages.length > 1 (more than the current turn)
+    // When triggered and flag enabled, fold the full history into a single text
+    // message and SKIP the tool-content merge logic below (D6 — fold already
+    // textualizes tool messages). Empty fold result falls back to extractUserMessage.
+    const callerProvidedParent = !!request.codearts?.parent_message_id;
+    const trackedParent = !!getLastResponseMessageId(chatId);
+    const isSubAgentRequest = !!subAgent;
+    const shouldInject =
+      config.fullContextInjectionEnabled &&
+      !callerProvidedParent &&
+      !trackedParent &&
+      !isSubAgentRequest &&
+      request.messages.length > 1;
+
+    if (shouldInject) {
+      const maxChars = resolveFullContextMaxChars(modelId);
+      const folded = foldFullConversation(request.messages, maxChars);
+      if (folded) {
+        messagesBody = [{ type: "text", content: folded }];
+        fullContextInjected = true;
+        fullContextChars = folded.length;
       } else {
-        messagesBody = [{ type: "text", content: userMsg || "[工具执行结果为空]" }];
+        // D3 boundary 4: empty fold → fall back to existing extractUserMessage path
+        const userMsg = extractUserMessage(request.messages);
+        messagesBody = [{ type: "text", content: userMsg }];
       }
     } else {
-      messagesBody = [{ type: "text", content: userMsg }];
+      const userMsg = extractUserMessage(request.messages);
+      const lastMsg = request.messages[request.messages.length - 1];
+      // 如果最后一条是 tool 消息（非内置工具的 result），追加到用户消息中
+      if (lastMsg?.role === "tool" && lastMsg.content) {
+        const toolContent = normalizeMessageContent(lastMsg.content);
+        if (toolContent) {
+          const combined = userMsg
+            ? `${userMsg}\n\n[工具执行结果]\n${toolContent}`
+            : `[工具执行结果]\n${toolContent}`;
+          messagesBody = [{ type: "text", content: combined }];
+        } else {
+          messagesBody = [{ type: "text", content: userMsg || "[工具执行结果为空]" }];
+        }
+      } else {
+        messagesBody = [{ type: "text", content: userMsg }];
+      }
     }
   }
 
@@ -233,6 +275,17 @@ export function buildRequestBody(
     is_delta_response: true,
     model_id: modelId,
   };
+
+  // Injection marker log (task 3.3) — for gray-rollout observability
+  if (fullContextInjected) {
+    logger.info("[proxy→codearts] REQUEST full-context injection", {
+      chat_id: chatId,
+      fullContextInjected: true,
+      foldedChars: fullContextChars,
+      messagesCount: request.messages.length,
+      model_id: modelId,
+    });
+  }
 
   return { body, json: JSON.stringify(body) };
 }
