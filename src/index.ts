@@ -1,3 +1,5 @@
+// 统一 env 加载入口（副作用模块）：必须最先加载，保证 .env 注入早于任何模块级读 env
+import "./env";
 import express from "express";
 import fs from "fs";
 import cookieParser from "cookie-parser";

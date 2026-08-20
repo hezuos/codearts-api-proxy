@@ -1,3 +1,6 @@
+// 统一 env 加载入口（副作用模块）：在读取任何环境变量之前注入 .env，详见 src/env.ts
+import "./env";
+
 export interface AppConfig {
   port: number;
   callbackPort: number;

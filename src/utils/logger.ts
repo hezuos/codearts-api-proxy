@@ -9,6 +9,9 @@
 import fs from "fs";
 import path from "path";
 
+// 统一 env 加载入口（副作用模块）：保证 .env 在任何模块级读 env 之前已注入
+import "../env";
+
 type LogLevel = "debug" | "info" | "warn" | "error";
 const LOG_LEVELS: Record<LogLevel, number> = {
   debug: 0,

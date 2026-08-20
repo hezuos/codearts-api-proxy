@@ -108,6 +108,20 @@ pnpm build && pnpm start
 
 完整变量列表见 `src/config.ts`。
 
+### .env 文件支持
+
+服务启动时会自动读取项目根目录的 `.env` 文件并注入环境变量（若存在）。
+
+- 解析规则：支持 `KEY=VALUE`、`export KEY=VALUE`、单/双引号包裹的值；`#` 开头的行为注释；不覆盖进程内已存在的环境变量。
+- 可通过 `ENV_FILE` 环境变量指定 `.env` 的替代路径。
+- 示例见 `.env.example`；`.env` 已被 `.gitignore` 排除，避免提交敏感值。
+
+```bash
+cp .env.example .env
+# 编辑 .env 后直接启动即可生效
+pnpm dev
+```
+
 ### 上下文连续性配置
 
 - `CHAIN_DIVERGENCE_REPAIR_ENABLED` 开启后，代理会检查客户端历史与热链是否分叉；尾部链分叉只补发缺失段，中段损伤或无法确认时全量重置。
@@ -151,7 +165,8 @@ LOG_LEVEL=debug pnpm start
 docker run -e LOG_LEVEL=debug ...
 
 # 方法三：.env 文件
-echo "LOG_LEVEL=debug" >> .env
+# 在项目根目录 .env 中写入（见上方「.env 文件支持」）
+LOG_LEVEL=debug
 ```
 
 > **注意**：即使设置 `LOG_LEVEL=debug`，在 production 环境下日志仍会输出为 JSON 格式。如需人类可读格式，需同时设置 `NODE_ENV=development`（但这会影响其他行为，不推荐）。
