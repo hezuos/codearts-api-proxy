@@ -15,6 +15,7 @@ import {
   foldFullConversation,
   foldMissingSegment,
   normalizeForChain,
+  truncateFolded,
 } from "./chat-translate";
 
 // ---------------------------------------------------------------------------
@@ -333,6 +334,40 @@ function testDivergenceClassification(): void {
   assert.equal(stale.divergence, "duplicate/stale");
 }
 
+function testFoldRespectsHardMaxChars(): void {
+  // middle-damage 全量折叠可能因超大 system/单条消息超出 FULL_CONTEXT_MAX_CHARS。
+  // 输出除末尾 continuation 指令外必须受 maxChars 约束（允许 ~40 字符固定开销）。
+  const oversized = [
+    { role: "system", content: "S".repeat(30000), refusal: null } as OpenAIChatMessage,
+    user("first"),
+    assistant("reply"),
+    user("current"),
+  ];
+  const folded = foldFullConversation(oversized, 8000);
+  assert.ok(folded.length <= 8000 + 40, `folded length ${folded.length} must stay near 8000 (+continuation overhead)`);
+
+  // 单条超长 tool result 也受同一上限约束。
+  const longTool = [
+    user("run"),
+    { role: "assistant", content: null, refusal: null, tool_calls: [{ id: "c1", type: "function", function: { name: "bash", arguments: "{}" } }] } as OpenAIChatMessage,
+    { role: "tool", content: "X".repeat(200000), refusal: null, tool_call_id: "c1", name: "bash" } as OpenAIChatMessage,
+    user("current"),
+  ];
+  const longFolded = foldFullConversation(longTool, 8000);
+  assert.ok(longFolded.length <= 8000 + 40, `long tool fold length ${longFolded.length} must stay bounded`);
+}
+
+function testTruncateFoldedStrictUpperBound(): void {
+  // 直接验证 truncateFolded 的严格上限：即使只有 system+user+assistant 且都超长，输出也应贴近 maxChars。
+  const segments = [
+    "[system]\n" + "S".repeat(50000),
+    "[user #1]\n" + "U".repeat(50000),
+    "[assistant]\n" + "A".repeat(50000),
+  ];
+  const truncated = truncateFolded(segments, 8000);
+  assert.ok(truncated.length <= 8000 + 40, `truncateFolded length ${truncated.length} must stay near 8000 (+continuation overhead)`);
+}
+
 // ---------------------------------------------------------------------------
 // Run
 // ---------------------------------------------------------------------------
@@ -360,5 +395,7 @@ testMissingSegmentUsesSuffixStart();
 testMissingSegmentTrimsMiddle();
 testCanonicalChainHashIncludesMetadata();
 testDivergenceClassification();
+testFoldRespectsHardMaxChars();
+testTruncateFoldedStrictUpperBound();
 
 console.log("All foldFullConversation core format tests passed.");

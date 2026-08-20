@@ -156,15 +156,19 @@ function testUntraceableToolResetsParent(): void {
   assert.equal(result.body.parent_message_id, "");
 }
 
-function testDuplicateRequestIsRejected(): void {
+function testDuplicateRequestAutoRepairs(): void {
   const chatId = "66666666666666666666666666666666";
   const prefix = [user("old"), assistant("old answer")];
   seedChain(chatId, prefix, assistant("new answer"));
 
-  assert.throws(
-    () => chatRequest.buildRequestBody(request(chatId, prefix), session),
-    /重复或陈旧/,
-  );
+  // duplicate/stale 不应抛错导致用户无法继续对话（issue: 用户重试后永久卡死）。
+  // 应自动重置链并全量折叠重发当前历史。
+  const result = chatRequest.buildRequestBody(request(chatId, prefix), session);
+  assert.ok(result, "buildRequestBody should not throw on duplicate/stale");
+  assert.equal(result.divergence, "duplicate/stale");
+  assert.equal(result.body.parent_message_id, "");
+  const text = bodyText(result.body);
+  assert.ok(text.includes("old"), "自动修复后应折叠当前历史（含旧 user）");
 }
 
 testNormalContinuation();
@@ -172,6 +176,6 @@ testTailDivergenceSkipsParentReply();
 testTailDivergenceStartsAtBoundaryWhenReplyMissing();
 testMiddleDamageResetsParent();
 testUntraceableToolResetsParent();
-testDuplicateRequestIsRejected();
+testDuplicateRequestAutoRepairs();
 
 console.log("All warm-switch context repair request tests passed.");

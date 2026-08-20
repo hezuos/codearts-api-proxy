@@ -306,15 +306,16 @@ export function buildRequestBody(
     const classified = classifyDivergence(request.messages, chainState);
     divergence = classified.divergence;
     suffixStart = classified.suffixStart;
-    if (divergence === "middle-damage") {
+    if (divergence === "middle-damage" || divergence === "duplicate/stale") {
+      // 中段损伤或重复/陈旧请求均无法继续信任旧链：清空 parent，
+      // 走全量折叠重置让对话能继续（duplicate/stale 不再抛错，
+      // 避免客户端重试时永久卡死）。
       parentMessageId = "";
-    } else if (divergence === "duplicate/stale") {
-      throw new Error("检测到重复或陈旧的对话请求，请重试最新请求");
     }
   }
   if (isToolContinuation) {
     messagesBody = [];
-  } else if (divergence === "middle-damage" || options.forceResync) {
+  } else if (divergence === "middle-damage" || divergence === "duplicate/stale" || options.forceResync) {
     const folded = foldFullConversation(
       request.messages,
       resolveFullContextMaxChars(modelId),

@@ -455,7 +455,7 @@ export function foldFullConversation(
  *   2. From the newest segments backward, greedily accumulate until char budget is hit
  *   3. If system + first user alone exceed budget, truncate first user (boundary 1)
  */
-function truncateFolded(segments: string[], maxChars: number): string {
+export function truncateFolded(segments: string[], maxChars: number): string {
   // Identify anchor: leading [system] and/or [user #1] segments
   const anchorIndices: number[] = [];
   for (let i = 0; i < segments.length; i++) {
@@ -470,7 +470,7 @@ function truncateFolded(segments: string[], maxChars: number): string {
 
   // Budget for the continuation directive + separator overhead
   const overhead = FOLD_CONTINUATION_DIRECTIVE.length + 4; // "\n\n" separators
-  let budget = maxChars - overhead;
+  let budget = Math.max(0, maxChars - overhead);
 
   // Greedy newest: accumulate from the end of restSegs backward
   const keptRest: string[] = [];
@@ -482,7 +482,9 @@ function truncateFolded(segments: string[], maxChars: number): string {
     keptRest.unshift(seg);
   }
 
-  // Anchor budget: whatever remains
+  // Anchor budget: whatever remains. Every anchor, including system,
+  // must obey the budget or be truncated — otherwise an oversized
+  // system prompt can push the folded text far past FULL_CONTEXT_MAX_CHARS.
   let anchorBudget = budget;
   const keptAnchor: string[] = [];
   for (const seg of anchorSegs) {
@@ -491,22 +493,16 @@ function truncateFolded(segments: string[], maxChars: number): string {
       anchorBudget -= cost;
       keptAnchor.push(seg);
     } else {
-      // D3 boundary 1: system always retained; first user truncated if needed
-      if (seg.startsWith("[system]")) {
-        keptAnchor.push(seg); // system retained even if over budget
-      } else if (seg.startsWith("[user #1]")) {
-        // Truncate first user to remaining budget
-        const remaining = anchorBudget - (USER_TRUNCATE_MARKER.length + 2);
-        if (remaining > 0) {
-          const lines = seg.split("\n");
-          const header = lines[0]; // "[user #1]"
-          const userContent = lines.slice(1).join("\n");
-          keptAnchor.push(`${header}\n${userContent.slice(0, remaining)}\n${USER_TRUNCATE_MARKER}`);
-        } else {
-          keptAnchor.push(`${seg.split("\n")[0]}\n${USER_TRUNCATE_MARKER}`);
-        }
-        anchorBudget = -1; // no more budget
+      const remaining = anchorBudget - (USER_TRUNCATE_MARKER.length + 2);
+      const lines = seg.split("\n");
+      const header = lines[0]; // "[system]" or "[user #1]"
+      const rest = lines.slice(1).join("\n");
+      if (remaining > 0) {
+        keptAnchor.push(`${header}\n${rest.slice(0, remaining)}\n${USER_TRUNCATE_MARKER}`);
+      } else {
+        keptAnchor.push(`${header}\n${USER_TRUNCATE_MARKER}`);
       }
+      anchorBudget = -1; // no more budget — later anchors get marker only
     }
   }
 
