@@ -2,7 +2,7 @@
  * Huawei CodeArts Agent chat upstream — non-streaming handler + public re-exports.
  */
 
-import { randomUUID } from "crypto";
+import { randomUUID, createHash } from "crypto";
 import { config } from "../../config";
 import { getCredentials } from "../../auth/huawei/credentials";
 import type { StoredHuaweiSession } from "../../auth/huawei/session-store";
@@ -13,7 +13,7 @@ import type {
   OpenAIChatCompletionRequest,
   OpenAIChatMessage,
 } from "../../types/openai";
-import { cleanToolCalls } from "./chat-translate";
+import { cleanToolCalls, computeChainForMessages, normalizeForChain } from "./chat-translate";
 import { parseSSE } from "./chat-protocol";
 import {
   buildRequestBody,
@@ -22,6 +22,7 @@ import {
   getLastResponseMessageId,
   setLastResponseMessageId,
   getChatIdRole,
+  setChainState,
 } from "./chat-request";
 
 // Re-export public API
@@ -37,11 +38,12 @@ export async function sendHuaweiChatRequest(
   session: StoredHuaweiSession,
   traceId: string,
   signal?: AbortSignal,
+  options: { forceResync?: boolean } = {},
 ): Promise<OpenAIChatCompletion> {
   const log = logger.withTrace(traceId);
   const credentials = getCredentials(session);
   const chatUrl = `${config.huaweiChatHost}/v1/chat/chat`;
-  const { body: requestBody, json: body } = buildRequestBody(request, session);
+  const { body: requestBody, json: body, divergence } = buildRequestBody(request, session, options);
   const headers = buildChatHeaders(chatUrl, body, credentials, traceId);
 
   // ── Outgoing request log ──────────────────────────────────────────────────
@@ -82,6 +84,10 @@ export async function sendHuaweiChatRequest(
     log.error("CodeArts error body", { status, body: errorBody.slice(0, 500) });
     if (status === 401 || status === 403)
       throw new UpstreamAuthError(status, errorBody);
+    if (divergence === "tail-divergence" && !options.forceResync) {
+      log.warn("[proxy→codearts] tail-divergence repair HTTP failure, retrying full reset", { status });
+      return sendHuaweiChatRequest(request, session, traceId, signal, { forceResync: true });
+    }
     throw new Error(
       `CodeArts chat returned HTTP ${status}: ${errorBody.substring(0, 500)}`,
     );
@@ -114,6 +120,12 @@ export async function sendHuaweiChatRequest(
         continue;
       }
       log.error("SSE error from CodeArts", { code: event.error_code, msg: event.error_msg ?? "unknown" });
+      if (divergence === "tail-divergence" && !options.forceResync) {
+        log.warn("[proxy→codearts] tail-divergence repair SSE failure, retrying full reset", {
+          code: event.error_code,
+        });
+        return sendHuaweiChatRequest(request, session, traceId, signal, { forceResync: true });
+      }
       throw new Error(
         `CodeArts error ${event.error_code}: ${event.error_msg ?? "unknown"}`,
       );
@@ -145,6 +157,19 @@ export async function sendHuaweiChatRequest(
       const prevValue = getLastResponseMessageId(cid);
       const role = getChatIdRole(cid);
       setLastResponseMessageId(cid, responseMetadata.response_message_id);
+      const assistantMessage: OpenAIChatMessage = {
+        role: "assistant",
+        content: fullContent,
+        refusal: null,
+        reasoning_content: fullReasoning || undefined,
+        tool_calls: toolCalls,
+      };
+      const chain = computeChainForMessages(request.messages);
+      setChainState(cid, {
+        prefixChain: chain.hash,
+        prefixLen: chain.length,
+        lastReplyHash: createHash("sha256").update(normalizeForChain(assistantMessage)).digest("hex"),
+      });
       log.info("lastResponseMessageId updated", {
         chat_id: cid,
         response_message_id: responseMetadata.response_message_id,

@@ -2,7 +2,7 @@
  * Streaming chat handler — SSE passthrough with OpenAI chunk wrapping.
  */
 
-import { randomUUID } from "crypto";
+import { randomUUID, createHash } from "crypto";
 import type { Response } from "express";
 import { config } from "../../config";
 import { getCredentials } from "../../auth/huawei/credentials";
@@ -13,8 +13,9 @@ import type {
   OpenAIChatCompletionRequest,
   OpenAIChatCompletionChunk,
   OpenAIChatCompletionDelta,
+  OpenAIChatMessage,
 } from "../../types/openai";
-import { cleanToolCallDeltas } from "./chat-translate";
+import { cleanToolCallDeltas, computeChainForMessages, normalizeForChain } from "./chat-translate";
 import { buildRecoveryChunks, buildSyntheticRecoveryToolCalls } from "./chat-recovery";
 import { parseSSE } from "./chat-protocol";
 import {
@@ -24,6 +25,7 @@ import {
   getLastResponseMessageId,
   setLastResponseMessageId,
   getChatIdRole,
+  setChainState,
 } from "./chat-request";
 
 // ---------------------------------------------------------------------------
@@ -57,7 +59,7 @@ export async function streamHuaweiChatToResponse(
   const chatUrl = `${config.huaweiChatHost}/v1/chat/chat`;
 
   // ── Build initial request ────────────────────────────────────────────────
-  const { body: requestBody, json: body } = buildRequestBody(request, session);
+  const { body: requestBody, json: body, divergence: initialDivergence } = buildRequestBody(request, session);
   const headers = buildChatHeaders(chatUrl, body, credentials, traceId);
 
   // ── Outgoing request log ──────────────────────────────────────────────────
@@ -138,10 +140,13 @@ export async function streamHuaweiChatToResponse(
   let sseTextChars = 0;
   let sseToolCallCount = 0;
   let sseHadError = false;
+  let responseContent = "";
+  let responseToolCalls: OpenAIChatMessage["tool_calls"] = [];
   const sseDebugLog: Array<{ event: number; delta?: string; error?: string; meta?: string }> = [];
 
   // ── SSE stream processing (retriable on rate-limit errors) ────────────────
   let retryCount = 0;
+  let resyncRetried = false;
   let currentStream = stream;
 
   while (true) {
@@ -233,6 +238,31 @@ export async function streamHuaweiChatToResponse(
           break; // Exit the for-await loop to start consuming the new stream
         }
 
+        // ── Tail-divergence repair fallback ───────────────────────────────
+        // The parent chain may be unavailable or incompatible with the appended tail.
+        if (initialDivergence === "tail-divergence" && !resyncRetried) {
+          resyncRetried = true;
+          log.warn("[proxy→codearts] tail-divergence repair failed, retrying full reset", {
+            code: event.error_code,
+          });
+          const resyncBody = buildRequestBody(request, session, { forceResync: true });
+          const resyncHeaders = buildChatHeaders(chatUrl, resyncBody.json, credentials, traceId);
+          try {
+            const resyncResult = await httpsPost(chatUrl, resyncHeaders, resyncBody.json, signal);
+            if (resyncResult.status === 200) {
+              currentStream = resyncResult.stream;
+              shouldRetry = true;
+              sseHadError = false;
+              break;
+            }
+            log.error("[proxy→codearts] full-reset fallback HTTP error", { status: resyncResult.status });
+          } catch (resyncError) {
+            log.error("[proxy→codearts] full-reset fallback failed", {
+              error: resyncError instanceof Error ? resyncError.message : String(resyncError),
+            });
+          }
+        }
+
         // ── Recovery path (non-retryable or retry exhausted) ──────────────
         const recoveryToolCalls = buildSyntheticRecoveryToolCalls(request);
         if (recoveryToolCalls.length > 0) {
@@ -302,6 +332,7 @@ export async function streamHuaweiChatToResponse(
         }
         if (event.delta.content) {
           sseTextChars += event.delta.content.length;
+          responseContent += event.delta.content;
         }
 
         // Build delta content
@@ -311,6 +342,7 @@ export async function streamHuaweiChatToResponse(
           delta.reasoning_content = event.delta.reasoning_content;
         const toolCallDeltas = cleanToolCallDeltas(event.delta.tool_calls);
         if (toolCallDeltas) {
+          responseToolCalls = [...(responseToolCalls ?? []), ...(toolCallDeltas as OpenAIChatMessage["tool_calls"] ?? [])];
           delta.tool_calls = toolCallDeltas;
           log.debug("[proxy→client] tool_call delta", {
             deltas: toolCallDeltas.map((d) => ({
@@ -367,6 +399,18 @@ export async function streamHuaweiChatToResponse(
       const prevValue = getLastResponseMessageId(cid);
       const role = getChatIdRole(cid);
       setLastResponseMessageId(cid, responseMetadata.response_message_id);
+      const assistantMessage: OpenAIChatMessage = {
+        role: "assistant",
+        content: responseContent,
+        refusal: null,
+        tool_calls: responseToolCalls.length > 0 ? responseToolCalls : undefined,
+      };
+      const chain = computeChainForMessages(request.messages);
+      setChainState(cid, {
+        prefixChain: chain.hash,
+        prefixLen: chain.length,
+        lastReplyHash: createHash("sha256").update(normalizeForChain(assistantMessage)).digest("hex"),
+      });
       log.info("lastResponseMessageId updated", {
         chat_id: cid,
         response_message_id: responseMetadata.response_message_id,

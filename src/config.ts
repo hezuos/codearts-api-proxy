@@ -48,6 +48,9 @@ export interface AppConfig {
    * Empty object = use fullContextMaxChars for all models.
    */
   fullContextMaxCharsByModel: Record<string, number>;
+  /** Whether warm-chain divergence repair is enabled. */
+  chainDivergenceRepairEnabled: boolean;
+  missingContextHint: string;
 }
 
 function requireEnv(name: string, fallback?: string, hint?: string): string {
@@ -101,6 +104,10 @@ export const config: AppConfig = {
   fullContextMaxCharsByModel: parseMaxCharsByModel(
     process.env.FULL_CONTEXT_MAX_CHARS_BY_MODEL ?? "",
   ),
+  chainDivergenceRepairEnabled:
+    (process.env.CHAIN_DIVERGENCE_REPAIR_ENABLED ?? "false") === "true",
+  missingContextHint:
+    process.env.MISSING_CONTEXT_HINT ?? "[以下为补传的历史对话上下文，仅作参考，非用户新请求]",
 };
 
 /**

@@ -6,9 +6,16 @@
  *         and truncation (oversized threshold trimming).
  * Boundary/malformed cases live in task 4.1 — do not duplicate here.
  */
+import { createHash } from "crypto";
 import assert from "assert";
 import type { OpenAIChatMessage } from "../../types/openai";
-import { foldFullConversation } from "./chat-translate";
+import { classifyDivergence, type ChainState } from "./chat-request";
+import {
+  computeChainForMessages,
+  foldFullConversation,
+  foldMissingSegment,
+  normalizeForChain,
+} from "./chat-translate";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -270,8 +277,60 @@ function testSystemPlusFirstUserExceedsThresholdTruncatesUser(): void {
   // System always retained
   assert.ok(folded.includes("[system]"), "system retained even when over threshold");
   // User truncation marker may appear (boundary 1)
-  // Latest turn should be retained (greedy newest)
+  // Latest turn should be retained
   assert.ok(folded.includes("latest"), "latest turn retained");
+}
+
+function testMissingSegmentUsesSuffixStart(): void {
+  const messages = [user("old"), assistant("known"), user("external"), assistant("external reply"), user("current")];
+  const folded = foldMissingSegment(messages, 2, 1000);
+  assert.ok(folded.includes("external"));
+  assert.ok(folded.includes("external reply"));
+  assert.ok(folded.includes("[当前用户请求]\ncurrent"));
+}
+
+function testMissingSegmentTrimsMiddle(): void {
+  const messages = [user("external-1"), assistant("x".repeat(500)), user("external-2"), assistant("y".repeat(500)), user("current")];
+  const folded = foldMissingSegment(messages, 0, 300);
+  assert.ok(folded.includes("[当前用户请求]"));
+  assert.ok(folded.length <= 300 || folded.includes("current"));
+}
+
+function testCanonicalChainHashIncludesMetadata(): void {
+  const first: OpenAIChatMessage = {
+    ...assistantWithToolCall("", "Read", "{}"),
+    tool_calls: [
+      { id: "b", type: "function", function: { name: "B", arguments: "{}" } },
+      { id: "a", type: "function", function: { name: "A", arguments: "{}" } },
+    ],
+  };
+  const reordered = { ...first, tool_calls: [...(first.tool_calls ?? [])].reverse() };
+  assert.equal(normalizeForChain(first), normalizeForChain(reordered));
+  assert.notEqual(
+    normalizeForChain(first),
+    normalizeForChain({ ...first, tool_call_id: "different" }),
+  );
+  const prefix = computeChainForMessages([user("a"), assistant("b")]);
+  const full = computeChainForMessages([user("a"), assistant("b"), user("c")]);
+  assert.notEqual(prefix.hash, full.hash);
+}
+
+function testDivergenceClassification(): void {
+  const prefixMessages = [user("old"), assistant("reply")];
+  const prefix = computeChainForMessages(prefixMessages);
+  const hash = (message: OpenAIChatMessage): string =>
+    createHash("sha256").update(normalizeForChain(message)).digest("hex");
+  const state: ChainState = { prefixChain: prefix.hash, prefixLen: prefix.length, lastReplyHash: hash(assistant("new reply")) };
+  const normal = classifyDivergence([...prefixMessages, assistant("new reply"), user("next")], state);
+  assert.equal(normal.divergence, "normal");
+  assert.equal(normal.suffixStart, 3);
+  const tail = classifyDivergence([...prefixMessages, assistant("new reply"), user("external"), assistant("external reply"), user("next")], state);
+  assert.equal(tail.divergence, "tail-divergence");
+  assert.equal(tail.suffixStart, 3);
+  const middle = classifyDivergence([user("changed"), assistant("reply"), assistant("new reply"), user("next")], state);
+  assert.equal(middle.divergence, "middle-damage");
+  const stale = classifyDivergence(prefixMessages, state);
+  assert.equal(stale.divergence, "duplicate/stale");
 }
 
 // ---------------------------------------------------------------------------
@@ -297,5 +356,9 @@ testSystemPlusSingleUserFoldsNormally();
 testNullContentDoesNotProduceNullString();
 testOversizedSingleToolResultHeadTailTruncated();
 testSystemPlusFirstUserExceedsThresholdTruncatesUser();
+testMissingSegmentUsesSuffixStart();
+testMissingSegmentTrimsMiddle();
+testCanonicalChainHashIncludesMetadata();
+testDivergenceClassification();
 
 console.log("All foldFullConversation core format tests passed.");

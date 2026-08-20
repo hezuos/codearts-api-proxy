@@ -98,10 +98,28 @@ pnpm build && pnpm start
 | `RATE_LIMIT_MODELS_MAX`     | `120`                                                | 每窗口每 Key 最大 models 请求数            |
 | `UPSTREAM_TIMEOUT_MS`       | `120000`                                             | 上游 HTTPS 请求超时（毫秒）                |
 | `IS_MASTER_NODE`            | `true`                                               | 是否为刷新任务主节点（多实例部署时使用）    |
-| `ADMIN_PASSWORD`            | 无                                                   | Admin 密码（优先于文件存储的密码）         |
+| `FULL_CONTEXT_INJECTION_ENABLED` | `false` | 冷启动全量注入开关：Map 未命中时折叠完整历史注入而非只发最后一条 |
+| `FULL_CONTEXT_MAX_CHARS` | `8000` | 折叠文本最大字符数（保守对齐 openpangu-2.0-flash ~9K token 窗口） |
+| `FULL_CONTEXT_MAX_CHARS_BY_MODEL` | `{}` | 按模型覆盖折叠阈值，JSON 格式，如 `{"GLM-5.2":500000,"openpangu-2.0-pro":180000}` |
+| `CHAIN_DIVERGENCE_REPAIR_ENABLED` | `false` | 热链分叉检测与修复开关：切换 provider 后检测上下文分叉，尾部补发/中段重置 |
+| `MISSING_CONTEXT_HINT` | 中文默认模板 | 缺失段补发的辅助提示词模板：标记补传历史仅作参考与当前用户请求 |
+| `ADMIN_PASSWORD`             | 无                                                   | Admin 密码（优先于文件存储的密码）         |
 | `LOG_LEVEL`                 | `debug`（开发）/ `info`（生产）                      | 日志级别                                   |
 
 完整变量列表见 `src/config.ts`。
+
+### 上下文连续性配置
+
+- `CHAIN_DIVERGENCE_REPAIR_ENABLED` 开启后，代理会检查客户端历史与热链是否分叉；尾部链分叉只补发缺失段，中段损伤或无法确认时全量重置。
+- `FULL_CONTEXT_INJECTION_ENABLED` 只控制冷启动（Map 未命中）全量注入。热链修复中的中段重置和补发失败回退不受该开关控制。
+- `FULL_CONTEXT_MAX_CHARS_BY_MODEL` 优先于 `FULL_CONTEXT_MAX_CHARS`，用于按模型设置折叠文本上限。
+- `MISSING_CONTEXT_HINT` 仅影响缺失段补发文本的提示语，不改变消息判定逻辑。
+
+```bash
+FULL_CONTEXT_INJECTION_ENABLED=true
+CHAIN_DIVERGENCE_REPAIR_ENABLED=true
+FULL_CONTEXT_MAX_CHARS_BY_MODEL='{"GLM-5.2":500000,"openpangu-2.0-pro":180000}'
+```
 
 ## 日志配置
 

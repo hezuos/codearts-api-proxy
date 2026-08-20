@@ -17,7 +17,10 @@ import {
   resolveTools,
   normalizeMessageContent,
   foldFullConversation,
+  foldMissingSegment,
   resolveFullContextMaxChars,
+  computeChainForMessages,
+  normalizeForChain,
 } from "./chat-translate";
 
 // ---------------------------------------------------------------------------
@@ -49,6 +52,16 @@ const CLEANUP_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 const lastResponseMessageId = new Map<string, string>();
 const lastResponseMessageTs = new Map<string, number>();
 
+type Divergence = "normal" | "tail-divergence" | "middle-damage" | "duplicate/stale";
+
+export interface ChainState {
+  prefixChain: string;
+  prefixLen: number;
+  lastReplyHash: string;
+}
+
+const chainStates = new Map<string, ChainState>();
+
 const chatIdRole = new Map<string, "main" | "sub">();
 
 // Periodic TTL cleanup
@@ -58,6 +71,7 @@ const cleanupTimer = setInterval(() => {
     if (now - ts > TTL_MS) {
       lastResponseMessageId.delete(key);
       lastResponseMessageTs.delete(key);
+      chainStates.delete(key);
       chatIdRole.delete(key);
     }
   }
@@ -71,6 +85,72 @@ export function getLastResponseMessageId(chatId: string): string | undefined {
 export function setLastResponseMessageId(chatId: string, messageId: string): void {
   lastResponseMessageId.set(chatId, messageId);
   lastResponseMessageTs.set(chatId, Date.now());
+}
+
+export function getChainState(chatId: string): ChainState | undefined {
+  return chainStates.get(chatId);
+}
+
+export function setChainState(chatId: string, state: ChainState): void {
+  chainStates.set(chatId, state);
+  lastResponseMessageTs.set(chatId, Date.now());
+}
+
+export function hashMessage(message: OpenAIChatMessage): string {
+  return createHash("sha256").update(normalizeForChain(message)).digest("hex");
+}
+
+export function classifyDivergence(
+  messages: OpenAIChatMessage[],
+  state: ChainState,
+): { divergence: Divergence; suffixStart?: number } {
+  const messageCount = messages.length;
+  if (messageCount < state.prefixLen) {
+    return { divergence: "middle-damage" };
+  }
+  const prefix = computeChainForMessages(messages, state.prefixLen);
+  if (prefix.hash !== state.prefixChain) {
+    return { divergence: "middle-damage" };
+  }
+  if (messageCount === state.prefixLen) {
+    return { divergence: "duplicate/stale" };
+  }
+
+  const boundary = messages[state.prefixLen];
+  const boundaryIsLastReply =
+    !!boundary && hashMessage(boundary) === state.lastReplyHash;
+  const suffixStart = boundaryIsLastReply ? state.prefixLen + 1 : state.prefixLen;
+  const suffix = messages.slice(state.prefixLen);
+  let validSuffix = boundaryIsLastReply;
+  let explicitTailDivergence = !boundaryIsLastReply;
+  let seenUser = false;
+  let seenAssistant = false;
+  const assistantToolCalls = boundary?.tool_calls ?? [];
+  for (let i = boundaryIsLastReply ? 1 : 0; i < suffix.length; i++) {
+    const message = suffix[i];
+    if (message.role === "tool") {
+      const matched = assistantToolCalls.some((toolCall) => toolCall.id === message.tool_call_id);
+      if (!matched) validSuffix = false;
+    } else if (message.role === "user") {
+      if (seenUser || i !== suffix.length - 1) {
+        validSuffix = false;
+        explicitTailDivergence = true;
+      }
+      seenUser = true;
+    } else if (message.role === "assistant") {
+      validSuffix = false;
+      explicitTailDivergence = true;
+      seenAssistant = true;
+    } else {
+      validSuffix = false;
+    }
+  }
+  if (!seenUser) validSuffix = false;
+  if (validSuffix) return { divergence: "normal", suffixStart };
+  if (explicitTailDivergence || seenAssistant) {
+    return { divergence: "tail-divergence", suffixStart };
+  }
+  return { divergence: "middle-damage" };
 }
 
 export function getChatIdRole(chatId: string): "main" | "sub" | undefined {
@@ -159,7 +239,8 @@ function buildTaskParameters(
 export function buildRequestBody(
   request: OpenAIChatCompletionRequest,
   session: StoredHuaweiSession,
-): { body: Record<string, unknown>; json: string } {
+  options: { forceResync?: boolean } = {},
+): { body: Record<string, unknown>; json: string; divergence?: Divergence; suffixStart?: number } {
   const toolResults = extractToolResults(request);
   const isToolContinuation = toolResults.length > 0;
   const subAgent = request.codearts?.sub_agent;
@@ -191,7 +272,7 @@ export function buildRequestBody(
     });
   }
 
-  const parentMessageId =
+  let parentMessageId =
     request.codearts?.parent_message_id ??
     getLastResponseMessageId(chatId) ??
     "";
@@ -205,56 +286,77 @@ export function buildRequestBody(
   // 对于非内置工具，把 tool result 内容合并到用户消息中
   // CodeArts 无法处理非内置工具的 tool_result，直接以文本形式发送
   let messagesBody: unknown[];
-  // Injection marker for logging (task 3.3); set when full-context injection fires
+  let divergence: Divergence | undefined;
+  let suffixStart: number | undefined;
   let fullContextInjected = false;
   let fullContextChars = 0;
+  const chainState = getChainState(chatId);
+  const callerProvidedParent = !!request.codearts?.parent_message_id;
+  const canRepair =
+    config.chainDivergenceRepairEnabled &&
+    !isToolContinuation &&
+    !subAgent &&
+    !callerProvidedParent &&
+    !!chainState;
+
+  if (options.forceResync && !isToolContinuation) {
+    divergence = "middle-damage";
+    parentMessageId = "";
+  } else if (canRepair) {
+    const classified = classifyDivergence(request.messages, chainState);
+    divergence = classified.divergence;
+    suffixStart = classified.suffixStart;
+    if (divergence === "middle-damage") {
+      parentMessageId = "";
+    } else if (divergence === "duplicate/stale") {
+      throw new Error("检测到重复或陈旧的对话请求，请重试最新请求");
+    }
+  }
   if (isToolContinuation) {
     messagesBody = [];
+  } else if (divergence === "middle-damage" || options.forceResync) {
+    const folded = foldFullConversation(
+      request.messages,
+      resolveFullContextMaxChars(modelId),
+    );
+    messagesBody = [{ type: "text", content: folded || extractUserMessage(request.messages) }];
+    fullContextInjected = !!folded;
+    fullContextChars = folded.length;
+  } else if (divergence === "tail-divergence" && suffixStart !== undefined) {
+    const folded = foldMissingSegment(
+      request.messages,
+      suffixStart,
+      resolveFullContextMaxChars(modelId),
+    );
+    messagesBody = [{ type: "text", content: folded || extractUserMessage(request.messages) }];
+    fullContextChars = folded.length;
   } else {
-    // Full-context injection (design D1/D6): first sub-branch inside !isToolContinuation.
-    // Trigger = NOT(caller-provided parent_message_id)
-    //        AND NOT(tracked lastResponseMessageId for this chat_id)
-    //        AND NOT(sub-agent request)
-    //        AND messages.length > 1 (more than the current turn)
-    // When triggered and flag enabled, fold the full history into a single text
-    // message and SKIP the tool-content merge logic below (D6 — fold already
-    // textualizes tool messages). Empty fold result falls back to extractUserMessage.
-    const callerProvidedParent = !!request.codearts?.parent_message_id;
     const trackedParent = !!getLastResponseMessageId(chatId);
-    const isSubAgentRequest = !!subAgent;
     const shouldInject =
       config.fullContextInjectionEnabled &&
       !callerProvidedParent &&
       !trackedParent &&
-      !isSubAgentRequest &&
+      !subAgent &&
       request.messages.length > 1;
 
     if (shouldInject) {
-      const maxChars = resolveFullContextMaxChars(modelId);
-      const folded = foldFullConversation(request.messages, maxChars);
+      const folded = foldFullConversation(request.messages, resolveFullContextMaxChars(modelId));
       if (folded) {
         messagesBody = [{ type: "text", content: folded }];
         fullContextInjected = true;
         fullContextChars = folded.length;
       } else {
-        // D3 boundary 4: empty fold → fall back to existing extractUserMessage path
-        const userMsg = extractUserMessage(request.messages);
-        messagesBody = [{ type: "text", content: userMsg }];
+        messagesBody = [{ type: "text", content: extractUserMessage(request.messages) }];
       }
     } else {
       const userMsg = extractUserMessage(request.messages);
       const lastMsg = request.messages[request.messages.length - 1];
-      // 如果最后一条是 tool 消息（非内置工具的 result），追加到用户消息中
       if (lastMsg?.role === "tool" && lastMsg.content) {
         const toolContent = normalizeMessageContent(lastMsg.content);
-        if (toolContent) {
-          const combined = userMsg
-            ? `${userMsg}\n\n[工具执行结果]\n${toolContent}`
-            : `[工具执行结果]\n${toolContent}`;
-          messagesBody = [{ type: "text", content: combined }];
-        } else {
-          messagesBody = [{ type: "text", content: userMsg || "[工具执行结果为空]" }];
-        }
+        const combined = toolContent
+          ? `${userMsg ? `${userMsg}\\n\\n` : ""}[工具执行结果]\\n${toolContent}`
+          : userMsg || "[工具执行结果为空]";
+        messagesBody = [{ type: "text", content: combined }];
       } else {
         messagesBody = [{ type: "text", content: userMsg }];
       }
@@ -276,18 +378,19 @@ export function buildRequestBody(
     model_id: modelId,
   };
 
-  // Injection marker log (task 3.3) — for gray-rollout observability
-  if (fullContextInjected) {
-    logger.info("[proxy→codearts] REQUEST full-context injection", {
+  if (fullContextInjected || divergence) {
+    logger.info("[proxy→codearts] REQUEST context classification", {
       chat_id: chatId,
-      fullContextInjected: true,
+      divergence: divergence ?? "cold-start",
+      fullContextInjected,
       foldedChars: fullContextChars,
+      suffixStart,
       messagesCount: request.messages.length,
       model_id: modelId,
     });
   }
 
-  return { body, json: JSON.stringify(body) };
+  return { body, json: JSON.stringify(body), divergence, suffixStart };
 }
 
 // ---------------------------------------------------------------------------

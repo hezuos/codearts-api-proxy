@@ -1,3 +1,7 @@
+## 语言约定
+
+- 文档、注释、LLM 输出均使用中文
+
 # PROJECT KNOWLEDGE BASE
 
 **Generated:** 2026-06-19
@@ -75,7 +79,8 @@ src/
 - **模型缓存三级降级**: agent-center API → 文件缓存(1h TTL) → 静态列表
 - **SSE 畸形行容错**: 跳过而非断开整个流
 - **Admin 会话令牌每次重启随机生成**: 防止 cookie 伪造
-- **全量上下文折叠注入（缓存未命中）**: 当无 `parent_message_id` 且内存 Map 未命中时，将完整对话历史折叠为带 role 标记的单条 text 注入上游（`foldFullConversation`），由 `FULL_CONTEXT_INJECTION_ENABLED` 控制（默认 false）。子代理永不注入；工具续传路径不受影响。详见 `docs/spike-full-context-injection.md` 与 `openspec/changes/full-context-injection-on-cache-miss/`
+- **全量上下文折叠注入（缓存未命中）**: 当无 `parent_message_id` 且内存 Map 未命中时，将完整对话历史折叠为带 role 标记的单条 text 注入上游（`foldFullConversation`），由 `FULL_CONTEXT_INJECTION_ENABLED` 控制（默认 false）。子代理永不注入；工具续传路径不受影响。
+- **热链分叉修复**: `CHAIN_DIVERGENCE_REPAIR_ENABLED` 开启后，校验客户端消息前缀与完整尾部结构；正常尾部增量续传，尾部链分叉只补发缺失尾部，中段损伤或无法确认时全量重置。`MISSING_CONTEXT_HINT` 控制补发提示词，`FULL_CONTEXT_MAX_CHARS`/`FULL_CONTEXT_MAX_CHARS_BY_MODEL` 控制折叠长度。详见 `docs/spike-full-context-injection.md` 与 `openspec/changes/warm-switch-context-repair/`。
 
 ## COMMANDS
 

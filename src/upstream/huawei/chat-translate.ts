@@ -2,7 +2,7 @@
  * Message and tool call translation between OpenAI and CodeArts formats.
  */
 
-import { randomUUID } from "crypto";
+import { randomUUID, createHash } from "crypto";
 import type {
   CodeArtsToolResult,
   OpenAIChatMessage,
@@ -55,6 +55,49 @@ export function extractUserMessage(messages: OpenAIChatMessage[]): string {
     }
   }
   return "";
+}
+
+export function normalizeForChain(msg: OpenAIChatMessage): string {
+  return JSON.stringify({
+    role: msg.role,
+    content: normalizeMessageContent(msg.content),
+    name: msg.name ?? null,
+    refusal: msg.refusal ?? null,
+    reasoning_content: msg.reasoning_content ?? null,
+    tool_call_id: msg.tool_call_id ?? null,
+    tool_calls: (msg.tool_calls ?? [])
+      .slice()
+      .sort((a, b) => (a.id ?? "").localeCompare(b.id ?? ""))
+      .map((toolCall) => ({
+        id: toolCall.id ?? null,
+        type: toolCall.type ?? null,
+        name: toolCall.function?.name ?? null,
+        arguments: toolCall.function?.arguments ?? null,
+      })),
+  });
+}
+
+export function computeChainHash(
+  previousHash: string,
+  message: OpenAIChatMessage,
+): string {
+  return createHash("sha256")
+    .update(previousHash)
+    .update("\\0")
+    .update(normalizeForChain(message))
+    .digest("hex");
+}
+
+export function computeChainForMessages(
+  messages: OpenAIChatMessage[],
+  limit: number = messages.length,
+): { hash: string; length: number } {
+  const boundedLimit = Math.max(0, Math.min(limit, messages.length));
+  let hash = "";
+  for (let i = 0; i < boundedLimit; i++) {
+    hash = computeChainHash(hash, messages[i]);
+  }
+  return { hash, length: boundedLimit };
 }
 
 // ---------------------------------------------------------------------------
@@ -228,9 +271,55 @@ export function cleanToolCalls(
 export const mapToolCallDeltas = cleanToolCallDeltas;
 export const mapToolCalls = cleanToolCalls;
 
-// ---------------------------------------------------------------------------
-// Full-context injection: fold multi-turn history into a single text message
-// ---------------------------------------------------------------------------
+function truncateMissingSegment(
+  hint: string,
+  segments: string[],
+  current: string,
+  maxChars: number,
+): string {
+  const fixedLength = hint.length + current.length + 4;
+  let budget = Math.max(0, maxChars - fixedLength);
+  const kept: string[] = [];
+  for (let i = segments.length - 1; i >= 0; i--) {
+    const cost = segments[i].length + (kept.length > 0 ? 2 : 0);
+    if (cost > budget) break;
+    budget -= cost;
+    kept.unshift(segments[i]);
+  }
+  return [hint, ...kept, current].join("\\n\\n");
+}
+
+export function foldMissingSegment(
+  messages: OpenAIChatMessage[],
+  suffixStart: number,
+  maxChars: number = 8000,
+): string {
+  if (!messages || suffixStart >= messages.length) return "";
+  const start = Math.max(0, suffixStart);
+  const tail = messages.slice(start);
+  const lastUserIndex = tail.reduce(
+    (index, message, currentIndex) => message.role === "user" ? currentIndex : index,
+    -1,
+  );
+  if (lastUserIndex < 0) return "";
+
+  let userIndex = 0;
+  const segments: string[] = [];
+  for (let i = 0; i < lastUserIndex; i++) {
+    const message = tail[i];
+    if (message.role === "user") userIndex++;
+    const segment = foldMessageSegment(message, userIndex);
+    if (segment) segments.push(segment);
+  }
+  const currentUser = normalizeMessageContent(tail[lastUserIndex].content);
+  const hint = config.missingContextHint;
+  const current = `[当前用户请求]\n${currentUser}`;
+  const join = (items: string[]): string => [hint, ...items, current].join("\\n\\n");
+  const full = join(segments);
+  if (full.length <= maxChars) return full;
+  return truncateMissingSegment(hint, segments, current, maxChars);
+}
+
 
 /**
  * Continuation directive appended to the folded text (design D2).
