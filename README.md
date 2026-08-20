@@ -167,6 +167,36 @@ pnpm lint    # ESLint 检查
 
 修改代码后务必执行 `pnpm build` 确认零 TypeScript 错误。
 
+### 真实热链分叉验证
+
+先启动本地代理并完成华为云登录，确保 `CHAIN_DIVERGENCE_REPAIR_ENABLED=true`。然后使用代理生成的 API Key 运行：
+
+```bash
+set OPENAI_BASE_URL=http://localhost:1455
+set OPENAI_API_KEY=替换为本地代理 API Key
+set CODEARTS_TEST_MODEL=GLM-5.1
+pnpm verify:real
+```
+
+PowerShell：
+
+```powershell
+$env:OPENAI_BASE_URL = "http://localhost:1455"
+$env:OPENAI_API_KEY = "替换为本地代理 API Key"
+$env:CODEARTS_TEST_MODEL = "GLM-5.1"
+pnpm verify:real
+```
+
+脚本通过真实 `/v1/chat/completions` 入口依次验证：
+
+1. 首轮 CodeArts 会话建立
+2. 正常增量续传
+3. 模拟外部 provider 轮次后切回 CodeArts，验证 `tail-divergence` 和尾部补发
+4. 修改中段历史，验证 `middle-damage` 全量重置
+5. 重复/陈旧请求被拒绝
+
+默认使用非流式请求；设置 `CODEARTS_TEST_STREAM=true` 可验证流式响应解析。脚本只输出脱敏摘要，不读取 `data/`、不解密 AK/SK，也不会把 API Key 写入文件。运行时请同时查看 proxy 日志中的 `divergence`、`suffixStart` 和 `fullContextInjected` 字段。
+
 ## 数据文件
 
 运行时数据存放在 `data/`（已加入 `.gitignore`，不提交），采用分层目录结构：
