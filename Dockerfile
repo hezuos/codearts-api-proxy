@@ -68,7 +68,7 @@ ENV NODE_ENV=production \
     MISSING_CONTEXT_HINT=""
 
 # ENCRYPTION_KEY 必须通过 docker run -e 或 Compose secrets 注入，生产环境不可留空。
-ENV ENCRYPTION_KEY
+#ENV ENCRYPTION_KEY=""
 
 # The readiness endpoint also verifies writable persistent storage.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD node -e "fetch('http://127.0.0.1:1455/ready').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
