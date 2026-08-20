@@ -38,7 +38,7 @@
     "@types/cookie-parser": "^1.4.6",
     "@types/express": "^5.0.6",
     "@types/express-rate-limit": "^6.0.2",
-    "@types/node": "^25.9.1",
+    "@types/node": "^26.2.0",
     "@typescript-eslint/eslint-plugin": "^8.67.0",
     "@typescript-eslint/parser": "^8.67.0",
     "eslint": "^10.8.1",
