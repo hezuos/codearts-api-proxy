@@ -369,6 +369,118 @@ function testTruncateFoldedStrictUpperBound(): void {
 }
 
 // ---------------------------------------------------------------------------
+// 链哈希归一化（T1-T4）与纯工具段折叠（T6/T7/T13）
+// ---------------------------------------------------------------------------
+
+function assistantWithDeltaTypeToolCall(
+  content: string,
+  toolCallType: string | undefined,
+  args: string,
+): OpenAIChatMessage {
+  return {
+    role: "assistant",
+    content,
+    refusal: null,
+    tool_calls: [
+      {
+        id: "call_1",
+        ...(toolCallType === undefined ? {} : { type: toolCallType as "function" }),
+        function: { name: "Read", arguments: args },
+      },
+    ],
+  } as unknown as OpenAIChatMessage;
+}
+
+function testT1ToolCallTypeNormalized(): void {
+  const base = assistantWithDeltaTypeToolCall("", undefined, "{}");
+  const withType = assistantWithDeltaTypeToolCall("", "function", "{}");
+  const withEmpty = assistantWithDeltaTypeToolCall("", "", "{}");
+  assert.equal(normalizeForChain(base), normalizeForChain(withType));
+  assert.equal(normalizeForChain(base), normalizeForChain(withEmpty));
+}
+
+function testT2ReasoningContentNormalized(): void {
+  const base: OpenAIChatMessage = { role: "assistant", content: "hi", refusal: null };
+  const empty = { ...base, reasoning_content: "" } as OpenAIChatMessage;
+  const nul = { ...base, reasoning_content: null as unknown as string } as OpenAIChatMessage;
+  assert.equal(normalizeForChain(base), normalizeForChain(empty));
+  assert.equal(normalizeForChain(base), normalizeForChain(nul));
+  const nonEmpty = { ...base, reasoning_content: "thinking..." } as OpenAIChatMessage;
+  assert.notEqual(normalizeForChain(base), normalizeForChain(nonEmpty));
+}
+
+function testT3ArgumentsDistinguished(): void {
+  const make = (args: string): OpenAIChatMessage =>
+    ({
+      role: "assistant",
+      content: "",
+      refusal: null,
+      tool_calls: [{ id: "c1", type: "function", function: { name: "Read", arguments: args } }],
+    }) as unknown as OpenAIChatMessage;
+  assert.equal(normalizeForChain(make('{"a":1}')), normalizeForChain(make('{"a":1}')));
+  assert.notEqual(normalizeForChain(make('{"a":1}')), normalizeForChain(make('{"a":2}')));
+}
+
+function testT4ReconstructedPathsEqual(): void {
+  // chat-stream.ts 风格：无 reasoning、type 缺省
+  const streamStyle: OpenAIChatMessage = {
+    role: "assistant",
+    content: "reply",
+    refusal: null,
+    tool_calls: [{ id: "c1", function: { name: "Bash", arguments: "{}" } }],
+  } as unknown as OpenAIChatMessage;
+  // chat.ts 风格：含空 reasoning、type="function"
+  const chatStyle: OpenAIChatMessage = {
+    role: "assistant",
+    content: "reply",
+    refusal: null,
+    reasoning_content: "",
+    tool_calls: [{ id: "c1", type: "function", function: { name: "Bash", arguments: "{}" } }],
+  } as unknown as OpenAIChatMessage;
+  assert.equal(normalizeForChain(streamStyle), normalizeForChain(chatStyle));
+}
+
+function testT6FoldMissingSegmentToolSegment(): void {
+  const messages: OpenAIChatMessage[] = [
+    system("sys"),
+    user("old"),
+    assistantWithToolCall("外部回复", "find_path", '{"path":"."}'),
+    { role: "tool", content: "file1", refusal: null, name: "find_path", tool_call_id: "call_1" } as OpenAIChatMessage,
+  ];
+  const folded = foldMissingSegment(messages, 2, 2000);
+  assert.ok(folded.length > 0, "纯工具段不应返回空");
+  assert.ok(folded.includes("[调用工具: find_path"), "含工具调用标注");
+  assert.ok(folded.includes("[tool result: find_path]"), "含工具结果标注");
+  assert.ok(folded.includes("file1"), "含工具结果内容");
+  assert.ok(!folded.includes("[当前用户请求]"), "不套用当前用户请求结构");
+  assert.ok(!folded.includes("old"), "不包含已确认的 user 内容");
+}
+
+function testT7FoldMissingSegmentToolOnly(): void {
+  const messages: OpenAIChatMessage[] = [
+    system("sys"),
+    user("old"),
+    assistant("reply"),
+    { role: "tool", content: "out", refusal: null, name: "bash", tool_call_id: "c1" } as OpenAIChatMessage,
+  ];
+  const folded = foldMissingSegment(messages, 3, 2000);
+  assert.ok(folded.length > 0, "纯 tool 段不应返回空");
+  assert.ok(folded.includes("[tool result: bash]"), "含工具结果标注");
+  assert.ok(!folded.includes("[当前用户请求]"), "不套用当前用户请求结构");
+}
+
+function testT13ToolSegmentBounded(): void {
+  const messages: OpenAIChatMessage[] = [
+    system("sys"),
+    user("old"),
+    assistantWithToolCall("", "bash", "{}"),
+    { role: "tool", content: "X".repeat(5000), refusal: null, name: "bash", tool_call_id: "c1" } as OpenAIChatMessage,
+  ];
+  const folded = foldMissingSegment(messages, 2, 500);
+  assert.ok(folded.length <= 500 + 40, `无 user 段折叠长度 ${folded.length} 不应超预算`);
+}
+
+// ---------------------------------------------------------------------------
 // Run
 // ---------------------------------------------------------------------------
 
@@ -397,5 +509,14 @@ testCanonicalChainHashIncludesMetadata();
 testDivergenceClassification();
 testFoldRespectsHardMaxChars();
 testTruncateFoldedStrictUpperBound();
+
+// 链哈希归一化（T1-T4）与纯工具段折叠（T6/T7/T13）
+testT1ToolCallTypeNormalized();
+testT2ReasoningContentNormalized();
+testT3ArgumentsDistinguished();
+testT4ReconstructedPathsEqual();
+testT6FoldMissingSegmentToolSegment();
+testT7FoldMissingSegmentToolOnly();
+testT13ToolSegmentBounded();
 
 console.log("All foldFullConversation core format tests passed.");

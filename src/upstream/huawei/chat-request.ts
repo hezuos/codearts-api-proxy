@@ -125,29 +125,42 @@ export function classifyDivergence(
   let explicitTailDivergence = !boundaryIsLastReply;
   let seenUser = false;
   let seenAssistant = false;
+  // 纯工具续传尾段标志：边界=lastReply 且其后每条 tool 均可追溯（无 user/assistant/其它）
+  let onlyTraceableTools = boundaryIsLastReply;
   const assistantToolCalls = boundary?.tool_calls ?? [];
   for (let i = boundaryIsLastReply ? 1 : 0; i < suffix.length; i++) {
     const message = suffix[i];
     if (message.role === "tool") {
       const matched = assistantToolCalls.some((toolCall) => toolCall.id === message.tool_call_id);
-      if (!matched) validSuffix = false;
+      if (!matched) {
+        validSuffix = false;
+        onlyTraceableTools = false;
+      }
     } else if (message.role === "user") {
       if (seenUser || i !== suffix.length - 1) {
         validSuffix = false;
         explicitTailDivergence = true;
       }
+      onlyTraceableTools = false;
       seenUser = true;
     } else if (message.role === "assistant") {
       validSuffix = false;
       explicitTailDivergence = true;
+      onlyTraceableTools = false;
       seenAssistant = true;
     } else {
       validSuffix = false;
+      onlyTraceableTools = false;
     }
   }
   if (!seenUser) validSuffix = false;
   if (validSuffix) return { divergence: "normal", suffixStart };
   if (explicitTailDivergence || seenAssistant) {
+    return { divergence: "tail-divergence", suffixStart };
+  }
+  // 纯工具续传尾段（无 user/assistant，全部 tool 可追溯，边界=lastReply）：
+  // 属于「工具结果待补发」，识别为 tail-divergence 以末段补发，而非 middle-damage 全量重置。
+  if (boundaryIsLastReply && onlyTraceableTools && suffix.length > 0) {
     return { divergence: "tail-divergence", suffixStart };
   }
   return { divergence: "middle-damage" };
@@ -329,8 +342,21 @@ export function buildRequestBody(
       suffixStart,
       resolveFullContextMaxChars(modelId),
     );
-    messagesBody = [{ type: "text", content: folded || extractUserMessage(request.messages) }];
-    fullContextChars = folded.length;
+    if (folded) {
+      messagesBody = [{ type: "text", content: folded }];
+      fullContextChars = folded.length;
+    } else {
+      // 防御分支（正常不可达）：suffixStart < messages.length 且无 user 段已能折叠。
+      // 若折叠仍为空，绝不发送已确认的 user/system → 清空 parent 并全量折叠重置。
+      parentMessageId = "";
+      const fullFolded = foldFullConversation(
+        request.messages,
+        resolveFullContextMaxChars(modelId),
+      );
+      messagesBody = [{ type: "text", content: fullFolded || "" }];
+      fullContextInjected = true;
+      fullContextChars = fullFolded.length;
+    }
   } else {
     const trackedParent = !!getLastResponseMessageId(chatId);
     const shouldInject =

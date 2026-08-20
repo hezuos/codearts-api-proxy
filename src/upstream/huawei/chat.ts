@@ -13,7 +13,7 @@ import type {
   OpenAIChatCompletionRequest,
   OpenAIChatMessage,
 } from "../../types/openai";
-import { cleanToolCalls, computeChainForMessages, normalizeForChain } from "./chat-translate";
+import { cleanToolCalls, computeChainForMessages, normalizeForChain, normalizeToolCallsForChain } from "./chat-translate";
 import { parseSSE } from "./chat-protocol";
 import {
   buildRequestBody,
@@ -161,8 +161,10 @@ export async function sendHuaweiChatRequest(
         role: "assistant",
         content: fullContent,
         refusal: null,
-        reasoning_content: fullReasoning || undefined,
-        tool_calls: toolCalls,
+        // 链状态重建统一不携带 reasoning_content（与 chat-stream.ts 一致）；
+        // 工具调用 type 缺省补 "function"（仅用于 lastReplyHash，不改发送给客户端的消息）。
+        // 可空值差异由 normalizeForChain 归一化兜底。
+        tool_calls: normalizeToolCallsForChain(toolCalls),
       };
       const chain = computeChainForMessages(request.messages);
       setChainState(cid, {

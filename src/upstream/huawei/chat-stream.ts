@@ -15,7 +15,7 @@ import type {
   OpenAIChatCompletionDelta,
   OpenAIChatMessage,
 } from "../../types/openai";
-import { cleanToolCallDeltas, computeChainForMessages, normalizeForChain } from "./chat-translate";
+import { cleanToolCallDeltas, computeChainForMessages, normalizeForChain, normalizeToolCallsForChain } from "./chat-translate";
 import { buildRecoveryChunks, buildSyntheticRecoveryToolCalls } from "./chat-recovery";
 import { parseSSE } from "./chat-protocol";
 import {
@@ -403,7 +403,7 @@ export async function streamHuaweiChatToResponse(
         role: "assistant",
         content: responseContent,
         refusal: null,
-        tool_calls: responseToolCalls.length > 0 ? responseToolCalls : undefined,
+        tool_calls: normalizeToolCallsForChain(responseToolCalls),
       };
       const chain = computeChainForMessages(request.messages);
       setChainState(cid, {

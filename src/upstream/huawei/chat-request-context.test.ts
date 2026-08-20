@@ -178,4 +178,189 @@ testMiddleDamageResetsParent();
 testUntraceableToolResetsParent();
 testDuplicateRequestAutoRepairs();
 
+// 纯工具段修复：T5/T8/T9/T10
+//---------------------------------------------------------------------------
+
+function assistantWithToolCallMsg(
+  content: string,
+  toolName: string,
+  toolCallType: string | undefined,
+): OpenAIChatMessage {
+  return {
+    role: "assistant",
+    content,
+    refusal: null,
+    tool_calls: [
+      {
+        id: "call_1",
+        ...(toolCallType === undefined ? {} : { type: toolCallType as "function" }),
+        function: { name: toolName, arguments: "{}" },
+      },
+    ],
+  } as unknown as OpenAIChatMessage;
+}
+
+// T5a：边界成立（归一化生效）——客户端 echo type 缺省时 suffixStart 应为 prefixLen+1
+function testT5BoundaryMatchesAfterEchoNormalized(): void {
+  const chatId = "77777777777777777777777777777777";
+  const prefix = [user("old"), assistant("old answer")];
+  // proxy 重建（chat.ts 风格：type="function"、无 reasoning）
+  const reconstructed = assistantWithToolCallMsg("new reply", "find_path", "function");
+  seedChain(chatId, prefix, reconstructed);
+  // 客户端 echo：type 缺省、reasoning null
+  const echo = assistantWithToolCallMsg("new reply", "find_path", undefined);
+  const result = chatRequest.buildRequestBody(
+    request(chatId, [...prefix, echo, tool("out", "call_1")]),
+    session,
+  );
+  // 纯工具段无 user → 仍 tail-divergence，但边界成立（suffixStart=prefixLen+1=3）
+  assert.equal(result.divergence, "tail-divergence");
+  assert.equal(result.suffixStart, 3);
+  const text = bodyText(result.body);
+  assert.ok(text.includes("[tool result:"), "应携带工具结果");
+  assert.ok(!text.includes("old"), "不得重复已确认的 user/system");
+  assert.ok(!text.includes("[当前用户请求]"));
+}
+
+// T5b：echo + 可追溯 tool + 末尾 user → normal 恢复（P1 端到端效果）
+function testT5NormalAfterToolPairAndUser(): void {
+  const chatId = "7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b";
+  const prefix = [user("old"), assistant("old answer")];
+  const reconstructed = assistantWithToolCallMsg("new reply", "find_path", "function");
+  seedChain(chatId, prefix, reconstructed);
+  const echo = assistantWithToolCallMsg("new reply", "find_path", undefined);
+  const result = chatRequest.buildRequestBody(
+    request(chatId, [...prefix, echo, tool("out", "call_1"), user("next")]),
+    session,
+  );
+  assert.equal(result.divergence, "normal");
+  assert.equal(result.suffixStart, 3);
+  assert.equal(bodyText(result.body), "next");
+}
+
+// T8：tail-divergence 纯工具段（边界不相等，suffixStart=prefixLen）
+function testT8TailToolSegmentBoundaryMismatch(): void {
+  const chatId = "88888888888888888888888888888888";
+  const prefix = [user("old"), assistant("old answer")];
+  seedChain(chatId, prefix, assistant("new answer"));
+  const external = assistantWithToolCallMsg("外部回复", "find_path", "function");
+  const result = chatRequest.buildRequestBody(
+    request(chatId, [...prefix, external, { ...tool("file1", "call_1"), name: "find_path" }]),
+    session,
+  );
+  assert.equal(result.divergence, "tail-divergence");
+  assert.equal(result.suffixStart, 2);
+  assert.equal(result.body.parent_message_id, "parent-1");
+  const text = bodyText(result.body);
+  assert.ok(text.includes("[调用工具: find_path"), "含工具调用标注");
+  assert.ok(text.includes("[tool result: find_path]"), "含工具结果标注");
+  assert.ok(text.includes("file1"));
+  assert.ok(!text.includes("old"), "不得重复首条 user 内容");
+  assert.ok(!text.includes("[当前用户请求]"));
+}
+
+// T9：纯 tool 段（边界相等，suffixStart=prefixLen+1）
+function testT9TailToolOnlyBoundaryMatch(): void {
+  const chatId = "99999999999999999999999999999999";
+  const prefix = [user("old"), assistant("old answer")];
+  const reconstructed = assistantWithToolCallMsg("new reply", "find_path", "function");
+  seedChain(chatId, prefix, reconstructed);
+  const echo = assistantWithToolCallMsg("new reply", "find_path", undefined);
+  const result = chatRequest.buildRequestBody(
+    request(chatId, [...prefix, echo, tool("out", "call_1")]),
+    session,
+  );
+  assert.equal(result.divergence, "tail-divergence");
+  assert.equal(result.suffixStart, 3);
+  const text = bodyText(result.body);
+  assert.ok(text.includes("[tool result:"), "应携带工具结果");
+  assert.ok(!text.includes("old"));
+}
+
+// T10：可追溯 tool + 末尾 user → normal（工具结果随增量前进）
+function testT10TraceableToolWithUserNormal(): void {
+  const chatId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const prefix = [user("old"), assistant("old answer")];
+  const reconstructed = assistantWithToolCallMsg("new reply", "find_path", "function");
+  seedChain(chatId, prefix, reconstructed);
+  const echo = assistantWithToolCallMsg("new reply", "find_path", undefined);
+  const result = chatRequest.buildRequestBody(
+    request(chatId, [...prefix, echo, tool("out", "call_1"), user("next")]),
+    session,
+  );
+  assert.equal(result.divergence, "normal");
+  assert.equal(bodyText(result.body), "next");
+}
+
+testT5BoundaryMatchesAfterEchoNormalized();
+testT5NormalAfterToolPairAndUser();
+testT8TailToolSegmentBoundaryMismatch();
+testT9TailToolOnlyBoundaryMatch();
+testT10TraceableToolWithUserNormal();
+
+// 传递通道正交（T16/T17/T18/T20；T19 由 testDuplicateRequestAutoRepairs 覆盖）
+//---------------------------------------------------------------------------
+
+function testT16ToolContinuationBypass(): void {
+  const chatId = "1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b";
+  const prefix = [user("old"), assistant("old answer")];
+  seedChain(chatId, prefix, assistant("new answer"));
+  const result = chatRequest.buildRequestBody(
+    {
+      ...request(chatId, [...prefix, user("next")]),
+      codearts: {
+        chat_id: chatId,
+        tool_results: [{ toolCallId: "c1", name: "find_path", status: "success", result: "ok" }],
+      },
+    },
+    session,
+  );
+  assert.equal(result.divergence, undefined, "tool continuation 旁路，不参与分类");
+  assert.equal((result.body.messages as unknown[]).length, 0, "tool continuation 使用空 messages");
+  assert.equal(result.body.parent_message_id, "parent-1");
+}
+
+function testT17CallerParentBypass(): void {
+  const chatId = "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b";
+  const prefix = [user("old"), assistant("old answer")];
+  seedChain(chatId, prefix, assistant("new answer"));
+  const result = chatRequest.buildRequestBody(
+    {
+      ...request(chatId, [...prefix, user("next")]),
+      codearts: { chat_id: chatId, parent_message_id: "caller-parent" },
+    },
+    session,
+  );
+  assert.equal(result.body.parent_message_id, "caller-parent");
+  assert.equal(result.divergence, undefined, "调用方提供 parent 时旁路检测");
+}
+
+function testT18SubAgentBypass(): void {
+  const chatId = "3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b";
+  const prefix = [user("old"), assistant("old answer")];
+  seedChain(chatId, prefix, assistant("new answer"));
+  const result = chatRequest.buildRequestBody(
+    {
+      ...request(chatId, [...prefix, user("next")]),
+      codearts: { chat_id: chatId, sub_agent: { type: "Explore" } },
+    },
+    session,
+  );
+  assert.equal(result.divergence, undefined, "子代理旁路，不受修复影响");
+  assert.ok((result.body.messages as unknown[]).length >= 1, "子代理使用普通消息传递");
+}
+
+function testT20ColdStartNoChain(): void {
+  const chatId = "4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b"; // 未 seed：无链状态
+  const result = chatRequest.buildRequestBody(request(chatId, [user("hello")]), session);
+  assert.equal(result.divergence, undefined);
+  const msgs = result.body.messages as Array<{ content?: string }>;
+  assert.ok(msgs.length >= 1 && (msgs[0]?.content?.length ?? 0) > 0, "冷启动应有消息内容");
+}
+
+testT16ToolContinuationBypass();
+testT17CallerParentBypass();
+testT18SubAgentBypass();
+testT20ColdStartNoChain();
+
 console.log("All warm-switch context repair request tests passed.");

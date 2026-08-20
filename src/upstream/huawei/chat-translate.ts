@@ -58,22 +58,31 @@ export function extractUserMessage(messages: OpenAIChatMessage[]): string {
 }
 
 export function normalizeForChain(msg: OpenAIChatMessage): string {
+  const rc = msg.reasoning_content;
+  const hasReasoning = rc !== undefined && rc !== null && rc !== "";
   return JSON.stringify({
     role: msg.role,
     content: normalizeMessageContent(msg.content),
     name: msg.name ?? null,
     refusal: msg.refusal ?? null,
-    reasoning_content: msg.reasoning_content ?? null,
+    // 归一化 reasoning_content：null/undefined/"" 统一为 null（客户端 echo 空值与缺失视为同值）
+    reasoning_content: hasReasoning ? rc : null,
     tool_call_id: msg.tool_call_id ?? null,
     tool_calls: (msg.tool_calls ?? [])
       .slice()
       .sort((a, b) => (a.id ?? "").localeCompare(b.id ?? ""))
-      .map((toolCall) => ({
-        id: toolCall.id ?? null,
-        type: toolCall.type ?? null,
-        name: toolCall.function?.name ?? null,
-        arguments: toolCall.function?.arguments ?? null,
-      })),
+      .map((toolCall) => {
+        // 宽化类型后比较（OpenAIToolCall.type 为字面量 "function"）
+        const t = toolCall.type as string | undefined | null;
+        // 归一化 tool_calls[].type：缺失/空与字面 "function" 统一（避免 proxy 重建 vs 客户端 echo 哈希漂移）
+        const type = t === undefined || t === null || t === "" || t === "function" ? "function" : t;
+        return {
+          id: toolCall.id ?? null,
+          type,
+          name: toolCall.function?.name ?? null,
+          arguments: toolCall.function?.arguments ?? null,
+        };
+      }),
   });
 }
 
@@ -83,9 +92,23 @@ export function computeChainHash(
 ): string {
   return createHash("sha256")
     .update(previousHash)
-    .update("\\0")
+    .update("\0")
     .update(normalizeForChain(message))
     .digest("hex");
+}
+
+/**
+ * 链状态重建用的工具调用规范化：为缺失 type 的调用项补 "function"。
+ * 仅用于计算 lastReplyHash 的 assistantMessage，不改动发给客户端的 tool_call。
+ */
+export function normalizeToolCallsForChain(
+  toolCalls: OpenAIToolCall[] | undefined | null,
+): OpenAIToolCall[] | undefined {
+  if (!toolCalls || toolCalls.length === 0) return undefined;
+  return toolCalls.map((tc) => {
+    if (tc.type === "function") return tc;
+    return { ...tc, type: "function" as const };
+  });
 }
 
 export function computeChainForMessages(
@@ -286,7 +309,8 @@ function truncateMissingSegment(
     budget -= cost;
     kept.unshift(segments[i]);
   }
-  return [hint, ...kept, current].join("\\n\\n");
+  // filter(Boolean) 兼容无 user 段（hint/current 为空）时不留多余分隔空项
+  return [hint, ...kept, current].filter(Boolean).join("\n\n");
 }
 
 export function foldMissingSegment(
@@ -301,7 +325,22 @@ export function foldMissingSegment(
     (index, message, currentIndex) => message.role === "user" ? currentIndex : index,
     -1,
   );
-  if (lastUserIndex < 0) return "";
+
+  // 纯工具段（无 user）：按工具段真实语义折叠（assistant 工具调用 + tool 结果），
+  // 不套用「当前用户请求」结构，避免被模型误判为新用户输入。
+  if (lastUserIndex < 0) {
+    let userIndex = 0;
+    const segments: string[] = [];
+    for (const message of tail) {
+      if (message.role === "user") userIndex++;
+      const segment = foldMessageSegment(message, userIndex);
+      if (segment) segments.push(segment);
+    }
+    if (segments.length === 0) return "";
+    const joined = segments.join("\n\n");
+    if (joined.length <= maxChars) return joined;
+    return truncateMissingSegment("", segments, "", maxChars);
+  }
 
   let userIndex = 0;
   const segments: string[] = [];
