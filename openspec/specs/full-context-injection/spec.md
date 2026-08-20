@@ -78,9 +78,35 @@ The proxy SHALL serialize the client message history into a deterministic plain-
 - **THEN** the proxy SHALL render each tool call and its result as text markers under their assistant/user segments
 - **AND** the proxy SHALL NOT translate them into upstream `task_parameters.tool_result`
 
+### Requirement: Missing-segment append format
+
+For a tail-divergence, the proxy SHALL serialize only the missing suffix into one `text` message with a reference-context hint and a separate `[当前用户请求]` marker. If the first suffix message equals the tracked last reply, that reply SHALL be excluded because the parent linkage already represents it; otherwise the suffix begins at the tracked boundary.
+
+#### Scenario: Append missing suffix without duplicating parent reply
+
+- **GIVEN** a tail-divergence request with an intact tracked upstream chain
+- **AND** the boundary message equals the tracked last assistant reply
+- **WHEN** the proxy builds the repair request
+- **THEN** it SHALL reuse the tracked `parent_message_id`
+- **AND** it SHALL fold messages after the boundary reply only
+- **AND** it SHALL mark the final user message as `[当前用户请求]`
+
+#### Scenario: Append suffix beginning at unknown boundary
+
+- **GIVEN** a tail-divergence request whose boundary message is not the tracked last reply
+- **WHEN** the proxy builds the repair request
+- **THEN** it SHALL fold the suffix beginning at the tracked boundary
+- **AND** it SHALL reuse the tracked parent linkage
+
+#### Scenario: Repair text exceeds threshold
+
+- **GIVEN** the missing suffix exceeds the configured character threshold
+- **WHEN** the proxy folds the suffix
+- **THEN** it SHALL retain the hint, newest missing turns, and current user request while trimming the middle
+
 ### Requirement: Truncation guard
 
-The proxy SHALL cap the folded history so an injected message never exceeds a configured size threshold, keeping the newest turns and foundational context (system prompt, first user turn) while dropping the middle.
+The proxy SHALL cap folded history so an injected message never exceeds the configured threshold, retaining the newest turns and foundational context for full-history folds. Missing-suffix folds SHALL retain their hint and current-user marker while trimming the middle.
 
 **Rationale:** Long cross-provider histories can exceed upstream text limits; unbounded injection risks upstream rejection.
 

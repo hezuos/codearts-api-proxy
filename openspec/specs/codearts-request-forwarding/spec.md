@@ -8,6 +8,10 @@ updated: 2026-08-18
 
 # CodeArts Request Forwarding
 
+## Purpose
+
+Defines how the proxy forwards CodeArts requests while preserving conversation continuity, handling request variants, and managing tool catalogs.
+
 ## Overview
 
 The proxy SHALL forward requests to CodeArts while preserving conversation continuity, handling different request variants, and managing tool catalogs appropriately.
@@ -16,9 +20,9 @@ The proxy SHALL forward requests to CodeArts while preserving conversation conti
 
 ### REQ-FWD-001: Preserve upstream conversation continuity
 
-The proxy SHALL preserve CodeArts conversation continuity across turns by reusing the correct upstream conversation identifiers.
+The proxy SHALL preserve CodeArts conversation continuity across turns by reusing the correct upstream conversation identifiers and validating the client history when warm-chain repair is enabled.
 
-**Rationale:** Creating a new upstream conversation for every request would lose context and break multi-turn interactions.
+**Rationale:** Creating a new upstream conversation for every request would lose context and break multi-turn interactions. A tracked parent alone is insufficient after the client switches providers; the proxy must distinguish a valid single-turn continuation from a divergent suffix.
 
 #### Scenario: Continue an existing upstream thread
 
@@ -26,6 +30,39 @@ The proxy SHALL preserve CodeArts conversation continuity across turns by reusin
 - **WHEN** the proxy processes the request
 - **THEN** the proxy SHALL reuse the stored upstream `chat_id`
 - **AND** the proxy SHALL forward the latest stored upstream parent linkage identifier required by CodeArts
+
+#### Scenario: Continue a thread after verifying the chain is intact
+
+- **GIVEN** the client does not provide `codearts.parent_message_id`
+- **AND** the proxy has chain state for the resolved `chat_id`
+- **AND** the tracked prefix matches and the complete suffix is one valid continuation (`lastReply + traceable tool results + one current user`)
+- **WHEN** the proxy processes the request
+- **THEN** the proxy SHALL reuse the stored parent linkage
+- **AND** the proxy SHALL forward only the latest user turn
+
+#### Scenario: Continue a thread after a tail divergence
+
+- **GIVEN** the client does not provide `codearts.parent_message_id`
+- **AND** the tracked prefix matches but the suffix contains explicit external provider turns or extra user/assistant messages
+- **WHEN** the proxy processes the request
+- **THEN** the proxy SHALL reuse the stored `chat_id` and parent linkage
+- **AND** the proxy SHALL append only the folded missing suffix
+- **AND** if the boundary message is the tracked last reply, the appended suffix SHALL start after that reply
+
+#### Scenario: Continue a thread after middle damage
+
+- **GIVEN** the client does not provide `codearts.parent_message_id`
+- **AND** the tracked prefix fails or the suffix cannot be safely validated
+- **WHEN** the proxy processes the request
+- **THEN** the proxy SHALL reset upstream continuity with an empty `parent_message_id`
+- **AND** the proxy SHALL forward the folded full client history
+
+#### Scenario: Reject duplicate or stale request
+
+- **GIVEN** the client history exactly matches the tracked chain length and prefix
+- **WHEN** the proxy processes the request
+- **THEN** the proxy SHALL NOT forward the last user message again
+- **AND** it SHALL reuse a cached response or return a retryable error
 
 #### Scenario: Start a new upstream thread
 

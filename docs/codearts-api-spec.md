@@ -253,7 +253,29 @@ Authorization: SDK-HMAC-SHA256 Access=<AccessKey>, SignedHeaders=content-type;ho
 
 ---
 
-### 3.4 `tools`（`task_parameters.tools`）字段结构
+#### 3.3.4 热链分叉修复（`CHAIN_DIVERGENCE_REPAIR_ENABLED=true`）
+
+当 proxy 已有该 `chat_id` 的链状态且客户端未提供 `codearts.parent_message_id` 时，proxy 会校验客户端历史前缀和完整尾部结构：
+
+- 正常单轮尾部（`lastReply + tool* + 当前 user`）→ 继续增量发送当前 user
+- 尾部链分叉（切换 provider 后出现额外 user/assistant 轮次）→ 复用旧 `parent_message_id`，只追加折叠后的缺失尾部
+- 中段损伤或尾部无法确认 → `parent_message_id=""`，全量折叠重置
+- 若 `messages[L]` 已是旧的 `lastReply`，补发从 `L+1` 开始，避免重复发送 parent 已覆盖的 assistant；否则从 `L` 开始
+- `N == L` 且历史完全相同视为重复/陈旧请求，不重复发送最后一条 user
+
+尾部补发格式：
+
+```
+[以下为补传的历史对话上下文，仅作参考，非用户新请求]
+<缺失尾部的 role 标记文本>
+
+[当前用户请求]
+<最新 user 内容>
+```
+
+尾部补发复用旧 `chat_id` 和 `parent_message_id`，失败时最多回退全量折叠重置一次。该行为由 `CHAIN_DIVERGENCE_REPAIR_ENABLED` 控制；热链修复中的全量回退不受 `FULL_CONTEXT_INJECTION_ENABLED` 控制。
+
+相关配置：`CHAIN_DIVERGENCE_REPAIR_ENABLED`、`MISSING_CONTEXT_HINT`、`FULL_CONTEXT_MAX_CHARS`、`FULL_CONTEXT_MAX_CHARS_BY_MODEL`。
 
 每个工具的完整格式：
 
