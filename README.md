@@ -19,6 +19,69 @@ pnpm build && pnpm start
 
 服务默认监听 `http://localhost:1455`，启动后访问首页可进行华为云账号授权登录。
 
+## 使用 Docker 部署
+
+镜像为三阶段构建（builder → prod-deps → runtime，基于 `node:22-alpine`），以编译后的 `dist/` 运行，使用非 root 用户，仅暴露 `1455` 端口，内置基于 `/ready` 的健康检查。
+
+### 构建镜像
+
+```bash
+docker build -t codearts-agent-proxy .
+```
+
+### 运行容器
+
+```bash
+docker run -d --name codearts-proxy \
+  -p 1455:1455 \
+  -v codearts-proxy-data:/app/data \
+  -e ENCRYPTION_KEY='<32字节随机密钥>' \
+  -e ADMIN_PASSWORD='<管理后台密码>' \
+  codearts-agent-proxy
+```
+
+- **端口**：华为云 OAuth 回调固定为 `127.0.0.1:1455`，本地部署保持 `-p 1455:1455` 即可；远程部署需配合上文「远程部署与回调粘贴」。
+- **数据卷**：`/app/data` 持久化加密的账号会话、API Key 与运行时数据。删除容器不会丢失登录态，但**更换 `ENCRYPTION_KEY` 会使存量加密数据无法解密**。
+- **`ENCRYPTION_KEY` 必填**：生产环境必须注入独立随机密钥，否则回落到内置默认值（不安全）。
+- **健康检查**：镜像内置 `HEALTHCHECK`（每 30s 调 `/ready`，同时校验数据卷可写）。
+- **默认开关**：容器默认已开启 `CHAIN_DIVERGENCE_REPAIR_ENABLED` 与 `FULL_CONTEXT_INJECTION_ENABLED`（见 Dockerfile `ENV`），如需关闭用 `-e` 覆盖。
+- **日志**：规则输出到 stdout（`docker logs -f codearts-proxy` 查看）；如需落盘可设 `LOG_FILE` 指向挂载卷内路径。
+
+### 环境变量注入
+
+```bash
+# 方式一：-e 显式传入
+docker run ... -e LOG_LEVEL=debug \
+  -e FULL_CONTEXT_MAX_CHARS_BY_MODEL='{"GLM-5.2":500000}'
+
+# 方式二：以宿主机 .env 作为 env-file（.dockerignore 已排除 .env，不会进入镜像）
+docker run ... --env-file .env
+```
+
+完整变量见上文「环境变量」表。敏感值（`ENCRYPTION_KEY`、`ADMIN_PASSWORD`）在 Compose/编排平台建议改用 secrets 注入，避免写入明文。
+
+### docker-compose 示例
+
+```yaml
+services:
+  codearts-agent-proxy:
+    image: codearts-agent-proxy
+    container_name: codearts-proxy
+    restart: unless-stopped
+    ports:
+      - "1455:1455"
+    volumes:
+      - codearts-proxy-data:/app/data
+    environment:
+      NODE_ENV: production
+      # 敏感值走宿主机环境变量/编排 secrets，切勿硬编码进文件
+      ENCRYPTION_KEY: "${ENCRYPTION_KEY:?必须设置 ENCRYPTION_KEY}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:-}"
+
+volumes:
+  codearts-proxy-data:
+```
+
 ## 主要接口
 
 ### LLM API
