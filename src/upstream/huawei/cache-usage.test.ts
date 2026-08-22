@@ -163,6 +163,53 @@ function testStreamingUsageSpread(): void {
 }
 
 // ---------------------------------------------------------------------------
+// 调用顺序集成测试：验证「先快照 prev → set 本轮 → compute 用快照」的正确顺序。
+// 回归 bug：setLastPromptTokens 在 computeCacheUsage 之前调用，导致 getLastPromptTokens
+// 读到本轮刚写入的值，cacheHit 永远等于 promptTokens、cacheMiss 永远为 0。
+// ---------------------------------------------------------------------------
+
+function testNonStreamingCallOrder(): void {
+  // 模拟 chat.ts 的真实调用顺序：快照 prev → compute → set
+  const chatId = "test-order-nonstream";
+  // 第 1 轮：无 prev，cold-start
+  chatRequest.setLastPromptTokens(chatId, 100); // 第 1 轮结束后记录
+  // 第 2 轮：promptTokens=150，prev=100（上一轮）
+  const prev = chatRequest.getLastPromptTokens(chatId);
+  const cacheUsage = chatRequest.computeCacheUsage(150, prev, "normal", true, false);
+  // 修复后：cacheHit=100（上一轮），cacheMiss=50
+  assert.equal(cacheUsage.prompt_cache_hit_tokens, 100);
+  assert.equal(cacheUsage.prompt_cache_miss_tokens, 50);
+  assert.equal(cacheUsage.prompt_tokens_details.cached_tokens, 100);
+  assert.equal(cacheUsage.prompt_tokens_details.text_tokens, 50);
+  // bug 回归：若 set 在 compute 之前，cacheHit 会等于 150
+  assert.notEqual(cacheUsage.prompt_cache_hit_tokens, 150);
+}
+
+function testStreamingCallOrder(): void {
+  // 模拟 chat-stream.ts 的真实调用顺序：快照 prev → set → compute 用快照
+  const chatId = "test-order-stream";
+  // 第 1 轮结束后记录
+  chatRequest.setLastPromptTokens(chatId, 200);
+  // 第 2 轮：先快照 prev，再 set 本轮，再 compute 用快照
+  const prevPromptTokens = chatRequest.getLastPromptTokens(chatId);
+  chatRequest.setLastPromptTokens(chatId, 300); // 本轮 promptTokens
+  const cacheUsage = chatRequest.computeCacheUsage(
+    300,
+    prevPromptTokens,
+    "tail-divergence",
+    true,
+    false,
+  );
+  // 修复后：cacheHit=200（上一轮快照），cacheMiss=100
+  assert.equal(cacheUsage.prompt_cache_hit_tokens, 200);
+  assert.equal(cacheUsage.prompt_cache_miss_tokens, 100);
+  assert.equal(cacheUsage.prompt_tokens_details.cached_tokens, 200);
+  assert.equal(cacheUsage.prompt_tokens_details.text_tokens, 100);
+  // bug 回归：若用 getLastPromptTokens(cid) 而非快照，cacheHit 会等于 300
+  assert.notEqual(cacheUsage.prompt_cache_hit_tokens, 300);
+}
+
+// ---------------------------------------------------------------------------
 // Run
 // ---------------------------------------------------------------------------
 
@@ -181,5 +228,7 @@ testLastPromptTokensOverwrite();
 testLastPromptTokensMissing();
 testNonStreamingUsageSpread();
 testStreamingUsageSpread();
+testNonStreamingCallOrder();
+testStreamingCallOrder();
 
 console.log("All cache token usage tests passed.");

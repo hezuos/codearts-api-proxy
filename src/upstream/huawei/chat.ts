@@ -182,10 +182,6 @@ export async function sendHuaweiChatRequest(
         role: role ?? "unknown",
       });
     }
-    // 记录本轮 prompt_tokens 供下一轮续传估算缓存命中（guard > 0 避免增量事件 0 值污染）
-    if (promptTokens > 0) {
-      setLastPromptTokens(responseMetadata.chat_id!, promptTokens);
-    }
   }
 
   log.info("RESPONSE COMPLETE (non-stream)", {
@@ -213,6 +209,13 @@ export async function sendHuaweiChatRequest(
     !!requestBody.parent_message_id,
     isToolContinuation,
   );
+
+  // 记录本轮 prompt_tokens 供下一轮续传估算缓存命中（guard > 0 避免增量事件 0 值污染）。
+  // 必须在 computeCacheUsage 之后调用——否则 getLastPromptTokens 读到的是本轮刚写入的值，
+  // 导致 cacheHit 永远等于 promptTokens、cacheMiss 永远为 0。
+  if (responseMetadata.response_message_id && promptTokens > 0 && cid) {
+    setLastPromptTokens(cid, promptTokens);
+  }
 
   return {
     id: `chatcmpl-${randomUUID()}`,

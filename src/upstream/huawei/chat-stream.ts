@@ -431,9 +431,13 @@ export async function streamHuaweiChatToResponse(
     log.warn("SSE had error — lastResponseMessageId NOT updated (preserved for retry)");
   }
 
-  // 记录本轮 prompt_tokens 供下一轮续传估算缓存命中（guard > 0）
-  if (responseMetadata.response_message_id && promptTokens > 0 && responseMetadata.chat_id) {
-    setLastPromptTokens(responseMetadata.chat_id, promptTokens);
+  // 先快照上一轮 prompt_tokens 供本轮缓存估算，再记录本轮值供下一轮用。
+  // 必须先快照再 set——否则 getLastPromptTokens 读到的是本轮刚写入的值，
+  // 导致 cacheHit 永远等于 promptTokens、cacheMiss 永远为 0。
+  const cid = responseMetadata.chat_id;
+  const prevPromptTokens = cid ? getLastPromptTokens(cid) : undefined;
+  if (responseMetadata.response_message_id && promptTokens > 0 && cid) {
+    setLastPromptTokens(cid, promptTokens);
   }
 
   // ── Stream complete log ───────────────────────────────────────────────────
@@ -463,10 +467,9 @@ export async function streamHuaweiChatToResponse(
 
   // 流式 usage chunk：仅在 stream_options.include_usage=true 时补发（OpenAI 协议 opt-in）
   if (request.stream_options?.include_usage) {
-    const cid = responseMetadata.chat_id;
     const cacheUsage = computeCacheUsage(
       promptTokens,
-      cid ? getLastPromptTokens(cid) : undefined,
+      prevPromptTokens,
       initialDivergence,
       !!requestBody.parent_message_id,
       isToolContinuation,
