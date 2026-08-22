@@ -121,7 +121,12 @@ export function computeCacheUsage(
   divergence: Divergence | undefined,
   hasParent: boolean,
   isToolContinuation: boolean,
-): { prompt_cache_hit_tokens: number; prompt_cache_miss_tokens: number; cache_estimated: true } {
+): {
+    prompt_cache_hit_tokens: number;
+    prompt_cache_miss_tokens: number;
+    cache_estimated: true;
+    prompt_tokens_details: { cached_tokens: number; text_tokens: number };
+  } {
   let cacheHit = 0;
 
   if (divergence === "normal" || divergence === "tail-divergence" || divergence === "duplicate/stale") {
@@ -138,6 +143,7 @@ export function computeCacheUsage(
     prompt_cache_hit_tokens: cacheHit,
     prompt_cache_miss_tokens: cacheMiss,
     cache_estimated: true,
+    prompt_tokens_details: { cached_tokens: cacheHit, text_tokens: cacheMiss },
   };
 }
 

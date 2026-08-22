@@ -93,6 +93,8 @@ export interface OpenAIChatCompletionRequest {
 
 export type OpenAIChatCompletion = ChatCompletion & {
   codearts?: OpenAICodeArtsResponseMetadata;
+  /** 覆盖 usage 字段类型，让非流式响应支持缓存字段（与 OpenAIChatCompletionChunk 对齐） */
+  usage?: OpenAIUsage;
 };
 
 /**
@@ -101,10 +103,16 @@ export type OpenAIChatCompletion = ChatCompletion & {
  * - `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`：估算的缓存命中/未命中 token 数
  * - `cache_estimated: true`：标记为估算值（华为云上游不返回真实缓存命中数）
  */
-export type OpenAIUsage = CompletionUsage & {
+export type OpenAIUsage = Omit<CompletionUsage, "prompt_tokens_details"> & {
   prompt_cache_hit_tokens?: number;
   prompt_cache_miss_tokens?: number;
   cache_estimated?: boolean;
+  prompt_tokens_details?: {
+    cached_tokens?: number;
+    text_tokens?: number;
+    audio_tokens?: number;
+    cache_write_tokens?: number;
+  };
 };
 
 // ==================== 流式响应相关类型 ====================
