@@ -23,6 +23,9 @@ import {
   setLastResponseMessageId,
   getChatIdRole,
   setChainState,
+  getLastPromptTokens,
+  setLastPromptTokens,
+  computeCacheUsage,
 } from "./chat-request";
 
 // Re-export public API
@@ -43,7 +46,7 @@ export async function sendHuaweiChatRequest(
   const log = logger.withTrace(traceId);
   const credentials = getCredentials(session);
   const chatUrl = `${config.huaweiChatHost}/v1/chat/chat`;
-  const { body: requestBody, json: body, divergence } = buildRequestBody(request, session, options);
+  const { body: requestBody, json: body, divergence, isToolContinuation } = buildRequestBody(request, session, options);
   const headers = buildChatHeaders(chatUrl, body, credentials, traceId);
 
   // ── Outgoing request log ──────────────────────────────────────────────────
@@ -179,6 +182,10 @@ export async function sendHuaweiChatRequest(
         role: role ?? "unknown",
       });
     }
+    // 记录本轮 prompt_tokens 供下一轮续传估算缓存命中（guard > 0 避免增量事件 0 值污染）
+    if (promptTokens > 0) {
+      setLastPromptTokens(responseMetadata.chat_id!, promptTokens);
+    }
   }
 
   log.info("RESPONSE COMPLETE (non-stream)", {
@@ -198,6 +205,15 @@ export async function sendHuaweiChatRequest(
   if (fullReasoning) message.reasoning_content = fullReasoning;
   if (toolCalls) message.tool_calls = toolCalls;
 
+  const cid = responseMetadata.chat_id;
+  const cacheUsage = computeCacheUsage(
+    promptTokens,
+    cid ? getLastPromptTokens(cid) : undefined,
+    divergence,
+    !!requestBody.parent_message_id,
+    isToolContinuation,
+  );
+
   return {
     id: `chatcmpl-${randomUUID()}`,
     object: "chat.completion",
@@ -211,6 +227,7 @@ export async function sendHuaweiChatRequest(
       prompt_tokens: promptTokens,
       completion_tokens: completionTokens,
       total_tokens: promptTokens + completionTokens,
+      ...cacheUsage,
     },
   };
 }

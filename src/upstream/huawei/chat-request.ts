@@ -52,6 +52,12 @@ const CLEANUP_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 const lastResponseMessageId = new Map<string, string>();
 const lastResponseMessageTs = new Map<string, number>();
 
+/**
+ * 上一轮 prompt_tokens 追踪（按 chat_id），用于估算续传轮的缓存命中数。
+ * 与 lastResponseMessageId 同生命周期、同 TTL 清理节奏。
+ */
+const lastPromptTokens = new Map<string, number>();
+
 type Divergence = "normal" | "tail-divergence" | "middle-damage" | "duplicate/stale";
 
 export interface ChainState {
@@ -73,6 +79,7 @@ const cleanupTimer = setInterval(() => {
       lastResponseMessageTs.delete(key);
       chainStates.delete(key);
       chatIdRole.delete(key);
+      lastPromptTokens.delete(key);
     }
   }
 }, CLEANUP_INTERVAL_MS);
@@ -85,6 +92,53 @@ export function getLastResponseMessageId(chatId: string): string | undefined {
 export function setLastResponseMessageId(chatId: string, messageId: string): void {
   lastResponseMessageId.set(chatId, messageId);
   lastResponseMessageTs.set(chatId, Date.now());
+}
+
+export function getLastPromptTokens(chatId: string): number | undefined {
+  return lastPromptTokens.get(chatId);
+}
+
+export function setLastPromptTokens(chatId: string, tokens: number): void {
+  lastPromptTokens.set(chatId, tokens);
+  // 刷新 TTL 时间戳，避免被清理循环误删
+  lastResponseMessageTs.set(chatId, Date.now());
+}
+
+/**
+ * 估算 DeepSeek 风格缓存计费字段。
+ *
+ * 组合 divergence + parent_message_id + isToolContinuation 三信号判断缓存命中：
+ * - normal / tail-divergence / duplicate/stale + 有 parent → 前缀缓存命中
+ * - middle-damage / undefined → 全量重置，无缓存
+ * - 无 parent + isToolContinuation → 服务端复用上轮完整上下文（messagesBody=[]）
+ * - 无 parent + 非 tool continuation → cold-start
+ *
+ * cache_miss = max(0, promptTokens - cache_hit)
+ */
+export function computeCacheUsage(
+  promptTokens: number,
+  prevPromptTokens: number | undefined,
+  divergence: Divergence | undefined,
+  hasParent: boolean,
+  isToolContinuation: boolean,
+): { prompt_cache_hit_tokens: number; prompt_cache_miss_tokens: number; cache_estimated: true } {
+  let cacheHit = 0;
+
+  if (divergence === "normal" || divergence === "tail-divergence" || divergence === "duplicate/stale") {
+    if (hasParent) {
+      cacheHit = prevPromptTokens ?? 0;
+    }
+  } else if (isToolContinuation && !hasParent) {
+    cacheHit = prevPromptTokens ?? 0;
+  }
+  // middle-damage / undefined / cold-start → cacheHit 保持 0
+
+  const cacheMiss = Math.max(0, promptTokens - cacheHit);
+  return {
+    prompt_cache_hit_tokens: cacheHit,
+    prompt_cache_miss_tokens: cacheMiss,
+    cache_estimated: true,
+  };
 }
 
 export function getChainState(chatId: string): ChainState | undefined {
@@ -253,7 +307,7 @@ export function buildRequestBody(
   request: OpenAIChatCompletionRequest,
   session: StoredHuaweiSession,
   options: { forceResync?: boolean } = {},
-): { body: Record<string, unknown>; json: string; divergence?: Divergence; suffixStart?: number } {
+): { body: Record<string, unknown>; json: string; divergence?: Divergence; suffixStart?: number; isToolContinuation: boolean } {
   const toolResults = extractToolResults(request);
   const isToolContinuation = toolResults.length > 0;
   const subAgent = request.codearts?.sub_agent;
@@ -417,7 +471,7 @@ export function buildRequestBody(
     });
   }
 
-  return { body, json: JSON.stringify(body), divergence, suffixStart };
+  return { body, json: JSON.stringify(body), divergence, suffixStart, isToolContinuation };
 }
 
 // ---------------------------------------------------------------------------

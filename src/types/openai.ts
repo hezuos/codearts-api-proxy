@@ -87,18 +87,32 @@ export interface OpenAIChatCompletionRequest {
   codearts?: OpenAICodeArtsRequestOptions | null;
   response_format?: { type: "text" | "json_object" } | null;
   seed?: number | null;
+  /** OpenAI 官方协议字段：流式 usage opt-in */
+  stream_options?: { include_usage?: boolean | null } | null;
 }
 
 export type OpenAIChatCompletion = ChatCompletion & {
   codearts?: OpenAICodeArtsResponseMetadata;
 };
 
-export type OpenAIUsage = CompletionUsage;
+/**
+ * OpenAI usage 扩展 DeepSeek 风格缓存计费字段。
+ *
+ * - `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`：估算的缓存命中/未命中 token 数
+ * - `cache_estimated: true`：标记为估算值（华为云上游不返回真实缓存命中数）
+ */
+export type OpenAIUsage = CompletionUsage & {
+  prompt_cache_hit_tokens?: number;
+  prompt_cache_miss_tokens?: number;
+  cache_estimated?: boolean;
+};
 
 // ==================== 流式响应相关类型 ====================
 
 export type OpenAIChatCompletionChunk = ChatCompletionChunk & {
   codearts?: OpenAICodeArtsResponseMetadata;
+  /** 覆盖 usage 字段类型，让流式 chunk 支持缓存字段 */
+  usage?: OpenAIUsage | null;
 };
 
 /**

@@ -26,6 +26,9 @@ import {
   setLastResponseMessageId,
   getChatIdRole,
   setChainState,
+  getLastPromptTokens,
+  setLastPromptTokens,
+  computeCacheUsage,
 } from "./chat-request";
 
 // ---------------------------------------------------------------------------
@@ -59,7 +62,7 @@ export async function streamHuaweiChatToResponse(
   const chatUrl = `${config.huaweiChatHost}/v1/chat/chat`;
 
   // ── Build initial request ────────────────────────────────────────────────
-  const { body: requestBody, json: body, divergence: initialDivergence } = buildRequestBody(request, session);
+  const { body: requestBody, json: body, divergence: initialDivergence, isToolContinuation } = buildRequestBody(request, session);
   const headers = buildChatHeaders(chatUrl, body, credentials, traceId);
 
   // ── Outgoing request log ──────────────────────────────────────────────────
@@ -142,6 +145,8 @@ export async function streamHuaweiChatToResponse(
   let sseHadError = false;
   let responseContent = "";
   let responseToolCalls: OpenAIChatMessage["tool_calls"] = [];
+  let promptTokens = 0;
+  let completionTokens = 0;
   const sseDebugLog: Array<{ event: number; delta?: string; error?: string; meta?: string }> = [];
 
   // ── SSE stream processing (retriable on rate-limit errors) ────────────────
@@ -161,6 +166,10 @@ export async function streamHuaweiChatToResponse(
         responseMetadata.response_message_id = event.response_message_id;
       if (event.request_message_id)
         responseMetadata.request_message_id = event.request_message_id;
+
+      // 累积 token 计数（增量事件里为 0，只在最后事件有值）
+      if (event.prompt_tokens) promptTokens = event.prompt_tokens;
+      if (event.completion_tokens) completionTokens = event.completion_tokens;
 
       // Log meta event
       if (event.chat_id || event.response_message_id) {
@@ -422,6 +431,11 @@ export async function streamHuaweiChatToResponse(
     log.warn("SSE had error — lastResponseMessageId NOT updated (preserved for retry)");
   }
 
+  // 记录本轮 prompt_tokens 供下一轮续传估算缓存命中（guard > 0）
+  if (responseMetadata.response_message_id && promptTokens > 0 && responseMetadata.chat_id) {
+    setLastPromptTokens(responseMetadata.chat_id, promptTokens);
+  }
+
   // ── Stream complete log ───────────────────────────────────────────────────
   log.info("[codearts→proxy→client] STREAM COMPLETE", {
     sse_events: sseEventCount,
@@ -446,6 +460,34 @@ export async function streamHuaweiChatToResponse(
       choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
     } as OpenAIChatCompletionChunk)}\n\n`,
   );
+
+  // 流式 usage chunk：仅在 stream_options.include_usage=true 时补发（OpenAI 协议 opt-in）
+  if (request.stream_options?.include_usage) {
+    const cid = responseMetadata.chat_id;
+    const cacheUsage = computeCacheUsage(
+      promptTokens,
+      cid ? getLastPromptTokens(cid) : undefined,
+      initialDivergence,
+      !!requestBody.parent_message_id,
+      isToolContinuation,
+    );
+    res.write(
+      `data: ${JSON.stringify({
+        id: completionId,
+        object: "chat.completion.chunk",
+        created,
+        model,
+        choices: [],
+        usage: {
+          prompt_tokens: promptTokens,
+          completion_tokens: completionTokens,
+          total_tokens: promptTokens + completionTokens,
+          ...cacheUsage,
+        },
+      } as OpenAIChatCompletionChunk)}\n\n`,
+    );
+  }
+
   res.write("data: [DONE]\n\n");
   res.end();
 }
