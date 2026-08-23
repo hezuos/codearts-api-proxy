@@ -70,12 +70,12 @@
 
 ## 4. Error recovery in `chat-stream.ts` (streaming)
 
-- [ ] 4.1 **Test first** (in `error-recovery.test.ts` 或新 `stream-recovery.test.ts`，mock upstream SSE + capture res.write):
+- [x] 4.1 **Test first** (in `error-recovery.test.ts` 或新 `stream-recovery.test.ts`，mock upstream SSE + capture res.write):
   - `testStreaming00001216EmitsNoticeChunkAndRetries`: mock SSE 发 00001216, assert res.write 被调且包含 `"[上下文已压缩"` 文本 && 后续流是 forceResync 重试的响应
   - `testStreamingTailDivergenceEmitsNoticeChunk`: mock tail-divergence 错误, assert res.write 包含 `"[上下文链分叉"` 文本
   - `testStreaming00001216AfterResyncNotRetried`: mock resync 后又发 00001216, assert 不再重试（resyncRetried 守卫）
   - `testStreamingNoticeChunkCarriesMetadata`: assert notice chunk 的 `codearts.error_recovery` 字段正确设置
-  - **状态**: 需要 mock SSE + res.write 捕获，现有测试模式不使用 mock。核心实现已通过编译和回归测试，mock 测试作为后续补充。
+  - **状态**: ✅ 已实现 4 个 mock 测试（stream-recovery.test.ts），全通过。
 - [x] 4.2 Implement in `src/upstream/huawei/chat-stream.ts` L250-273, extend condition to match `ChatAgent.00001216`:
   ```ts
   const isPromptLengthExceeds = event.error_code === "ChatAgent.00001216";
@@ -89,7 +89,7 @@
   - If `isPromptLengthExceeds`: content = `"\n[上下文已压缩：累积长度超过上游限制，已重置对话链继续。早期细节可能丢失。]\n"`, metadata `error_recovery = "ChatAgent.00001216"`
   - If `initialDivergence === "tail-divergence"`: content = `"\n[上下文链分叉：检测到尾部不一致，已切换全量重置继续。]\n"`, metadata `error_recovery = "tail-divergence-resync"`
   - **注**: 当前实现直接内联 notice chunk（与现有 rate-limit notice 模式一致），task 5 的 `emitNoticeChunk` 抽象作为后续重构。
-- [ ] 4.4 Run tests: `node -r ts-node/register src/upstream/huawei/stream-recovery.test.ts` — all pass (依赖 4.1 mock 测试)
+- [x] 4.4 Run tests: `node -r ts-node/register src/upstream/huawei/stream-recovery.test.ts` — all pass (依赖 4.1 mock 测试)
 
 ## 5. Unified notice mechanism (`chat-notice.ts`)
 
@@ -108,7 +108,7 @@
 
 ## 6. Refactor existing silent paths to visible
 
-- [ ] 6.1 **Test first** (in `proactive-reset.test.ts` 或 `visibility.test.ts`):
+- [x] 6.1 **Test first** (in `proactive-reset.test.ts` 或 `visibility.test.ts`):
   - `testNonStreamingTailDivergenceResyncMarksMetadata`: mock tail-divergence 错误 + forceResync 成功, assert `codearts.error_recovery === "tail-divergence-resync"`
   - `testStreamingTailDivergenceResyncEmitsNotice`: mock tail-divergence 错误, assert res.write 包含 `"[上下文链分叉"` 文本
   - `testStreamingFoldingEmitsNotice`: buildRequestBody 返回 middle-damage, assert res.write 包含 `"[上下文已重置"` 文本
@@ -121,8 +121,8 @@
   - Streaming: emit notice chunk via `emitNoticeChunk` with content `"\n[上下文已重置：对话链已折叠重建。]\n"` and metadata `context_reset = true` BEFORE calling upstream
   - Non-streaming: set `codearts.context_reset = true` in response metadata after receiving response
   - **注**: 直接内联实现（与现有模式一致），task 5 的 `emitNoticeChunk` 抽象作为后续重构。
-- [ ] 6.6 Run tests: `node -r ts-node/register src/upstream/huawei/visibility.test.ts` — all pass
-- [ ] 6.7 **Regression test**: `testProtocolErrorRemainsSilent` — PROTOCOL_ERROR 路径不触发 notice/metadata
+- [x] 6.6 Run tests: `node -r ts-node/register src/upstream/huawei/visibility.test.ts` — all pass
+- [x] 6.7 **Regression test**: `testProtocolErrorRemainsSilent` — PROTOCOL_ERROR 路径不触发 notice/metadata
 
 ## 7. Documentation
 
@@ -140,8 +140,8 @@
 - [x] 8.2 Run `node -r ts-node/register src/upstream/huawei/proactive-reset.test.ts` — all pass
 - [x] 8.3 Run `node -r ts-node/register src/upstream/huawei/error-recovery.test.ts` — all pass
 - [x] 8.4 Run `node -r ts-node/register src/upstream/huawei/chat-notice.test.ts` — all pass
-- [ ] 8.5 Run `node -r ts-node/register src/upstream/huawei/visibility.test.ts` — all pass
-- [ ] 8.6 Run `node -r ts-node/register src/upstream/huawei/stream-recovery.test.ts` — all pass
+- [x] 8.5 Run `node -r ts-node/register src/upstream/huawei/visibility.test.ts` — all pass
+- [x] 8.6 Run `node -r ts-node/register src/upstream/huawei/stream-recovery.test.ts` — all pass
 - [x] 8.7 **Full suite**: `npm test` 包含所有新测试文件 — all pass
 - [ ] 8.8 Manual smoke test: long conversation approaching 180000 tokens, verify proactive reset triggers (check logs for "PROACTIVE RESET") and client sees notice chunk
 - [ ] 8.9 Manual smoke test: force 00001216 (set `FULL_CONTEXT_MAX_CHARS_BY_MODEL={"GLM-5.2":600000}` temporarily), verify auto-recovery triggers and client sees notice chunk
