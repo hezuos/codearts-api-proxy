@@ -74,6 +74,110 @@ function normalizeToolArgumentsText(
   );
 }
 
+// ---------------------------------------------------------------------------
+// Force-resync synthetic tool_call
+// ---------------------------------------------------------------------------
+// 当上游 00001216（prompt length exceeds limit）forceResync 重试仍失败时，
+// proxy 合成一个 tool_call 下发给客户端，让客户端执行后续传。proxy 通过
+// tool_call_id 注册识别回传的 tool_result，走 forceResync 路径（清空
+// parent_message_id + 全量折叠），让对话能继续。
+//
+// 工具选择策略（按客户端可执行性优先级）：
+//   1. Bash        — echo "codearts::forceResync"（最通用）
+//   2. Glob        — 查找不存在的模式（返回空结果，无副作用）
+//   3. Grep        — 搜索不存在的模式（返回空结果，无副作用）
+//   4. Read        — 读不存在的路径（返回错误，但 tool_result 仍会回传）
+//   5. askFollowupQuestion — 问一个空问题（客户端会提示用户）
+// 若客户端 tools 列表不含任何可识别工具，返回 null（调用方回退到 Error chunk）。
+// ---------------------------------------------------------------------------
+
+export const FORCE_RESYNC_TOOL_RESULT = "codearts::forceResync";
+
+/** 已注册的 forceResync tool_call id 集合（30 分钟 TTL）。 */
+const forceResyncToolCallIds = new Map<string, number>();
+
+function cleanupForceResyncToolCallIds(): void {
+  const now = Date.now();
+  for (const [id, createdAt] of forceResyncToolCallIds) {
+    if (now - createdAt > SYNTHETIC_TOOL_CALL_TTL_MS) {
+      forceResyncToolCallIds.delete(id);
+    }
+  }
+}
+
+/** 判断 tool_call_id 是否为 proxy 合成的 forceResync tool_call。 */
+export function isForceResyncToolCallId(toolCallId: string | undefined): boolean {
+  if (!toolCallId) return false;
+  cleanupForceResyncToolCallIds();
+  return forceResyncToolCallIds.has(toolCallId);
+}
+
+/** 根据客户端 tools 列表选择一个可执行的 forceResync tool_call。返回 null 表示无可用工具。 */
+export function buildForceResyncToolCall(
+  clientToolNames: string[],
+): OpenAIToolCall | null {
+  const nameSet = new Set(clientToolNames);
+  const id = `call_forceresync_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
+  let toolName: string | null = null;
+  let argumentsText = "{}";
+
+  if (nameSet.has("Bash")) {
+    toolName = "Bash";
+    argumentsText = JSON.stringify({ command: `echo "${FORCE_RESYNC_TOOL_RESULT}"` });
+  } else if (nameSet.has("Glob")) {
+    toolName = "Glob";
+    argumentsText = JSON.stringify({ pattern: FORCE_RESYNC_TOOL_RESULT });
+  } else if (nameSet.has("Grep")) {
+    toolName = "Grep";
+    argumentsText = JSON.stringify({ pattern: FORCE_RESYNC_TOOL_RESULT });
+  } else if (nameSet.has("Read")) {
+    toolName = "Read";
+    argumentsText = JSON.stringify({ filePath: FORCE_RESYNC_TOOL_RESULT });
+  } else if (nameSet.has("askFollowupQuestion")) {
+    toolName = "askFollowupQuestion";
+    argumentsText = JSON.stringify({ question: FORCE_RESYNC_TOOL_RESULT });
+  }
+
+  if (!toolName) return null;
+
+  cleanupForceResyncToolCallIds();
+  forceResyncToolCallIds.set(id, Date.now());
+  logger.info("[proxy→client] synthesized forceResync tool_call", { toolName, id });
+  return {
+    id,
+    type: "function",
+    function: { name: toolName, arguments: argumentsText },
+  };
+}
+
+/**
+ * 检测请求尾部 tool message 是否为 forceResync tool_result（通过 tool_call_id 注册识别）。
+ * 返回 true 时，调用方应走 forceResync 路径，并从 messages 中剥离该 tool exchange。
+ */
+export function detectForceResyncToolResult(
+  request: OpenAIChatCompletionRequest,
+): boolean {
+  const lastMsg = request.messages[request.messages.length - 1];
+  if (!lastMsg || lastMsg.role !== "tool") return false;
+  return isForceResyncToolCallId(lastMsg.tool_call_id);
+}
+
+/**
+ * 从 request.messages 尾部剥离 forceResync tool exchange（assistant tool_call + tool result）。
+ * 返回新 messages 数组（不修改原数组）。若尾部不是 forceResync exchange，返回原数组。
+ */
+export function stripForceResyncToolExchange(
+  request: OpenAIChatCompletionRequest,
+): OpenAIChatMessage[] {
+  const n = request.messages.length;
+  if (n < 2) return request.messages;
+  const last = request.messages[n - 1];
+  const prev = request.messages[n - 2];
+  if (last.role !== "tool" || prev.role !== "assistant") return request.messages;
+  if (!isForceResyncToolCallId(last.tool_call_id)) return request.messages;
+  return request.messages.slice(0, n - 2);
+}
+
 export function getTrailingToolExchange(
   request: OpenAIChatCompletionRequest,
 ): {

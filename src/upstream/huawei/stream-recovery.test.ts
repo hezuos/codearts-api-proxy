@@ -89,6 +89,8 @@ const { streamHuaweiChatToResponse } = require("./chat-stream") as typeof import
 const { encryptString } = require("../../auth/crypto/encryption") as typeof import("../../auth/crypto/encryption");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const translate = require("./chat-translate") as typeof import("./chat-translate");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { buildForceResyncToolCall } = require("./chat-recovery") as typeof import("./chat-recovery");
 import { createHash } from "crypto";
 import type { OpenAIChatMessage, OpenAIChatCompletionRequest } from "../../types/openai";
 import type { StoredHuaweiSession } from "../../auth/huawei/session-store";
@@ -111,8 +113,8 @@ function seedChain(chatId: string, prefix: OpenAIChatMessage[], lastReply: OpenA
   chatRequestModule.setChainState(chatId, { prefixChain: chain.hash, prefixLen: chain.length, lastReplyHash: hash(lastReply) });
   chatRequestModule.setLastResponseMessageId(chatId, "parent-1");
 }
-function request(chatId: string, messages: OpenAIChatMessage[]): OpenAIChatCompletionRequest {
-  return { model: "GLM-5.1", messages, stream: true, codearts: { chat_id: chatId } };
+function request(chatId: string, messages: OpenAIChatMessage[], tools?: OpenAIChatCompletionRequest["tools"]): OpenAIChatCompletionRequest {
+  return { model: "GLM-5.1", messages, stream: true, codearts: { chat_id: chatId }, tools };
 }
 
 /** 从 res.writes 中提取所有 SSE chunk 的 content 文本 */
@@ -237,6 +239,172 @@ async function testStreamingNoticeChunkCarriesMetadata(): Promise<void> {
   assert.ok(hasErrorRecovery, `notice chunk should carry error_recovery metadata; got metas: ${JSON.stringify(metas)}`);
 }
 
+async function testStreaming00001216AfterResyncEmitsForceResyncToolCall(): Promise<void> {
+  // 00001216 重试仍失败时，应合成 tool_call 让客户端续传（而非 Error chunk + stop）。
+  // 客户端传了 Bash 工具，应选择 Bash echo 方案。
+  const chatId = "str-555555555555555555555555555555";
+  const prefix = [user("old"), assistant("old answer")];
+  const lastReply = assistant("new answer");
+  seedChain(chatId, prefix, lastReply);
+
+  installMock(async () => {
+    // 每次都返回 00001216
+    return { status: 200, stream: sseStream(errorEvents("ChatAgent.00001216", "exceeds")) };
+  });
+
+  const bashTool = { type: "function" as const, function: { name: "Bash", description: "", parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"], additionalProperties: false } } };
+  const { res, writes } = mockRes();
+  await streamHuaweiChatToResponse(request(chatId, [...prefix, lastReply, user("next")], [bashTool]), session, "trace-5", res);
+
+  // 应该只调用 2 次（resyncRetried guard）
+  assert.equal(callCount, 2, "should attempt exactly 2 times (resyncRetried guard)");
+
+  // 应该下发 tool_call chunk（Bash echo codearts::forceResync）
+  let foundToolCall = false;
+  let finishReason: string | undefined;
+  for (const w of writes) {
+    if (!w.startsWith("data: ")) continue;
+    const line = w.replace("data: ", "").trim();
+    if (line === "[DONE]") continue;
+    try {
+      const chunk = JSON.parse(line);
+      const delta = chunk.choices?.[0]?.delta;
+      if (delta?.tool_calls) {
+        for (const tc of delta.tool_calls) {
+          if (tc.function?.name === "Bash") {
+            const args = JSON.parse(tc.function.arguments);
+            if (args.command && args.command.includes("codearts::forceResync")) {
+              foundToolCall = true;
+            }
+          }
+        }
+      }
+      if (chunk.choices?.[0]?.finish_reason) {
+        finishReason = chunk.choices[0].finish_reason;
+      }
+    } catch { /* ignore */ }
+  }
+  assert.ok(foundToolCall, "should emit Bash echo codearts::forceResync tool_call");
+  assert.equal(finishReason, "tool_calls", `finish_reason should be "tool_calls" to let client continue; got: ${finishReason}`);
+}
+
+async function testForceResyncToolResultTriggersForceResyncPath(): Promise<void> {
+  // 客户端回传 forceResync tool_result 时，proxy 应走 forceResync 路径
+  // （清空 parent_message_id + 全量折叠）。
+  // 通过 buildForceResyncToolCall 生成 tool_call（注册 id），模拟客户端回传。
+  const chatId = "str-666666666666666666666666666666";
+  const prefix = [user("old"), assistant("old answer")];
+  const lastReply = assistant("new answer");
+  seedChain(chatId, prefix, lastReply);
+
+  // 用 buildForceResyncToolCall 生成 tool_call（会注册 id 到 forceResyncToolCallIds）
+  const forceResyncToolCall = buildForceResyncToolCall(["Bash"]);
+  assert.ok(forceResyncToolCall, "should synthesize forceResync tool_call");
+  const forceResyncAssistant: OpenAIChatMessage = {
+    role: "assistant",
+    content: null,
+    refusal: null,
+    tool_calls: [forceResyncToolCall],
+  };
+  const forceResyncTool: OpenAIChatMessage = {
+    role: "tool",
+    content: "codearts::forceResync", // 客户端执行 echo 后的结果
+    refusal: null,
+    tool_call_id: forceResyncToolCall.id,
+  };
+
+  let capturedBody: string | null = null;
+  installMock(async (_url, _headers, body) => {
+    capturedBody = body;
+    return { status: 200, stream: sseStream(successEvents()) };
+  });
+
+  const { res } = mockRes();
+  await streamHuaweiChatToResponse(
+    request(chatId, [...prefix, lastReply, user("next"), forceResyncAssistant, forceResyncTool]),
+    session,
+    "trace-6",
+    res,
+  );
+
+  assert.ok(capturedBody, "should have captured request body");
+  const parsed = JSON.parse(capturedBody as string);
+  assert.equal(parsed.parent_message_id, "", `forceResync should clear parent_message_id; got: ${parsed.parent_message_id}`);
+  // messages 应该是折叠后的单条文本（而非 tool continuation 的空数组）
+  assert.ok(Array.isArray(parsed.messages) && parsed.messages.length === 1, "should fold to single message");
+  assert.equal(parsed.messages[0].type, "text", "folded message should be text type");
+}
+
+async function testStreaming00001216NoClientToolsFallsBackToErrorChunk(): Promise<void> {
+  // 客户端未传 tools 时，无法合成可执行的 tool_call，应回退到 Error chunk + stop。
+  const chatId = "str-777777777777777777777777777777";
+  const prefix = [user("old"), assistant("old answer")];
+  const lastReply = assistant("new answer");
+  seedChain(chatId, prefix, lastReply);
+
+  installMock(async () => {
+    return { status: 200, stream: sseStream(errorEvents("ChatAgent.00001216", "exceeds")) };
+  });
+
+  const { res, writes } = mockRes();
+  // 不传 tools（undefined）
+  await streamHuaweiChatToResponse(request(chatId, [...prefix, lastReply, user("next")]), session, "trace-7", res);
+
+  let foundErrorChunk = false;
+  let finishReason: string | undefined;
+  for (const w of writes) {
+    if (!w.startsWith("data: ")) continue;
+    const line = w.replace("data: ", "").trim();
+    if (line === "[DONE]") continue;
+    try {
+      const chunk = JSON.parse(line);
+      if (chunk.choices?.[0]?.delta?.content?.includes("[Error:")) foundErrorChunk = true;
+      if (chunk.choices?.[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
+    } catch { /* ignore */ }
+  }
+  assert.ok(foundErrorChunk, "should emit Error chunk when no client tools available");
+  assert.equal(finishReason, "stop", `finish_reason should be "stop" for fallback; got: ${finishReason}`);
+}
+
+async function testStreaming00001216GlobOnlyClientUsesGlob(): Promise<void> {
+  // 客户端只传了 Glob（没有 Bash），应选择 Glob 方案合成 tool_call。
+  const chatId = "str-888888888888888888888888888888";
+  const prefix = [user("old"), assistant("old answer")];
+  const lastReply = assistant("new answer");
+  seedChain(chatId, prefix, lastReply);
+
+  installMock(async () => {
+    return { status: 200, stream: sseStream(errorEvents("ChatAgent.00001216", "exceeds")) };
+  });
+
+  const globTool = { type: "function" as const, function: { name: "Glob", description: "", parameters: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"], additionalProperties: false } } };
+  const { res, writes } = mockRes();
+  await streamHuaweiChatToResponse(request(chatId, [...prefix, lastReply, user("next")], [globTool]), session, "trace-8", res);
+
+  let foundGlobToolCall = false;
+  let finishReason: string | undefined;
+  for (const w of writes) {
+    if (!w.startsWith("data: ")) continue;
+    const line = w.replace("data: ", "").trim();
+    if (line === "[DONE]") continue;
+    try {
+      const chunk = JSON.parse(line);
+      const delta = chunk.choices?.[0]?.delta;
+      if (delta?.tool_calls) {
+        for (const tc of delta.tool_calls) {
+          if (tc.function?.name === "Glob") {
+            const args = JSON.parse(tc.function.arguments);
+            if (args.pattern === "codearts::forceResync") foundGlobToolCall = true;
+          }
+        }
+      }
+      if (chunk.choices?.[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
+    } catch { /* ignore */ }
+  }
+  assert.ok(foundGlobToolCall, "should emit Glob tool_call when only Glob available");
+  assert.equal(finishReason, "tool_calls", `finish_reason should be "tool_calls"; got: ${finishReason}`);
+}
+
 // ---------------------------------------------------------------------------
 // Run
 // ---------------------------------------------------------------------------
@@ -246,5 +414,9 @@ async function testStreamingNoticeChunkCarriesMetadata(): Promise<void> {
   await testStreamingTailDivergenceEmitsNoticeChunk();
   await testStreaming00001216AfterResyncNotRetried();
   await testStreamingNoticeChunkCarriesMetadata();
+  await testStreaming00001216AfterResyncEmitsForceResyncToolCall();
+  await testForceResyncToolResultTriggersForceResyncPath();
+  await testStreaming00001216NoClientToolsFallsBackToErrorChunk();
+  await testStreaming00001216GlobOnlyClientUsesGlob();
   console.log("All stream-recovery tests passed.");
 })().catch((e) => { console.error(e); process.exit(1); });

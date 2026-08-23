@@ -16,7 +16,7 @@ import type {
   OpenAIChatMessage,
 } from "../../types/openai";
 import { cleanToolCallDeltas, computeChainForMessages, normalizeForChain, normalizeToolCallsForChain } from "./chat-translate";
-import { buildRecoveryChunks, buildSyntheticRecoveryToolCalls } from "./chat-recovery";
+import { buildRecoveryChunks, buildSyntheticRecoveryToolCalls, buildForceResyncToolCall } from "./chat-recovery";
 import { emitNoticeChunk } from "./chat-notice";
 import { parseSSE } from "./chat-protocol";
 import {
@@ -345,11 +345,23 @@ export async function streamHuaweiChatToResponse(
 
         // ── Recovery path (non-retryable or retry exhausted) ──────────────
         const recoveryToolCalls = buildSyntheticRecoveryToolCalls(request);
-        if (recoveryToolCalls.length > 0) {
+        // 00001216 forceResync 重试仍失败时，合成 tool_call 让客户端续传。
+        // 根据客户端 tools 列表选择可执行的工具（Bash/Glob/Grep/Read/askFollowupQuestion）。
+        // 客户端执行后回传 tool_result，proxy 通过 tool_call_id 注册识别后走 forceResync 路径。
+        const clientToolNames = (request.tools ?? []).map((t) => t.function.name);
+        const forceResyncToolCall =
+          recoveryToolCalls.length === 0 && event.error_code === "ChatAgent.00001216"
+            ? buildForceResyncToolCall(clientToolNames)
+            : null;
+        if (recoveryToolCalls.length > 0 || forceResyncToolCall) {
+          const effectiveRecoveryToolCalls = forceResyncToolCall
+            ? [forceResyncToolCall]
+            : recoveryToolCalls;
           log.warn("[proxy→client] synthetic recovery tool_calls", {
             code: event.error_code,
-            count: recoveryToolCalls.length,
-            names: recoveryToolCalls.map((tc) => tc.function.name),
+            count: effectiveRecoveryToolCalls.length,
+            names: effectiveRecoveryToolCalls.map((tc) => tc.function.name),
+            forceResync: !!forceResyncToolCall,
           });
           const recovery = buildRecoveryChunks({
             completionId,
@@ -360,11 +372,11 @@ export async function streamHuaweiChatToResponse(
             sentMetadata,
             errorCode: event.error_code,
             errorMsg: event.error_msg ?? undefined,
-            recoveryToolCalls,
+            recoveryToolCalls: effectiveRecoveryToolCalls,
           });
           sentRole = recovery.sentRole;
           sentMetadata = recovery.sentMetadata;
-          sseToolCallCount += recoveryToolCalls.length;
+          sseToolCallCount += effectiveRecoveryToolCalls.length;
           for (const chunk of recovery.chunks) {
             res.write(`data: ${JSON.stringify(chunk)}\n\n`);
           }

@@ -22,6 +22,10 @@ import {
   computeChainForMessages,
   normalizeForChain,
 } from "./chat-translate";
+import {
+  detectForceResyncToolResult,
+  stripForceResyncToolExchange,
+} from "./chat-recovery";
 
 // ---------------------------------------------------------------------------
 // Model mapping
@@ -314,7 +318,21 @@ export function buildRequestBody(
   session: StoredHuaweiSession,
   options: { forceResync?: boolean } = {},
 ): { body: Record<string, unknown>; json: string; divergence?: Divergence; suffixStart?: number; isToolContinuation: boolean; proactiveReset: boolean } {
-  const toolResults = extractToolResults(request);
+  // 检测客户端回传的 forceResync tool_result（由 proxy 合成的 Bash echo tool_call 触发）。
+  // 检测到时：剥离该 tool exchange，自动走 forceResync 路径。
+  const forceResyncFromToolResult = detectForceResyncToolResult(request);
+  const effectiveRequest: OpenAIChatCompletionRequest = forceResyncFromToolResult
+    ? { ...request, messages: stripForceResyncToolExchange(request) }
+    : request;
+  if (forceResyncFromToolResult) {
+    logger.info("[client→proxy] detected forceResync tool_result — switching to forceResync path", {
+      messages_before: request.messages.length,
+      messages_after: effectiveRequest.messages.length,
+    });
+  }
+  const forceResync = options.forceResync || forceResyncFromToolResult;
+
+  const toolResults = extractToolResults(effectiveRequest);
   const isToolContinuation = toolResults.length > 0;
   const subAgent = request.codearts?.sub_agent;
 
@@ -322,7 +340,7 @@ export function buildRequestBody(
   const modelId = resolveModelId(request);
 
   const chatId =
-    request.codearts?.chat_id?.trim() || deriveConversationId(request.messages, session.providerAccountId);
+    request.codearts?.chat_id?.trim() || deriveConversationId(effectiveRequest.messages, session.providerAccountId);
 
   // Sub-agent / main-agent chat_id collision detection
   const currentRole = subAgent ? "sub" : "main";
@@ -372,11 +390,11 @@ export function buildRequestBody(
     !callerProvidedParent &&
     !!chainState;
 
-  if (options.forceResync && !isToolContinuation) {
+  if (forceResync && !isToolContinuation) {
     divergence = "middle-damage";
     parentMessageId = "";
   } else if (canRepair) {
-    const classified = classifyDivergence(request.messages, chainState);
+    const classified = classifyDivergence(effectiveRequest.messages, chainState);
     divergence = classified.divergence;
     suffixStart = classified.suffixStart;
     if (divergence === "middle-damage" || divergence === "duplicate/stale") {
@@ -409,17 +427,17 @@ export function buildRequestBody(
   }
   if (isToolContinuation) {
     messagesBody = [];
-  } else if (divergence === "middle-damage" || divergence === "duplicate/stale" || options.forceResync) {
+  } else if (divergence === "middle-damage" || divergence === "duplicate/stale" || forceResync) {
     const folded = foldFullConversation(
-      request.messages,
+      effectiveRequest.messages,
       resolveFullContextMaxChars(modelId),
     );
-    messagesBody = [{ type: "text", content: folded || extractUserMessage(request.messages) }];
+    messagesBody = [{ type: "text", content: folded || extractUserMessage(effectiveRequest.messages) }];
     fullContextInjected = !!folded;
     fullContextChars = folded.length;
   } else if (divergence === "tail-divergence" && suffixStart !== undefined) {
     const folded = foldMissingSegment(
-      request.messages,
+      effectiveRequest.messages,
       suffixStart,
       resolveFullContextMaxChars(modelId),
     );
@@ -431,7 +449,7 @@ export function buildRequestBody(
       // 若折叠仍为空，绝不发送已确认的 user/system → 清空 parent 并全量折叠重置。
       parentMessageId = "";
       const fullFolded = foldFullConversation(
-        request.messages,
+        effectiveRequest.messages,
         resolveFullContextMaxChars(modelId),
       );
       messagesBody = [{ type: "text", content: fullFolded || "" }];
@@ -445,24 +463,24 @@ export function buildRequestBody(
       !callerProvidedParent &&
       !trackedParent &&
       !subAgent &&
-      request.messages.length > 1;
+      effectiveRequest.messages.length > 1;
 
     if (shouldInject) {
-      const folded = foldFullConversation(request.messages, resolveFullContextMaxChars(modelId));
+      const folded = foldFullConversation(effectiveRequest.messages, resolveFullContextMaxChars(modelId));
       if (folded) {
         messagesBody = [{ type: "text", content: folded }];
         fullContextInjected = true;
         fullContextChars = folded.length;
       } else {
-        messagesBody = [{ type: "text", content: extractUserMessage(request.messages) }];
+        messagesBody = [{ type: "text", content: extractUserMessage(effectiveRequest.messages) }];
       }
     } else {
-      const userMsg = extractUserMessage(request.messages);
-      const lastMsg = request.messages[request.messages.length - 1];
+      const userMsg = extractUserMessage(effectiveRequest.messages);
+      const lastMsg = effectiveRequest.messages[effectiveRequest.messages.length - 1];
       if (lastMsg?.role === "tool" && lastMsg.content) {
         const toolContent = normalizeMessageContent(lastMsg.content);
         const combined = toolContent
-          ? `${userMsg ? `${userMsg}\\n\\n` : ""}[工具执行结果]\\n${toolContent}`
+          ? `${userMsg ? `${userMsg}\n\n` : ""}[工具执行结果]\n${toolContent}`
           : userMsg || "[工具执行结果为空]";
         messagesBody = [{ type: "text", content: combined }];
       } else {
@@ -476,7 +494,7 @@ export function buildRequestBody(
     messages: messagesBody,
     client: "IDE",
     task: "plan-execute",
-    task_parameters: buildTaskParameters(request, tools),
+    task_parameters: buildTaskParameters(effectiveRequest, tools),
     batch_task_parameters: [],
     attempt: 1,
     user_id: userId,
@@ -493,7 +511,7 @@ export function buildRequestBody(
       fullContextInjected,
       foldedChars: fullContextChars,
       suffixStart,
-      messagesCount: request.messages.length,
+      messagesCount: effectiveRequest.messages.length,
       model_id: modelId,
     });
   }
