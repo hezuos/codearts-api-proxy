@@ -313,7 +313,7 @@ export function buildRequestBody(
   request: OpenAIChatCompletionRequest,
   session: StoredHuaweiSession,
   options: { forceResync?: boolean } = {},
-): { body: Record<string, unknown>; json: string; divergence?: Divergence; suffixStart?: number; isToolContinuation: boolean } {
+): { body: Record<string, unknown>; json: string; divergence?: Divergence; suffixStart?: number; isToolContinuation: boolean; proactiveReset: boolean } {
   const toolResults = extractToolResults(request);
   const isToolContinuation = toolResults.length > 0;
   const subAgent = request.codearts?.sub_agent;
@@ -385,6 +385,27 @@ export function buildRequestBody(
       // 避免客户端重试时永久卡死）。
       parentMessageId = "";
     }
+  }
+
+  // 主动重置：当累积 prompt_tokens 接近上游硬限制时，强制全量折叠重置，
+  // 避免 ChatAgent.00001216 错误。仅在 normal 热链续传路径触发。
+  let proactiveReset = false;
+  if (
+    (divergence === undefined || divergence === "normal") &&
+    parentMessageId &&
+    !isToolContinuation &&
+    !subAgent &&
+    !callerProvidedParent &&
+    (getLastPromptTokens(chatId) ?? 0) > config.upstreamPromptTokenResetThreshold
+  ) {
+    divergence = "middle-damage";
+    parentMessageId = "";
+    proactiveReset = true;
+    logger.info("[proxy→codearts] PROACTIVE RESET (prompt_tokens threshold exceeded)", {
+      chat_id: chatId,
+      lastPromptTokens: getLastPromptTokens(chatId),
+      threshold: config.upstreamPromptTokenResetThreshold,
+    });
   }
   if (isToolContinuation) {
     messagesBody = [];
@@ -477,7 +498,7 @@ export function buildRequestBody(
     });
   }
 
-  return { body, json: JSON.stringify(body), divergence, suffixStart, isToolContinuation };
+  return { body, json: JSON.stringify(body), divergence, suffixStart, isToolContinuation, proactiveReset };
 }
 
 // ---------------------------------------------------------------------------

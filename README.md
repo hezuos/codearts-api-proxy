@@ -165,6 +165,8 @@ volumes:
 | `FULL_CONTEXT_MAX_CHARS` | `8000` | 折叠文本最大字符数（保守对齐 openpangu-2.0-flash ~9K token 窗口） |
 | `FULL_CONTEXT_MAX_CHARS_BY_MODEL` | `{}` | 按模型覆盖折叠阈值，JSON 格式，如 `{"GLM-5.2":500000,"openpangu-2.0-pro":180000}` |
 | `CHAIN_DIVERGENCE_REPAIR_ENABLED` | `false` | 热链分叉检测与修复开关：切换 provider 后检测上下文分叉，尾部补发/中段重置 |
+| `UPSTREAM_PROMPT_TOKEN_LIMIT` | `196608` | 上游 CodeArts 累积 prompt 长度硬限制（token），超过触发 `ChatAgent.00001216` |
+| `UPSTREAM_PROMPT_TOKEN_RESET_THRESHOLD` | `180000` | 主动重置阈值：累积 prompt_tokens 超过此值时，热链续传自动全量折叠重置（须 < LIMIT） |
 | `MISSING_CONTEXT_HINT` | 中文默认模板 | 缺失段补发的辅助提示词模板：标记补传历史仅作参考与当前用户请求 |
 | `ADMIN_PASSWORD`             | 无                                                   | Admin 密码（优先于文件存储的密码）         |
 | `LOG_LEVEL`                 | `debug`（开发）/ `info`（生产）                      | 日志级别                                   |

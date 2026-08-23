@@ -46,7 +46,7 @@ export async function sendHuaweiChatRequest(
   const log = logger.withTrace(traceId);
   const credentials = getCredentials(session);
   const chatUrl = `${config.huaweiChatHost}/v1/chat/chat`;
-  const { body: requestBody, json: body, divergence, isToolContinuation } = buildRequestBody(request, session, options);
+  const { body: requestBody, json: body, divergence, isToolContinuation, proactiveReset } = buildRequestBody(request, session, options);
   const headers = buildChatHeaders(chatUrl, body, credentials, traceId);
 
   // ── Outgoing request log ──────────────────────────────────────────────────
@@ -91,6 +91,10 @@ export async function sendHuaweiChatRequest(
       log.warn("[proxy→codearts] tail-divergence repair HTTP failure, retrying full reset", { status });
       return sendHuaweiChatRequest(request, session, traceId, signal, { forceResync: true });
     }
+    if (errorBody.includes("ChatAgent.00001216") && !options.forceResync) {
+      log.warn("[proxy→codearts] prompt length exceeds upstream limit, retrying with full context reset", { status });
+      return sendHuaweiChatRequest(request, session, traceId, signal, { forceResync: true });
+    }
     throw new Error(
       `CodeArts chat returned HTTP ${status}: ${errorBody.substring(0, 500)}`,
     );
@@ -125,6 +129,12 @@ export async function sendHuaweiChatRequest(
       log.error("SSE error from CodeArts", { code: event.error_code, msg: event.error_msg ?? "unknown" });
       if (divergence === "tail-divergence" && !options.forceResync) {
         log.warn("[proxy→codearts] tail-divergence repair SSE failure, retrying full reset", {
+          code: event.error_code,
+        });
+        return sendHuaweiChatRequest(request, session, traceId, signal, { forceResync: true });
+      }
+      if (event.error_code === "ChatAgent.00001216" && !options.forceResync) {
+        log.warn("[proxy→codearts] prompt length exceeds upstream limit (SSE), retrying with full context reset", {
           code: event.error_code,
         });
         return sendHuaweiChatRequest(request, session, traceId, signal, { forceResync: true });
@@ -215,6 +225,14 @@ export async function sendHuaweiChatRequest(
   // 导致 cacheHit 永远等于 promptTokens、cacheMiss 永远为 0。
   if (responseMetadata.response_message_id && promptTokens > 0 && cid) {
     setLastPromptTokens(cid, promptTokens);
+  }
+
+  // Mark context reset in metadata for client visibility (folding / proactive reset / forceResync)
+  if ((divergence === "middle-damage" || divergence === "duplicate/stale") && !proactiveReset) {
+    responseMetadata.context_reset = "true";
+  }
+  if (proactiveReset) {
+    responseMetadata.context_reset = "proactive";
   }
 
   return {

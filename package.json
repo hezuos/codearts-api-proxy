@@ -1,6 +1,6 @@
 {
   "name": "codearts-agent-proxy",
-  "version": "2.2.4",
+  "version": "2.2.5",
   "description": "A proxy service that wraps CodeArts Agent LLM interfaces into standard OpenAI-compatible API",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -9,7 +9,7 @@
     "build": "npm run generate-version && node ./node_modules/typescript/bin/tsc",
     "start": "node dist/index.js",
     "dev": "npm run generate-version && node -r ts-node/register src/index.ts",
-    "test": "node -r ts-node/register src/config-env.test.ts && node -r ts-node/register src/upstream/huawei/chat.test.ts && node -r ts-node/register src/upstream/huawei/tools.test.ts && node -r ts-node/register src/routes/huawei-auth.test.ts && node -r ts-node/register src/upstream/huawei/chat-translate.test.ts && node -r ts-node/register src/upstream/huawei/chat-request-context.test.ts && node -r ts-node/register src/upstream/huawei/cache-usage.test.ts",
+    "test": "node -r ts-node/register src/config-env.test.ts && node -r ts-node/register src/upstream/huawei/chat.test.ts && node -r ts-node/register src/upstream/huawei/tools.test.ts && node -r ts-node/register src/routes/huawei-auth.test.ts && node -r ts-node/register src/upstream/huawei/chat-translate.test.ts && node -r ts-node/register src/upstream/huawei/chat-request-context.test.ts && node -r ts-node/register src/upstream/huawei/cache-usage.test.ts && node -r ts-node/register src/upstream/huawei/proactive-reset.test.ts && node -r ts-node/register src/upstream/huawei/chat-notice.test.ts",
     "verify:real": "node -r ts-node/register scripts/verify-warm-switch-context-real.ts",
     "verify:tool-continuation": "node -r ts-node/register scripts/verify-tool-continuation-real.ts",
     "lint": "eslint src/**/*.ts",

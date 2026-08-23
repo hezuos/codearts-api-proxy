@@ -17,6 +17,7 @@ import type {
 } from "../../types/openai";
 import { cleanToolCallDeltas, computeChainForMessages, normalizeForChain, normalizeToolCallsForChain } from "./chat-translate";
 import { buildRecoveryChunks, buildSyntheticRecoveryToolCalls } from "./chat-recovery";
+import { emitNoticeChunk } from "./chat-notice";
 import { parseSSE } from "./chat-protocol";
 import {
   buildRequestBody,
@@ -62,7 +63,7 @@ export async function streamHuaweiChatToResponse(
   const chatUrl = `${config.huaweiChatHost}/v1/chat/chat`;
 
   // ── Build initial request ────────────────────────────────────────────────
-  const { body: requestBody, json: body, divergence: initialDivergence, isToolContinuation } = buildRequestBody(request, session);
+  const { body: requestBody, json: body, divergence: initialDivergence, isToolContinuation, proactiveReset } = buildRequestBody(request, session);
   const headers = buildChatHeaders(chatUrl, body, credentials, traceId);
 
   // ── Outgoing request log ──────────────────────────────────────────────────
@@ -138,6 +139,36 @@ export async function streamHuaweiChatToResponse(
   let sentMetadata = false;
   const responseMetadata: Record<string, string | undefined> = {};
 
+  // ── Proactive reset / folding notice chunk (before upstream stream starts) ──
+  // Gives client visibility that context was compressed/reset before the request.
+  if (proactiveReset) {
+    const result = emitNoticeChunk(res, {
+      id: completionId,
+      created,
+      model,
+      content: "\n[上下文已压缩：累积长度接近上游限制，已主动重置对话链继续。早期细节可能丢失。]\n",
+      sentRole,
+      sentMetadata,
+      responseMetadata,
+      extraMetadata: { context_reset: "proactive" },
+    });
+    sentRole = result.sentRole;
+    sentMetadata = result.sentMetadata;
+  } else if (initialDivergence === "middle-damage" || initialDivergence === "duplicate/stale") {
+    const result = emitNoticeChunk(res, {
+      id: completionId,
+      created,
+      model,
+      content: "\n[上下文已重置：对话链已折叠重建。]\n",
+      sentRole,
+      sentMetadata,
+      responseMetadata,
+      extraMetadata: { context_reset: "true" },
+    });
+    sentRole = result.sentRole;
+    sentMetadata = result.sentMetadata;
+  }
+
   // ── SSE event counters ────────────────────────────────────────────────────
   let sseEventCount = 0;
   let sseTextChars = 0;
@@ -197,26 +228,17 @@ export async function streamHuaweiChatToResponse(
           log.info("[codearts→proxy] Rate-limit SSE error, will retry", { code: event.error_code, retryCount });
 
           // Send a notice chunk to the client so they know what's happening
-          const noticeChunk: OpenAIChatCompletionChunk = {
+          const noticeResult = emitNoticeChunk(res, {
             id: completionId,
-            object: "chat.completion.chunk",
             created,
             model,
-            ...(sentMetadata ? {} : { codearts: { ...responseMetadata } }),
-            choices: [
-              {
-                index: 0,
-                delta: {
-                  ...(sentRole ? {} : { role: "assistant" as const }),
-                  content: `\n[上游限流: ${event.error_code} - ${event.error_msg ?? "unknown"}；正在重试...]\n`,
-                },
-                finish_reason: null,
-              },
-            ],
-          };
-          sentRole = true;
-          sentMetadata = true;
-          res.write(`data: ${JSON.stringify(noticeChunk)}\n\n`);
+            content: `\n[上游限流: ${event.error_code} - ${event.error_msg ?? "unknown"}；正在重试...]\n`,
+            sentRole,
+            sentMetadata,
+            responseMetadata,
+          });
+          sentRole = noticeResult.sentRole;
+          sentMetadata = noticeResult.sentMetadata;
 
           // Wait before retrying
           await new Promise((resolve) => setTimeout(resolve, SSE_RETRY_DELAY_MS));
@@ -254,6 +276,19 @@ export async function streamHuaweiChatToResponse(
           log.warn("[proxy→codearts] tail-divergence repair failed, retrying full reset", {
             code: event.error_code,
           });
+          // Emit notice chunk so client sees the resync attempt
+          const noticeResult = emitNoticeChunk(res, {
+            id: completionId,
+            created,
+            model,
+            content: "\n[链尾偏离修复失败，正在全量重置重试...]\n",
+            sentRole,
+            sentMetadata,
+            responseMetadata,
+            extraMetadata: { error_recovery: "tail-divergence-resync" },
+          });
+          sentRole = noticeResult.sentRole;
+          sentMetadata = noticeResult.sentMetadata;
           const resyncBody = buildRequestBody(request, session, { forceResync: true });
           const resyncHeaders = buildChatHeaders(chatUrl, resyncBody.json, credentials, traceId);
           try {
@@ -267,6 +302,42 @@ export async function streamHuaweiChatToResponse(
             log.error("[proxy→codearts] full-reset fallback HTTP error", { status: resyncResult.status });
           } catch (resyncError) {
             log.error("[proxy→codearts] full-reset fallback failed", {
+              error: resyncError instanceof Error ? resyncError.message : String(resyncError),
+            });
+          }
+        }
+
+        // ── ChatAgent.00001216 recovery: prompt length exceeds upstream limit ──
+        if (event.error_code === "ChatAgent.00001216" && !resyncRetried) {
+          resyncRetried = true;
+          log.warn("[proxy→codearts] prompt length exceeds upstream limit, retrying with full context reset", {
+            code: event.error_code,
+          });
+          const noticeResult = emitNoticeChunk(res, {
+            id: completionId,
+            created,
+            model,
+            content: "\n[上下文长度超过上游限制，正在全量重置重试...]\n",
+            sentRole,
+            sentMetadata,
+            responseMetadata,
+            extraMetadata: { error_recovery: "ChatAgent.00001216" },
+          });
+          sentRole = noticeResult.sentRole;
+          sentMetadata = noticeResult.sentMetadata;
+          const resyncBody = buildRequestBody(request, session, { forceResync: true });
+          const resyncHeaders = buildChatHeaders(chatUrl, resyncBody.json, credentials, traceId);
+          try {
+            const resyncResult = await httpsPost(chatUrl, resyncHeaders, resyncBody.json, signal);
+            if (resyncResult.status === 200) {
+              currentStream = resyncResult.stream;
+              shouldRetry = true;
+              sseHadError = false;
+              break;
+            }
+            log.error("[proxy→codearts] 00001216 full-reset fallback HTTP error", { status: resyncResult.status });
+          } catch (resyncError) {
+            log.error("[proxy→codearts] 00001216 full-reset fallback failed", {
               error: resyncError instanceof Error ? resyncError.message : String(resyncError),
             });
           }

@@ -31,6 +31,10 @@ export interface OpenAICodeArtsResponseMetadata {
   response_message_id?: string;
   request_message_id?: string;
   model_id?: string;
+  /** "proactive" = proactive reset triggered; "true" = folding/forceResync reset */
+  context_reset?: string;
+  /** Error code that triggered auto-recovery (e.g. "ChatAgent.00001216", "tail-divergence-resync") */
+  error_recovery?: string;
 }
 
 export interface CodeArtsToolResult {

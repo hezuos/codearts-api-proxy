@@ -53,6 +53,18 @@ export interface AppConfig {
   fullContextMaxCharsByModel: Record<string, number>;
   /** Whether warm-chain divergence repair is enabled. */
   chainDivergenceRepairEnabled: boolean;
+  /**
+   * Upstream CodeArts hard limit on cumulative prompt length in tokens (default: 196608).
+   * Requests exceeding this trigger ChatAgent.00001216. Used for logging/docs only.
+   */
+  upstreamPromptTokenLimit: number;
+  /**
+   * Proactive chain reset threshold in tokens (default: 180000).
+   * When getLastPromptTokens(chatId) exceeds this on a normal hot-chain continuation,
+   * the proxy proactively resets (folds full context, clears parent) to avoid hitting
+   * upstreamPromptTokenLimit. Must be < upstreamPromptTokenLimit.
+   */
+  upstreamPromptTokenResetThreshold: number;
   missingContextHint: string;
 }
 
@@ -109,6 +121,10 @@ export const config: AppConfig = {
   ),
   chainDivergenceRepairEnabled:
     (process.env.CHAIN_DIVERGENCE_REPAIR_ENABLED ?? "false") === "true",
+  upstreamPromptTokenLimit: Number(process.env.UPSTREAM_PROMPT_TOKEN_LIMIT ?? 196608),
+  upstreamPromptTokenResetThreshold: Number(
+    process.env.UPSTREAM_PROMPT_TOKEN_RESET_THRESHOLD ?? 180000,
+  ),
   missingContextHint:
     process.env.MISSING_CONTEXT_HINT ?? "[以下为补传的历史对话上下文，仅作参考，非用户新请求]",
 };
