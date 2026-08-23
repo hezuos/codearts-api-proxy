@@ -26,20 +26,20 @@ Both locations SHALL carry the same `cache_hit` value. `prompt_tokens_details.te
 - **THEN** the `usage` object SHALL include `prompt_cache_hit_tokens: P` and `prompt_cache_miss_tokens: max(0, N - P)`
 - **AND** the `usage` object SHALL include `prompt_tokens_details.cached_tokens: P` and `prompt_tokens_details.text_tokens: max(0, N - P)`
 
-#### Scenario: Tail-divergence continuation (divergence=tail-divergence, parent present)
+#### Scenario: Tail divergence (divergence=tail-divergence, parent present)
 
 - **GIVEN** a chat completion request with `parent_message_id` and `divergence = "tail-divergence"`
 - **WHEN** the system returns the response
 - **THEN** both `prompt_cache_hit_tokens` and `prompt_tokens_details.cached_tokens` SHALL equal the previous turn's `prompt_tokens`
 
-#### Scenario: Middle-damage or unknown divergence (parent present)
+#### Scenario: Middle damage or force resync (divergence=middle-damage or undefined)
 
 - **GIVEN** a chat completion request with `parent_message_id` and `divergence` of `middle-damage` or `undefined`
 - **WHEN** the system returns the response with `prompt_tokens = N`
 - **THEN** both `prompt_cache_hit_tokens` and `prompt_tokens_details.cached_tokens` SHALL be `0`
 - **AND** `prompt_cache_miss_tokens` and `prompt_tokens_details.text_tokens` SHALL both equal `N`
 
-#### Scenario: Duplicate/stale request (divergence=duplicate/stale, parent present)
+#### Scenario: Duplicate/stale (divergence=duplicate/stale)
 
 - **GIVEN** a chat completion request with `parent_message_id` and `divergence = "duplicate/stale"`
 - **WHEN** the system returns the response

@@ -6,24 +6,15 @@ The system SHALL emit a final SSE chunk containing the `usage` object before the
 
 **Rationale:** new-api consumes `usage.prompt_tokens_details.cached_tokens` from the final stream chunk via `handleLastResponse` (`relay/channel/openai/helper.go:134`), which deserializes the chunk's `usage` field directly into `dto.Usage`. Without `prompt_tokens_details.cached_tokens` in the stream chunk, new-api's "缓存↓" log column stays empty for streaming responses even when the proxy estimates a non-zero cache hit.
 
-#### Scenario: include_usage requested with cache hit
+#### Scenario: include_usage requested
 
 - **GIVEN** a streaming chat completion request with `stream_options.include_usage: true`
-- **AND** the request is a normal continuation with an estimated `cache_hit = C > 0`
-- **WHEN** the upstream stream completes successfully
+- **WHEN** the upstream stream completes successfully with an estimated `cache_hit = C` (where `C >= 0`) and `prompt_tokens = N`
 - **THEN** the system SHALL emit a final chunk with `choices: []` and a populated `usage` object
-- **AND** the `usage` object SHALL include `prompt_tokens_details.cached_tokens: C` and `prompt_tokens_details.text_tokens: max(0, prompt_tokens - C)`
-- **AND** the `usage` object SHALL include `prompt_cache_hit_tokens: C` and `prompt_cache_miss_tokens: max(0, prompt_tokens - C)`
+- **AND** the `usage` object SHALL include `prompt_tokens_details.cached_tokens: C` and `prompt_tokens_details.text_tokens: max(0, N - C)`
+- **AND** the `usage` object SHALL include `prompt_cache_hit_tokens: C` and `prompt_cache_miss_tokens: max(0, N - C)`
 - **AND** the `usage` object SHALL include `cache_estimated: true`
 - **AND** the system SHALL then emit `data: [DONE]` and close the response
-
-#### Scenario: include_usage requested with zero cache hit
-
-- **GIVEN** a streaming chat completion request with `stream_options.include_usage: true`
-- **AND** the request is a cold-start with `cache_hit = 0`
-- **WHEN** the upstream stream completes successfully with `prompt_tokens = N`
-- **THEN** the final usage chunk SHALL include `prompt_tokens_details.cached_tokens: 0` and `prompt_tokens_details.text_tokens: N`
-- **AND** the final usage chunk SHALL include `prompt_cache_hit_tokens: 0` and `prompt_cache_miss_tokens: N`
 
 #### Scenario: include_usage not requested
 
