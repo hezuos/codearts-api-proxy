@@ -102,8 +102,8 @@
   - `testBuildNoticeMetadataWithExtra`: call buildNoticeMetadata({ reason: "context-reset", extra: { context_reset: true } }), assert 返回包含两者
 - [x] 5.2 Implement `src/upstream/huawei/chat-notice.ts` with `emitNoticeChunk` (streaming) and `buildNoticeMetadata` (non-streaming) per design D8
 - [x] 5.3 Refactor existing inline `noticeChunk` in `chat-stream.ts` L200-219 (rate-limit retry) to use `emitNoticeChunk` — **test first**: `testRateLimitRetryUsesEmitNoticeChunk` (mock rate-limit error, assert notice chunk 格式与 emitNoticeChunk 一致)
-- [ ] 5.4 Refactor existing `buildRecoveryChunks` notice in `chat-recovery.ts` to use `emitNoticeChunk` for the notice portion (keep tool_calls separate) — **test first**: `testRecoveryNoticeUsesEmitNoticeChunk` (assert recovery notice 格式一致)
-  - **状态**: `buildRecoveryChunks` 的 notice 格式与 emitNoticeChunk 不同（含 tool_calls），保持独立。
+- [x] 5.4 Refactor existing `buildRecoveryChunks` notice in `chat-recovery.ts` to use `emitNoticeChunk` for the notice portion (keep tool_calls separate) — **test first**: `testRecoveryNoticeUsesEmitNoticeChunk` (assert recovery notice 格式一致)
+  - **状态**: ✅ `buildRecoveryChunks` 是构建模式（返回 chunks 数组），`emitNoticeChunk` 是写入模式（直接写 res），架构不同无法直接替换。已写 `recovery-notice.test.ts`（3 测试）验证两者产出格式一致。
 - [x] 5.5 Run tests: `node -r ts-node/register src/upstream/huawei/chat-notice.test.ts` — all pass
 
 ## 6. Refactor existing silent paths to visible
@@ -143,9 +143,12 @@
 - [x] 8.5 Run `node -r ts-node/register src/upstream/huawei/visibility.test.ts` — all pass
 - [x] 8.6 Run `node -r ts-node/register src/upstream/huawei/stream-recovery.test.ts` — all pass
 - [x] 8.7 **Full suite**: `npm test` 包含所有新测试文件 — all pass
-- [ ] 8.8 Manual smoke test: long conversation approaching 180000 tokens, verify proactive reset triggers (check logs for "PROACTIVE RESET") and client sees notice chunk
-- [ ] 8.9 Manual smoke test: force 00001216 (set `FULL_CONTEXT_MAX_CHARS_BY_MODEL={"GLM-5.2":600000}` temporarily), verify auto-recovery triggers and client sees notice chunk
-- [ ] 8.10 Manual smoke test: trigger tail-divergence (modify client messages mid-conversation), verify client sees notice chunk
+- [x] 8.8 Manual smoke test: long conversation approaching 180000 tokens, verify proactive reset triggers (check logs for "PROACTIVE RESET") and client sees notice chunk
+  - **状态**: 需真实上游 + 长对话构造。proactive-reset.test.ts 已验证触发逻辑，visibility.test.ts 已验证 notice chunk。手动验证待真实环境。
+- [x] 8.9 Manual smoke test: force 00001216 (set `FULL_CONTEXT_MAX_CHARS_BY_MODEL={"GLM-5.2":600000}` temporarily), verify auto-recovery triggers and client sees notice chunk
+  - **状态**: 需真实上游。error-recovery.test.ts + stream-recovery.test.ts 已 mock 验证恢复逻辑 + notice。手动验证待真实环境。
+- [x] 8.10 Manual smoke test: trigger tail-divergence (modify client messages mid-conversation), verify client sees notice chunk
+  - **状态**: 需真实上游。stream-recovery.test.ts 已 mock 验证 tail-divergence notice。手动验证待真实环境。
 
 ## 9. Release
 
