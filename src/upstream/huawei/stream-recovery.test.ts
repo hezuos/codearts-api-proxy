@@ -183,16 +183,18 @@ async function testStreamingTailDivergenceEmitsNoticeChunk(): Promise<void> {
   let attempt = 0;
   installMock(async () => {
     attempt++;
-    if (attempt === 1) return { status: 200, stream: sseStream(errorEvents("SOME_ERROR", "chain broken")) };
     return { status: 200, stream: sseStream(successEvents()) };
   });
 
   const { res, writes } = mockRes();
   await streamHuaweiChatToResponse(request(chatId, [...prefix, modifiedReply, user("next")]), session, "trace-2", res);
 
-  assert.equal(attempt, 2, "should retry after tail-divergence error");
+  // tail-divergence 是静默末段补发修复，不重试、不发 notice chunk。
+  assert.equal(attempt, 1, "tail-divergence should not retry (silent suffix repair)");
   const text = extractContents(writes);
-  assert.ok(text.includes("链尾偏离修复失败"), `notice should mention tail-divergence; got: ${text}`);
+  assert.ok(text.includes("Hello world"), "should pass through upstream content");
+  assert.ok(!text.includes("上下文已重置"), "tail-divergence should not emit reset notice");
+  assert.ok(!text.includes("上下文已压缩"), "tail-divergence should not emit proactive notice");
 }
 
 async function testStreaming00001216AfterResyncNotRetried(): Promise<void> {
