@@ -7,6 +7,10 @@
 import assert from "assert";
 import type { Response } from "express";
 
+// 必须在 require config 之前设置环境变量，使 chainDivergenceRepairEnabled=true。
+process.env.CHAIN_DIVERGENCE_REPAIR_ENABLED = "true";
+process.env.FULL_CONTEXT_INJECTION_ENABLED = "true";
+
 // ---------------------------------------------------------------------------
 // Mock helpers (复用 stream-recovery 模式)
 // ---------------------------------------------------------------------------
