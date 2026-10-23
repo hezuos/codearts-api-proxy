@@ -3,7 +3,7 @@
  *
  * 覆盖：
  * - config.upstreamPromptTokenLimit / upstreamPromptTokenResetThreshold 默认值与 env 覆盖
- * - buildRequestBody 主动重置触发/跳过条件
+ * - buildV2RequestBody 主动重置触发/跳过条件
  */
 import assert from "assert";
 
@@ -41,7 +41,7 @@ function testConfigThresholdLessThanLimit(): void {
 }
 
 // ---------------------------------------------------------------------------
-// Proactive reset in buildRequestBody
+// Proactive reset in buildV2RequestBody
 // ---------------------------------------------------------------------------
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -94,13 +94,17 @@ function testProactiveResetTriggersOverThreshold(): void {
   seedChain(chatId, prefix, lastReply);
   chatRequest.setLastPromptTokens(chatId, 185000); // > 180000
 
-  const result = chatRequest.buildRequestBody(
+  const result = chatRequest.buildV2RequestBody(
     request(chatId, [...prefix, lastReply, user("next")]),
     session,
   );
 
   assert.equal(result.divergence, "middle-damage", "should force middle-damage");
-  assert.equal(result.body.parent_message_id, "", "should clear parent");
+  assert.ok(
+    (result.body.messages as Array<{ role?: string }>).length === 1 &&
+      (result.body.messages as Array<{ role?: string }>)[0]?.role === "user",
+    "should fold to a single user message",
+  );
   assert.equal(result.proactiveReset, true, "should return proactiveReset=true");
 }
 
@@ -111,13 +115,17 @@ function testProactiveResetSkipsUnderThreshold(): void {
   seedChain(chatId, prefix, lastReply);
   chatRequest.setLastPromptTokens(chatId, 150000); // < 180000
 
-  const result = chatRequest.buildRequestBody(
+  const result = chatRequest.buildV2RequestBody(
     request(chatId, [...prefix, lastReply, user("next")]),
     session,
   );
 
   assert.equal(result.divergence, "normal", "should stay normal");
-  assert.equal(result.body.parent_message_id, "parent-1", "should preserve parent");
+  assert.equal(
+    (result.body.messages as Array<{ content?: string }>).length,
+    4,
+    "should pass through full history (no fold)",
+  );
   assert.equal(result.proactiveReset, false, "should return proactiveReset=false");
 }
 
@@ -135,7 +143,7 @@ function testProactiveResetSkipsToolContinuation(): void {
     refusal: null,
     tool_call_id: "call-1",
   };
-  const result = chatRequest.buildRequestBody(
+  const result = chatRequest.buildV2RequestBody(
     request(chatId, [...prefix, lastReply, user("next"), toolMsg]),
     session,
   );
@@ -148,7 +156,7 @@ function testProactiveResetSkipsColdStart(): void {
   // No setLastResponseMessageId → no parent → cold start
   chatRequest.setLastPromptTokens(chatId, 185000);
 
-  const result = chatRequest.buildRequestBody(
+  const result = chatRequest.buildV2RequestBody(
     request(chatId, [user("first message")]),
     session,
   );
@@ -163,7 +171,7 @@ function testProactiveResetSkipsUndefinedPromptTokens(): void {
   seedChain(chatId, prefix, lastReply);
   // No setLastPromptTokens → undefined
 
-  const result = chatRequest.buildRequestBody(
+  const result = chatRequest.buildV2RequestBody(
     request(chatId, [...prefix, lastReply, user("next")]),
     session,
   );
@@ -180,7 +188,7 @@ function testProactiveResetSkipsSubAgent(): void {
 
   const req = request(chatId, [...prefix, lastReply, user("next")]);
   req.codearts = { chat_id: chatId, sub_agent: { type: "test" } };
-  const result = chatRequest.buildRequestBody(req, session);
+  const result = chatRequest.buildV2RequestBody(req, session);
 
   assert.equal(result.proactiveReset, false, "sub-agent should not reset");
 }
@@ -194,7 +202,7 @@ function testProactiveResetSkipsCallerProvidedParent(): void {
 
   const req = request(chatId, [...prefix, lastReply, user("next")]);
   req.codearts = { chat_id: chatId, parent_message_id: "caller-provided-parent" };
-  const result = chatRequest.buildRequestBody(req, session);
+  const result = chatRequest.buildV2RequestBody(req, session);
 
   assert.equal(result.proactiveReset, false, "caller-provided parent should not reset");
 }
@@ -206,7 +214,7 @@ function testProactiveResetThresholdBoundary(): void {
   const lastReply = assistant("new answer");
   seedChain(chatIdEq, prefix, lastReply);
   chatRequest.setLastPromptTokens(chatIdEq, 180000); // == threshold
-  const resultEq = chatRequest.buildRequestBody(
+  const resultEq = chatRequest.buildV2RequestBody(
     request(chatIdEq, [...prefix, lastReply, user("next")]),
     session,
   );
@@ -216,7 +224,7 @@ function testProactiveResetThresholdBoundary(): void {
   const chatIdGt = "i999999999999999999999999999999";
   seedChain(chatIdGt, prefix, lastReply);
   chatRequest.setLastPromptTokens(chatIdGt, 180001); // > threshold
-  const resultGt = chatRequest.buildRequestBody(
+  const resultGt = chatRequest.buildV2RequestBody(
     request(chatIdGt, [...prefix, lastReply, user("next")]),
     session,
   );

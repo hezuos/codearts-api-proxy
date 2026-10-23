@@ -400,13 +400,19 @@ function testT1ToolCallTypeNormalized(): void {
 }
 
 function testT2ReasoningContentNormalized(): void {
+  // v2 通道默认返回 reasoning_content，而客户端回传时可能不带（或为空）。
+  // 链指纹统一忽略该字段，因此带/不带 reasoning 的同一回复哈希相等。
   const base: OpenAIChatMessage = { role: "assistant", content: "hi", refusal: null };
   const empty = { ...base, reasoning_content: "" } as OpenAIChatMessage;
   const nul = { ...base, reasoning_content: null as unknown as string } as OpenAIChatMessage;
   assert.equal(normalizeForChain(base), normalizeForChain(empty));
   assert.equal(normalizeForChain(base), normalizeForChain(nul));
   const nonEmpty = { ...base, reasoning_content: "thinking..." } as OpenAIChatMessage;
-  assert.notEqual(normalizeForChain(base), normalizeForChain(nonEmpty));
+  assert.equal(
+    normalizeForChain(base),
+    normalizeForChain(nonEmpty),
+    "reasoning_content 不应影响链指纹（避免 v2 下误判 divergence）",
+  );
 }
 
 function testT3ArgumentsDistinguished(): void {
@@ -419,6 +425,27 @@ function testT3ArgumentsDistinguished(): void {
     }) as unknown as OpenAIChatMessage;
   assert.equal(normalizeForChain(make('{"a":1}')), normalizeForChain(make('{"a":1}')));
   assert.notEqual(normalizeForChain(make('{"a":1}')), normalizeForChain(make('{"a":2}')));
+}
+
+function testT5ReasoningReplyHashesEqualClientCopy(): void {
+  // v2 通道返回带 reasoning_content 的回复；客户端回传时可能不带 reasoning。
+  // 两者哈希应相等，否则会被误判为 divergence。
+  const proxyReply: OpenAIChatMessage = {
+    role: "assistant",
+    content: "answer",
+    refusal: null,
+    reasoning_content: "let me think...",
+  } as OpenAIChatMessage;
+  const clientEcho: OpenAIChatMessage = {
+    role: "assistant",
+    content: "answer",
+    refusal: null,
+  };
+  assert.equal(
+    normalizeForChain(proxyReply),
+    normalizeForChain(clientEcho),
+    "带 reasoning 的回复应与客户端回传的无 reasoning 副本哈希相等",
+  );
 }
 
 function testT4ReconstructedPathsEqual(): void {
@@ -515,6 +542,7 @@ testT1ToolCallTypeNormalized();
 testT2ReasoningContentNormalized();
 testT3ArgumentsDistinguished();
 testT4ReconstructedPathsEqual();
+testT5ReasoningReplyHashesEqualClientCopy();
 testT6FoldMissingSegmentToolSegment();
 testT7FoldMissingSegmentToolOnly();
 testT13ToolSegmentBounded();

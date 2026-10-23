@@ -44,5 +44,69 @@ function testEnvFileInjected(): void {
   console.log("  ✓ .env injected into process.env via config load");
 }
 
+/** 在子进程中加载 config 并返回指定字段的 JSON 快照。 */
+function readConfigInChild(envFile: string, extraEnv: Record<string, string> = {}): Record<string, unknown> {
+  const script = `
+    require(${JSON.stringify(TS_NODE_BIN)});
+    const { config, getChatUrl } = require("./src/config");
+    process.stdout.write(JSON.stringify({
+      huaweiV2ChatPath: config.huaweiV2ChatPath,
+      chatUrl: getChatUrl(),
+    }));
+  `;
+  const env: NodeJS.ProcessEnv = { ...process.env, ENV_FILE: envFile };
+  for (const [key, value] of Object.entries(extraEnv)) {
+    if (value === undefined) delete env[key];
+    else env[key] = value;
+  }
+  const out = execFileSync(process.execPath, ["-e", script], {
+    cwd: path.resolve(__dirname, ".."),
+    env,
+    encoding: "utf8",
+  });
+  return JSON.parse(out);
+}
+
+function testV2ChatPathDefault(): void {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "config-v2-test-"));
+  const envFile = path.join(dir, ".env");
+  fs.writeFileSync(envFile, "");
+  try {
+    // 不设置 HUAWEI_V2_CHAT_PATH，验证默认值。
+    const parsed = readConfigInChild(envFile, { HUAWEI_V2_CHAT_PATH: undefined as unknown as string });
+    assert.strictEqual(
+      parsed.huaweiV2ChatPath,
+      "/api/v2/chat/completions",
+      "default huaweiV2ChatPath should be /api/v2/chat/completions",
+    );
+    assert.ok(
+      String(parsed.chatUrl).endsWith("/api/v2/chat/completions"),
+      `getChatUrl() should end with the v2 path; got: ${parsed.chatUrl}`,
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  console.log("  ✓ HUAWEI_V2_CHAT_PATH default is /api/v2/chat/completions");
+}
+
+function testV2ChatPathOverride(): void {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "config-v2-override-"));
+  const envFile = path.join(dir, ".env");
+  fs.writeFileSync(envFile, "");
+  try {
+    const parsed = readConfigInChild(envFile, {
+      HUAWEI_V2_CHAT_PATH: "/custom/v2/path",
+      HUAWEI_CHAT_HOST: "https://example.test",
+    });
+    assert.strictEqual(parsed.huaweiV2ChatPath, "/custom/v2/path");
+    assert.strictEqual(parsed.chatUrl, "https://example.test/custom/v2/path");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  console.log("  ✓ HUAWEI_V2_CHAT_PATH override is honored by getChatUrl()");
+}
+
 testEnvFileInjected();
+testV2ChatPathDefault();
+testV2ChatPathOverride();
 console.log("config-env.test.ts passed");

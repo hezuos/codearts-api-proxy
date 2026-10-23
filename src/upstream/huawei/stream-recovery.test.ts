@@ -290,7 +290,7 @@ async function testStreaming00001216AfterResyncEmitsForceResyncToolCall(): Promi
 
 async function testForceResyncToolResultTriggersForceResyncPath(): Promise<void> {
   // 客户端回传 forceResync tool_result 时，proxy 应走 forceResync 路径
-  // （清空 parent_message_id + 全量折叠）。
+  // （全量折叠为单条 user 消息）。
   // 通过 buildForceResyncToolCall 生成 tool_call（注册 id），模拟客户端回传。
   const chatId = "str-666666666666666666666666666666";
   const prefix = [user("old"), assistant("old answer")];
@@ -329,10 +329,10 @@ async function testForceResyncToolResultTriggersForceResyncPath(): Promise<void>
 
   assert.ok(capturedBody, "should have captured request body");
   const parsed = JSON.parse(capturedBody as string);
-  assert.equal(parsed.parent_message_id, "", `forceResync should clear parent_message_id; got: ${parsed.parent_message_id}`);
-  // messages 应该是折叠后的单条文本（而非 tool continuation 的空数组）
+  // v2 请求体无 parent_message_id；forceResync 应折叠为单条 user 消息。
   assert.ok(Array.isArray(parsed.messages) && parsed.messages.length === 1, "should fold to single message");
-  assert.equal(parsed.messages[0].type, "text", "folded message should be text type");
+  assert.equal(parsed.messages[0].role, "user", "folded message should be a user message");
+  assert.equal(parsed.parent_message_id, undefined, "v2 body should not carry parent_message_id");
 }
 
 async function testStreaming00001216NoClientToolsFallsBackToErrorChunk(): Promise<void> {

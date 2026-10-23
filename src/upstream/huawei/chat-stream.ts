@@ -4,7 +4,7 @@
 
 import { randomUUID, createHash } from "crypto";
 import type { Response } from "express";
-import { config } from "../../config";
+import { getChatUrl } from "../../config";
 import { getCredentials } from "../../auth/huawei/credentials";
 import type { StoredHuaweiSession } from "../../auth/huawei/session-store";
 import { UpstreamAuthError } from "../../utils/errors";
@@ -18,9 +18,9 @@ import type {
 import { cleanToolCallDeltas, computeChainForMessages, normalizeForChain, normalizeToolCallsForChain } from "./chat-translate";
 import { buildRecoveryChunks, buildSyntheticRecoveryToolCalls, buildForceResyncToolCall } from "./chat-recovery";
 import { emitNoticeChunk } from "./chat-notice";
-import { parseSSE } from "./chat-protocol";
+import { parseSSE, type CodeArtsSSEEvent } from "./chat-protocol";
 import {
-  buildRequestBody,
+  buildV2RequestBody,
   buildChatHeaders,
   httpsPost,
   getLastResponseMessageId,
@@ -60,55 +60,40 @@ export async function streamHuaweiChatToResponse(
 ): Promise<void> {
   const log = logger.withTrace(traceId);
   const credentials = getCredentials(session);
-  const chatUrl = `${config.huaweiChatHost}/v1/chat/chat`;
+  const chatUrl = getChatUrl();
 
   // ── Build initial request ────────────────────────────────────────────────
-  const { body: requestBody, json: body, divergence: initialDivergence, isToolContinuation, proactiveReset } = buildRequestBody(request, session);
+  const { body: requestBody, json: body, divergence: initialDivergence, isToolContinuation, proactiveReset, chatId } = buildV2RequestBody(request, session);
   const headers = buildChatHeaders(chatUrl, body, credentials, traceId);
 
+  // v2 无 parent_message_id；续传判定基于链状态（lastResponseMessageId，按派生 chatId 索引）。
+  const hasContinuity =
+    !!request.codearts?.parent_message_id ||
+    !!getLastResponseMessageId(chatId);
+
   // ── Outgoing request log ──────────────────────────────────────────────────
-  const tp = requestBody.task_parameters as Record<string, unknown> | undefined;
-  const toolResultCount = Array.isArray(tp?.tool_result)
-    ? (tp.tool_result as unknown[]).length
-    : 0;
   const msgArr = requestBody.messages as unknown[];
-  const envDetails = tp?.environmentDetails as Record<string, unknown> | undefined;
+  const toolResultCount = isToolContinuation ? 1 : 0;
 
   log.info("[proxy→codearts] REQUEST", {
     url: `POST ${chatUrl}`,
-    model_id: requestBody.model_id,
-    chat_id: requestBody.chat_id,
-    parent_message_id: requestBody.parent_message_id,
+    model_id: requestBody.model,
     messagesCount: msgArr.length,
     toolResultCount,
-    isSubAgent: (tp?.isSubAgent as boolean | undefined) ?? false,
-    cwd: envDetails?.currentWorkingDirectory ?? "",
+    isSubAgent: (requestBody.isSubAgent as boolean | undefined) ?? false,
   });
   log.debug("[proxy→codearts] body (full)", { body });
 
   // ── Continuity info ───────────────────────────────────────────────────────
+  // v2 请求体无 chat_id / parent_message_id；续传完全依赖客户端回传的 messages 与链状态。
   if (!request.codearts?.chat_id) {
-    log.info("chat_id derived from message hash", { chat_id: requestBody.chat_id });
+    log.info("chat_id derived from message hash (v2)");
   }
-  if (!request.codearts?.parent_message_id && requestBody.parent_message_id) {
-    log.info("parent_message_id auto-filled from last turn", { parent_message_id: requestBody.parent_message_id });
-  }
-  if (toolResultCount > 0 && !requestBody.parent_message_id) {
-    log.warn("tool_result continuation but parent_message_id is empty — CodeArts may lack context");
-  }
-
-  // ── Tool continuation parent_message_id validation ────────────────────────
-  if (toolResultCount > 0 && requestBody.parent_message_id) {
-    const cid = requestBody.chat_id as string;
-    const role = getChatIdRole(cid);
-    if (role === "sub") {
-      log.warn("Tool continuation for chat_id but last known role was sub — parent_message_id may point to sub-agent turn", { chat_id: cid });
-    }
-    const toolResults = tp?.tool_result as Array<Record<string, unknown>> | undefined;
-    if (toolResults) {
-      const toolCallIds = toolResults.map((tr) => tr.toolCallId ?? "(none)").join(", ");
-      log.info("Tool continuation", { chat_id: cid, parent_message_id: requestBody.parent_message_id, toolCallIds, role: role ?? "unknown" });
-    }
+  if (isToolContinuation) {
+    log.info("Tool continuation (v2)", {
+      messagesCount: msgArr.length,
+      hasContinuity: !!getLastResponseMessageId(chatId),
+    });
   }
 
   const { status, stream } = await httpsPost(chatUrl, headers, body, signal);
@@ -154,19 +139,6 @@ export async function streamHuaweiChatToResponse(
     });
     sentRole = result.sentRole;
     sentMetadata = result.sentMetadata;
-  } else if (initialDivergence === "middle-damage" || initialDivergence === "duplicate/stale") {
-    const result = emitNoticeChunk(res, {
-      id: completionId,
-      created,
-      model,
-      content: "\n[上下文已重置：对话链已折叠重建。]\n",
-      sentRole,
-      sentMetadata,
-      responseMetadata,
-      extraMetadata: { context_reset: "true" },
-    });
-    sentRole = result.sentRole;
-    sentMetadata = result.sentMetadata;
   }
 
   // ── SSE event counters ────────────────────────────────────────────────────
@@ -178,6 +150,8 @@ export async function streamHuaweiChatToResponse(
   let responseToolCalls: OpenAIChatMessage["tool_calls"] = [];
   let promptTokens = 0;
   let completionTokens = 0;
+  /** 上游真实缓存用量（v2 通道返回时优先使用） */
+  let upstreamPromptTokensDetails: CodeArtsSSEEvent["prompt_tokens_details"] | undefined;
   const sseDebugLog: Array<{ event: number; delta?: string; error?: string; meta?: string }> = [];
 
   // ── SSE stream processing (retriable on rate-limit errors) ────────────────
@@ -201,6 +175,7 @@ export async function streamHuaweiChatToResponse(
       // 累积 token 计数（增量事件里为 0，只在最后事件有值）
       if (event.prompt_tokens) promptTokens = event.prompt_tokens;
       if (event.completion_tokens) completionTokens = event.completion_tokens;
+      if (event.prompt_tokens_details) upstreamPromptTokensDetails = event.prompt_tokens_details;
 
       // Log meta event
       if (event.chat_id || event.response_message_id) {
@@ -244,8 +219,8 @@ export async function streamHuaweiChatToResponse(
           await new Promise((resolve) => setTimeout(resolve, SSE_RETRY_DELAY_MS));
           if (signal?.aborted) break;
 
-          // Rebuild request (parent_message_id may have been captured from meta events)
-          const retryBody = buildRequestBody(request, session);
+          // Rebuild request (chain state may have advanced from meta events)
+          const retryBody = buildV2RequestBody(request, session);
           const retryHeaders = buildChatHeaders(chatUrl, retryBody.json, credentials, traceId);
 
           try {
@@ -289,7 +264,7 @@ export async function streamHuaweiChatToResponse(
           });
           sentRole = noticeResult.sentRole;
           sentMetadata = noticeResult.sentMetadata;
-          const resyncBody = buildRequestBody(request, session, { forceResync: true });
+          const resyncBody = buildV2RequestBody(request, session, { forceResync: true });
           const resyncHeaders = buildChatHeaders(chatUrl, resyncBody.json, credentials, traceId);
           try {
             const resyncResult = await httpsPost(chatUrl, resyncHeaders, resyncBody.json, signal);
@@ -325,7 +300,7 @@ export async function streamHuaweiChatToResponse(
           });
           sentRole = noticeResult.sentRole;
           sentMetadata = noticeResult.sentMetadata;
-          const resyncBody = buildRequestBody(request, session, { forceResync: true });
+          const resyncBody = buildV2RequestBody(request, session, { forceResync: true });
           const resyncHeaders = buildChatHeaders(chatUrl, resyncBody.json, credentials, traceId);
           try {
             const resyncResult = await httpsPost(chatUrl, resyncHeaders, resyncBody.json, signal);
@@ -486,7 +461,8 @@ export async function streamHuaweiChatToResponse(
 
   // ── Update parent_message_id tracker ──────────────────────────────────────
   if (!sseHadError && responseMetadata.response_message_id) {
-    const cid = responseMetadata.chat_id;
+    // v2 上游事件不含 chat_id；使用构建侧派生的 chatId 维护链状态。
+    const cid = chatId;
     if (cid) {
       const prevValue = getLastResponseMessageId(cid);
       const role = getChatIdRole(cid);
@@ -517,9 +493,9 @@ export async function streamHuaweiChatToResponse(
   // 先快照上一轮 prompt_tokens 供本轮缓存估算，再记录本轮值供下一轮用。
   // 必须先快照再 set——否则 getLastPromptTokens 读到的是本轮刚写入的值，
   // 导致 cacheHit 永远等于 promptTokens、cacheMiss 永远为 0。
-  const cid = responseMetadata.chat_id;
-  const prevPromptTokens = cid ? getLastPromptTokens(cid) : undefined;
-  if (responseMetadata.response_message_id && promptTokens > 0 && cid) {
+  const cid = chatId;
+  const prevPromptTokens = getLastPromptTokens(cid);
+  if (responseMetadata.response_message_id && promptTokens > 0) {
     setLastPromptTokens(cid, promptTokens);
   }
 
@@ -550,13 +526,21 @@ export async function streamHuaweiChatToResponse(
 
   // 流式 usage chunk：仅在 stream_options.include_usage=true 时补发（OpenAI 协议 opt-in）
   if (request.stream_options?.include_usage) {
-    const cacheUsage = computeCacheUsage(
-      promptTokens,
-      prevPromptTokens,
-      initialDivergence,
-      !!requestBody.parent_message_id,
-      isToolContinuation,
-    );
+    // 优先使用上游真实 usage（v2 通道返回）；否则回退到 divergence 估算。
+    const cacheUsage = upstreamPromptTokensDetails
+      ? {
+          prompt_cache_hit_tokens: upstreamPromptTokensDetails.cached_tokens ?? 0,
+          prompt_cache_miss_tokens: upstreamPromptTokensDetails.text_tokens ?? 0,
+          cache_estimated: false as const,
+          prompt_tokens_details: upstreamPromptTokensDetails,
+        }
+      : computeCacheUsage(
+          promptTokens,
+          prevPromptTokens,
+          initialDivergence,
+          hasContinuity,
+          isToolContinuation,
+        );
     res.write(
       `data: ${JSON.stringify({
         id: completionId,

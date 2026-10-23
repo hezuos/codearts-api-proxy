@@ -81,6 +81,7 @@ src/
 - **Admin 会话令牌每次重启随机生成**: 防止 cookie 伪造
 - **全量上下文折叠注入（缓存未命中）**: 当无 `parent_message_id` 且内存 Map 未命中时，将完整对话历史折叠为带 role 标记的单条 text 注入上游（`foldFullConversation`），由 `FULL_CONTEXT_INJECTION_ENABLED` 控制（默认 false）。子代理永不注入；工具续传路径不受影响。
 - **热链分叉修复**: `CHAIN_DIVERGENCE_REPAIR_ENABLED` 开启后，校验客户端消息前缀与完整尾部结构；正常尾部增量续传，尾部链分叉只补发缺失尾部，中段损伤或无法确认时全量重置。`MISSING_CONTEXT_HINT` 控制补发提示词，`FULL_CONTEXT_MAX_CHARS`/`FULL_CONTEXT_MAX_CHARS_BY_MODEL` 控制折叠长度。详见 `docs/spike-full-context-injection.md` 与 `openspec/changes/warm-switch-context-repair/`。
+- **v2 通道（OpenAI 兼容）**: 所有模型请求统一走 `${HUAWEI_CHAT_HOST}${HUAWEI_V2_CHAT_PATH}`（默认 `/api/v2/chat/completions`），不再使用 CodeArts 原生 `/v1/chat/chat`。该通道是唯一支持 `glm-5.3` 的通道，且默认返回 `reasoning_content`（thinking）。请求体为 OpenAI 兼容形状（`model`/`max_tokens`/`tool_stream`/`stream`/`messages`/`tools`），无 `parent_message_id`，续传完全依赖链状态与客户端回传历史。子代理字段（`isSubAgent`/`subAgent_type`/`subAgent_prompt`）直接透传。详见 `openspec/changes/add-v2-chat-channel/`。
 
 ## COMMANDS
 
