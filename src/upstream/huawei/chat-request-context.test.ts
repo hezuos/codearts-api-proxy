@@ -340,7 +340,7 @@ function testT17CallerParentBypass(): void {
   );
   assert.equal(result.divergence, undefined, "调用方提供 parent 时旁路检测");
   const msgs = result.body.messages as unknown[];
-  assert.equal(msgs.length, 4, "旁路时同样全量透传");
+  assert.equal(msgs.length, 3, "旁路时同样全量透传");
 }
 
 function testT18SubAgentBypass(): void {

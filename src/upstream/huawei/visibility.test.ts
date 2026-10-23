@@ -139,7 +139,8 @@ async function testStreamingProactiveResetEmitsNotice(): Promise<void> {
   assert.ok(metas.some((m) => m.context_reset === "proactive"), "should carry context_reset=proactive metadata");
 }
 
-async function testStreamingFoldingEmitsNotice(): Promise<void> {
+
+async function testStreamingMiddleDamageRemainsSilent(): Promise<void> {
   const chatId = "vis-222222222222222222222222222222";
   // 构造 middle-damage：prefix + 修改中间消息 + lastReply
   const prefix = [user("old"), assistant("old answer")];
@@ -153,12 +154,16 @@ async function testStreamingFoldingEmitsNotice(): Promise<void> {
   await streamHuaweiChatToResponse(streamRequest(chatId, [...modifiedPrefix, lastReply, user("next")]), session, "t2", res);
 
   const text = extractContents(writes);
-  assert.ok(text.includes("上下文已重置"), `folding should emit notice; got: ${text}`);
+  // middle-damage 不再折叠：不应发 notice chunk
+  assert.ok(!text.includes("上下文已重置"), `middle-damage should stay silent; got: ${text}`);
+  assert.ok(!text.includes("上下文已压缩"), `middle-damage should not trigger proactive notice; got: ${text}`);
   const metas = extractMetas(writes);
-  assert.ok(metas.some((m) => m.context_reset === "true"), "should carry context_reset=true metadata");
+  assert.ok(!metas.some((m) => m.context_reset), "middle-damage should not carry context_reset metadata");
+  // 正常内容应通过
+  assert.ok(text.includes("Hello"), `normal content should pass through; got: ${text}`);
 }
 
-async function testNonStreamingFoldingMarksMetadata(): Promise<void> {
+async function testNonStreamingMiddleDamageRemainsSilent(): Promise<void> {
   const chatId = "vis-333333333333333333333333333333";
   const prefix = [user("old"), assistant("old answer")];
   const lastReply = assistant("new answer");
@@ -168,7 +173,7 @@ async function testNonStreamingFoldingMarksMetadata(): Promise<void> {
   installMock(async () => ({ status: 200, stream: sseStream(successEvents()) }));
   const result = await sendHuaweiChatRequest(nonStreamRequest(chatId, [...modifiedPrefix, lastReply, user("next")]), session, "t3");
 
-  assert.ok(result.codearts?.context_reset, `non-stream folding should mark context_reset metadata; got: ${JSON.stringify(result.codearts)}`);
+  assert.ok(!result.codearts?.context_reset, `non-stream middle-damage should not mark context_reset; got: ${JSON.stringify(result.codearts)}`);
 }
 
 async function testNonStreamingProactiveResetMarksMetadata(): Promise<void> {
@@ -221,8 +226,8 @@ async function testProtocolErrorRemainsSilent(): Promise<void> {
 
 (async () => {
   await testStreamingProactiveResetEmitsNotice();
-  await testStreamingFoldingEmitsNotice();
-  await testNonStreamingFoldingMarksMetadata();
+  await testStreamingMiddleDamageRemainsSilent();
+  await testNonStreamingMiddleDamageRemainsSilent();
   await testNonStreamingProactiveResetMarksMetadata();
   await testProtocolErrorRemainsSilent();
   console.log("All visibility tests passed.");
