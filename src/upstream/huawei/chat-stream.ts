@@ -63,13 +63,13 @@ export async function streamHuaweiChatToResponse(
   const chatUrl = getChatUrl();
 
   // ── Build initial request ────────────────────────────────────────────────
-  const { body: requestBody, json: body, divergence: initialDivergence, isToolContinuation, proactiveReset } = buildV2RequestBody(request, session);
+  const { body: requestBody, json: body, divergence: initialDivergence, isToolContinuation, proactiveReset, chatId } = buildV2RequestBody(request, session);
   const headers = buildChatHeaders(chatUrl, body, credentials, traceId);
 
-  // v2 无 parent_message_id；续传判定基于链状态（lastResponseMessageId）。
+  // v2 无 parent_message_id；续传判定基于链状态（lastResponseMessageId，按派生 chatId 索引）。
   const hasContinuity =
     !!request.codearts?.parent_message_id ||
-    !!getLastResponseMessageId(request.codearts?.chat_id?.trim() ?? "");
+    !!getLastResponseMessageId(chatId);
 
   // ── Outgoing request log ──────────────────────────────────────────────────
   const msgArr = requestBody.messages as unknown[];
@@ -92,7 +92,7 @@ export async function streamHuaweiChatToResponse(
   if (isToolContinuation) {
     log.info("Tool continuation (v2)", {
       messagesCount: msgArr.length,
-      hasContinuity: !!getLastResponseMessageId(request.codearts?.chat_id ?? ""),
+      hasContinuity: !!getLastResponseMessageId(chatId),
     });
   }
 
@@ -136,19 +136,6 @@ export async function streamHuaweiChatToResponse(
       sentMetadata,
       responseMetadata,
       extraMetadata: { context_reset: "proactive" },
-    });
-    sentRole = result.sentRole;
-    sentMetadata = result.sentMetadata;
-  } else if (initialDivergence === "middle-damage" || initialDivergence === "duplicate/stale") {
-    const result = emitNoticeChunk(res, {
-      id: completionId,
-      created,
-      model,
-      content: "\n[上下文已重置：对话链已折叠重建。]\n",
-      sentRole,
-      sentMetadata,
-      responseMetadata,
-      extraMetadata: { context_reset: "true" },
     });
     sentRole = result.sentRole;
     sentMetadata = result.sentMetadata;
@@ -474,7 +461,8 @@ export async function streamHuaweiChatToResponse(
 
   // ── Update parent_message_id tracker ──────────────────────────────────────
   if (!sseHadError && responseMetadata.response_message_id) {
-    const cid = responseMetadata.chat_id;
+    // v2 上游事件不含 chat_id；使用构建侧派生的 chatId 维护链状态。
+    const cid = chatId;
     if (cid) {
       const prevValue = getLastResponseMessageId(cid);
       const role = getChatIdRole(cid);
@@ -505,9 +493,9 @@ export async function streamHuaweiChatToResponse(
   // 先快照上一轮 prompt_tokens 供本轮缓存估算，再记录本轮值供下一轮用。
   // 必须先快照再 set——否则 getLastPromptTokens 读到的是本轮刚写入的值，
   // 导致 cacheHit 永远等于 promptTokens、cacheMiss 永远为 0。
-  const cid = responseMetadata.chat_id;
-  const prevPromptTokens = cid ? getLastPromptTokens(cid) : undefined;
-  if (responseMetadata.response_message_id && promptTokens > 0 && cid) {
+  const cid = chatId;
+  const prevPromptTokens = getLastPromptTokens(cid);
+  if (responseMetadata.response_message_id && promptTokens > 0) {
     setLastPromptTokens(cid, promptTokens);
   }
 

@@ -46,13 +46,13 @@ export async function sendHuaweiChatRequest(
   const log = logger.withTrace(traceId);
   const credentials = getCredentials(session);
   const chatUrl = getChatUrl();
-  const { body: requestBody, json: body, divergence, isToolContinuation, proactiveReset } = buildV2RequestBody(request, session, options);
+  const { body: requestBody, json: body, divergence, isToolContinuation, proactiveReset, chatId } = buildV2RequestBody(request, session, options);
   const headers = buildChatHeaders(chatUrl, body, credentials, traceId);
 
-  // v2 无 parent_message_id；续传判定基于链状态（lastResponseMessageId）。
+  // v2 无 parent_message_id；续传判定基于链状态（lastResponseMessageId，按派生 chatId 索引）。
   const hasContinuity =
     !!request.codearts?.parent_message_id ||
-    !!getLastResponseMessageId(request.codearts?.chat_id?.trim() ?? "");
+    !!getLastResponseMessageId(chatId);
 
   // ── Outgoing request log ──────────────────────────────────────────────────
   const msgArr = requestBody.messages as unknown[];
@@ -162,7 +162,8 @@ export async function sendHuaweiChatRequest(
 
   // Update parent_message_id tracker only on successful turns
   if (responseMetadata.response_message_id) {
-    const cid = responseMetadata.chat_id;
+    // v2 上游事件不含 chat_id；使用构建侧派生的 chatId 维护链状态。
+    const cid = chatId;
     if (cid) {
       const prevValue = getLastResponseMessageId(cid);
       const role = getChatIdRole(cid);
@@ -208,7 +209,6 @@ export async function sendHuaweiChatRequest(
   if (fullReasoning) message.reasoning_content = fullReasoning;
   if (toolCalls) message.tool_calls = toolCalls;
 
-  const cid = responseMetadata.chat_id;
   // 优先使用上游真实 usage（v2 通道返回）；否则回退到 divergence 估算。
   const cacheUsage = upstreamPromptTokensDetails
     ? {
@@ -219,7 +219,7 @@ export async function sendHuaweiChatRequest(
       }
     : computeCacheUsage(
         promptTokens,
-        cid ? getLastPromptTokens(cid) : undefined,
+        getLastPromptTokens(chatId),
         divergence,
         hasContinuity,
         isToolContinuation,
@@ -228,14 +228,11 @@ export async function sendHuaweiChatRequest(
   // 记录本轮 prompt_tokens 供下一轮续传估算缓存命中（guard > 0 避免增量事件 0 值污染）。
   // 必须在 computeCacheUsage 之后调用——否则 getLastPromptTokens 读到的是本轮刚写入的值，
   // 导致 cacheHit 永远等于 promptTokens、cacheMiss 永远为 0。
-  if (responseMetadata.response_message_id && promptTokens > 0 && cid) {
-    setLastPromptTokens(cid, promptTokens);
+  if (responseMetadata.response_message_id && promptTokens > 0) {
+    setLastPromptTokens(chatId, promptTokens);
   }
 
-  // Mark context reset in metadata for client visibility (folding / proactive reset / forceResync)
-  if ((divergence === "middle-damage" || divergence === "duplicate/stale") && !proactiveReset) {
-    responseMetadata.context_reset = "true";
-  }
+  // Mark context reset in metadata for client visibility (proactive reset triggers fold)
   if (proactiveReset) {
     responseMetadata.context_reset = "proactive";
   }

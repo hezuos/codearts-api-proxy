@@ -102,23 +102,27 @@ function testColdStartSingleUserMessage(): void {
   assert.equal(result.body.task_parameters, undefined, "v2 不应携带 task_parameters");
 }
 
-function testColdStartFoldsHistoryWhenInjectionEnabled(): void {
+function testColdStartPassesThroughFullHistory(): void {
   const chatId = "v2-222222222222222222222222222222";
   const result = chatRequest.buildV2RequestBody(
     request(chatId, [user("old"), assistant("old answer"), user("next")]),
     session,
   );
   const msgs = messagesOf(result.body);
-  assert.equal(msgs.length, 1, "冷启动多轮历史应折叠为单条 user 消息");
+  assert.equal(msgs.length, 3, "v2 无状态上游：冷启动多轮历史应全量透传");
   assert.equal(msgs[0].role, "user");
-  assert.ok(String(msgs[0].content).includes("old"), "折叠内容应包含历史");
+  assert.equal(msgs[0].content, "old");
+  assert.equal(msgs[1].role, "assistant");
+  assert.equal(msgs[1].content, "old answer");
+  assert.equal(msgs[2].role, "user");
+  assert.equal(msgs[2].content, "next");
 }
 
 // ---------------------------------------------------------------------------
 // 热链续传
 // ---------------------------------------------------------------------------
 
-function testWarmContinuationSendsOnlyLatestTurn(): void {
+function testWarmContinuationPassesThroughFullHistory(): void {
   const chatId = "v2-333333333333333333333333333333";
   const prefix = [user("old"), assistant("old answer")];
   const lastReply = assistant("new answer");
@@ -132,9 +136,9 @@ function testWarmContinuationSendsOnlyLatestTurn(): void {
   assert.equal(result.divergence, "normal");
   assert.equal(result.suffixStart, 3);
   const msgs = messagesOf(result.body);
-  assert.equal(msgs.length, 1, "热链续传仅发送最新 user turn");
-  assert.equal(msgs[0].role, "user");
-  assert.equal(msgs[0].content, "next");
+  assert.equal(msgs.length, 4, "v2 无状态上游：热链续传也应全量透传");
+  assert.equal(msgs[3].role, "user");
+  assert.equal(msgs[3].content, "next");
 }
 
 function testTailDivergenceFoldsMissingSegment(): void {
@@ -150,12 +154,12 @@ function testTailDivergenceFoldsMissingSegment(): void {
 
   assert.equal(result.divergence, "tail-divergence");
   const msgs = messagesOf(result.body);
-  assert.equal(msgs.length, 1);
-  assert.equal(msgs[0].role, "user");
-  assert.ok(String(msgs[0].content).includes("external"));
+  assert.equal(msgs.length, 6, "尾部偏差同样全量透传（含外部交换）");
+  assert.equal(msgs[5].role, "user");
+  assert.equal(msgs[5].content, "current");
 }
 
-function testMiddleDamageFoldsFullContext(): void {
+function testMiddleDamagePassesThroughFullHistory(): void {
   const chatId = "v2-555555555555555555555555555555";
   const prefix = [user("old"), assistant("old answer")];
   seedChain(chatId, prefix, assistant("new answer"));
@@ -167,8 +171,7 @@ function testMiddleDamageFoldsFullContext(): void {
 
   assert.equal(result.divergence, "middle-damage");
   const msgs = messagesOf(result.body);
-  assert.equal(msgs.length, 1);
-  assert.equal(msgs[0].role, "user");
+  assert.equal(msgs.length, 3, "中段损伤同样全量透传（上游无状态，无需重置）");
 }
 
 // ---------------------------------------------------------------------------
@@ -189,31 +192,29 @@ function testToolContinuationEmitsAssistantToolPair(): void {
 
   assert.equal(result.isToolContinuation, true);
   const msgs = messagesOf(result.body);
-  assert.equal(msgs.length, 2, "工具续传应发送 [assistant(tool_calls), tool(result)] 消息对");
-  assert.equal(msgs[0].role, "assistant");
-  assert.ok(Array.isArray(msgs[0].tool_calls), "assistant 消息应携带 tool_calls");
-  assert.equal(msgs[1].role, "tool");
-  assert.equal(msgs[1].tool_call_id, "call_1");
-  assert.equal(msgs[1].content, "result text");
+  assert.equal(msgs.length, 5, "工具续传全量透传（含完整历史与工具交换）");
+  assert.equal(msgs[3].role, "assistant");
+  assert.ok(Array.isArray(msgs[3].tool_calls), "assistant 消息应携带 tool_calls");
+  assert.equal(msgs[4].role, "tool");
+  assert.equal(msgs[4].tool_call_id, "call_1");
+  assert.equal(msgs[4].content, "result text");
 }
 
-function testToolContinuationWithoutMatchingAssistantFallsBackToUserText(): void {
+function testNonTraceableToolResultPassesThroughAsToolMessage(): void {
   const chatId = "v2-777777777777777777777777777777";
   const prefix = [user("old"), assistant("old answer")];
   seedChain(chatId, prefix, assistant("new answer"));
 
   // 客户端只回传 tool 结果，历史中无匹配的 assistant tool_call。
-  // 该 tool 结果不可追溯，被分叉分类归为 tail-divergence，
-  // 降级为折叠缺失尾部（仅保留最新 user turn）。
   const result = chatRequest.buildV2RequestBody(
     request(chatId, [...prefix, user("next"), tool("orphan result", "call_orphan")]),
     session,
   );
 
   const msgs = messagesOf(result.body);
-  assert.equal(msgs.length, 1, "不可追溯的 tool 结果应降级为单条 user 消息");
-  assert.equal(msgs[0].role, "user");
-  assert.ok(String(msgs[0].content).includes("next"), "应保留最新 user turn");
+  assert.equal(msgs.length, 4, "不可追溯 tool 结果同样透传（模型自行理解）");
+  assert.equal(msgs[3].role, "tool");
+  assert.equal(msgs[3].content, "orphan result");
 }
 
 // ---------------------------------------------------------------------------
@@ -286,20 +287,86 @@ function testMaxTokensOverride(): void {
 }
 
 // ---------------------------------------------------------------------------
+// v2 专有行为：max_tokens clamp / 上游恒流式 / forceResync 折叠 / 显式 tool_results
+// ---------------------------------------------------------------------------
+
+function testMaxTokensClampedToLimit(): void {
+  const chatId = "v2-dddddddddddddddddddddddddddddddd";
+  const result = chatRequest.buildV2RequestBody(
+    { ...request(chatId, [user("hi")]), max_tokens: 999999 },
+    session,
+  );
+  assert.equal(result.body.max_tokens, 65536, "超限 max_tokens 应 clamp 到 65536");
+}
+
+function testUpstreamStreamAlwaysTrue(): void {
+  const chatId = "v2-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+  const result = chatRequest.buildV2RequestBody(
+    { ...request(chatId, [user("hi")]), stream: false },
+    session,
+  );
+  assert.equal(result.body.stream, true, "上游请求应始终 stream:true（非流式客户端由聚合路径处理）");
+}
+
+function testForceResyncFoldsToSingleUserMessage(): void {
+  const chatId = "v2-ffffffffffffffffffffffffffffffff";
+  const prefix = [user("old"), assistant("old answer")];
+  seedChain(chatId, prefix, assistant("new answer"));
+
+  const result = chatRequest.buildV2RequestBody(
+    request(chatId, [...prefix, assistant("new answer"), user("next")]),
+    session,
+    { forceResync: true },
+  );
+
+  assert.equal(result.divergence, "middle-damage");
+  const msgs = messagesOf(result.body);
+  assert.equal(msgs.length, 1, "forceResync 逃生通道：折叠为单条 user 消息");
+  assert.equal(msgs[0].role, "user");
+}
+
+function testExplicitToolResultsAppendedAsToolMessages(): void {
+  const chatId = "v2-10101010101010101010101010101010";
+  const result = chatRequest.buildV2RequestBody(
+    {
+      ...request(chatId, [user("next")]),
+      codearts: {
+        chat_id: chatId,
+        tool_results: [{ toolCallId: "c1", name: "find_path", status: "success", result: "ok" }],
+      },
+    },
+    session,
+  );
+
+  const msgs = messagesOf(result.body);
+  // 全量透传 [user("next")] + 合成 [assistant(tool_calls), tool(result)]
+  assert.equal(msgs.length, 3, "显式 tool_results 应合成为工具消息对附加");
+  assert.equal(msgs[1].role, "assistant");
+  assert.ok(Array.isArray(msgs[1].tool_calls));
+  assert.equal(msgs[2].role, "tool");
+  assert.equal(msgs[2].tool_call_id, "c1");
+  assert.equal(msgs[2].content, "ok");
+}
+
+// ---------------------------------------------------------------------------
 // Run
 // ---------------------------------------------------------------------------
 
 testColdStartSingleUserMessage();
-testColdStartFoldsHistoryWhenInjectionEnabled();
-testWarmContinuationSendsOnlyLatestTurn();
-testTailDivergenceFoldsMissingSegment();
-testMiddleDamageFoldsFullContext();
-testToolContinuationEmitsAssistantToolPair();
-testToolContinuationWithoutMatchingAssistantFallsBackToUserText();
+testColdStartPassesThroughFullHistory();
+testWarmContinuationPassesThroughFullHistory();
+testTailDivergencePassesThroughFullHistory();
+testMiddleDamagePassesThroughFullHistory();
+testToolContinuationIncludesFullHistoryWithToolPair();
+testNonTraceableToolResultPassesThroughAsToolMessage();
 testSubAgentFieldsPassthrough();
 testSubAgentFiltersTools();
 testToolsForwardedWhenProvided();
 testToolsOmittedWhenAbsent();
 testMaxTokensOverride();
+testMaxTokensClampedToLimit();
+testUpstreamStreamAlwaysTrue();
+testForceResyncFoldsToSingleUserMessage();
+testExplicitToolResultsAppendedAsToolMessages();
 
 console.log("All v2 request body tests passed.");

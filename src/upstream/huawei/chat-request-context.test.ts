@@ -64,12 +64,6 @@ function bodyText(body: Record<string, unknown>): string {
   return messages.map((message) => message.content ?? "").join("\n");
 }
 
-/** v2 请求体无 parent_message_id；用 messages 形状代替断言。 */
-function isSingleUserMessage(body: Record<string, unknown>): boolean {
-  const messages = body.messages as Array<{ role?: string }>;
-  return messages.length === 1 && messages[0]?.role === "user";
-}
-
 function testNormalContinuation(): void {
   const chatId = "11111111111111111111111111111111";
   const prefix = [user("old"), assistant("old answer")];
@@ -83,8 +77,9 @@ function testNormalContinuation(): void {
 
   assert.equal(result.divergence, "normal");
   assert.equal(result.suffixStart, 3);
-  assert.equal(bodyText(result.body), "next");
-  assert.ok(isSingleUserMessage(result.body), "v2 热链续传仅发送最新 user turn");
+  const msgs = result.body.messages as Array<{ role?: string; content?: string }>;
+  assert.equal(msgs.length, 4, "v2 无状态上游：全量透传");
+  assert.equal(msgs[3]?.content, "next");
 }
 
 function testTailDivergenceSkipsParentReply(): void {
@@ -103,14 +98,13 @@ function testTailDivergenceSkipsParentReply(): void {
     ]),
     session,
   );
-  const text = bodyText(result.body);
-
   assert.equal(result.divergence, "tail-divergence");
   assert.equal(result.suffixStart, 3);
-  assert.ok(text.includes("external user"));
-  assert.ok(text.includes("external answer"));
-  assert.ok(text.includes("[当前用户请求]"));
-  assert.ok(!text.includes("new answer"), "parent 已覆盖的回复不可重复补发");
+  const msgs = result.body.messages as Array<{ role?: string; content?: string }>;
+  assert.equal(msgs.length, 6, "尾部偏差全量透传");
+  assert.equal(msgs[3]?.content, "external user");
+  assert.equal(msgs[4]?.content, "external answer");
+  assert.equal(msgs[5]?.content, "current");
 }
 
 function testTailDivergenceStartsAtBoundaryWhenReplyMissing(): void {
@@ -158,7 +152,8 @@ function testUntraceableToolResetsParent(): void {
   );
 
   assert.equal(result.divergence, "middle-damage");
-  assert.ok(isSingleUserMessage(result.body), "middle-damage 应全量折叠为单条 user 消息");
+  const msgs = result.body.messages as unknown[];
+  assert.equal(msgs.length, 5, "v2 中段损伤不折叠：全量透传");
 }
 
 function testDuplicateRequestAutoRepairs(): void {
@@ -171,9 +166,10 @@ function testDuplicateRequestAutoRepairs(): void {
   const result = chatRequest.buildV2RequestBody(request(chatId, prefix), session);
   assert.ok(result, "buildV2RequestBody should not throw on duplicate/stale");
   assert.equal(result.divergence, "duplicate/stale");
-  assert.ok(isSingleUserMessage(result.body), "duplicate/stale 应全量折叠为单条 user 消息");
+  const msgs = result.body.messages as unknown[];
+  assert.equal(msgs.length, 2, "duplicate/stale 同样全量透传（无状态上游重答无害）");
   const text = bodyText(result.body);
-  assert.ok(text.includes("old"), "自动修复后应折叠当前历史（含旧 user）");
+  assert.ok(text.includes("old"), "透传历史应包含旧 user");
 }
 
 testNormalContinuation();
@@ -221,10 +217,10 @@ function testT5BoundaryMatchesAfterEchoNormalized(): void {
   // 纯工具段无 user → 仍 tail-divergence，但边界成立（suffixStart=prefixLen+1=3）
   assert.equal(result.divergence, "tail-divergence");
   assert.equal(result.suffixStart, 3);
-  const text = bodyText(result.body);
-  assert.ok(text.includes("[tool result:"), "应携带工具结果");
-  assert.ok(!text.includes("old"), "不得重复已确认的 user/system");
-  assert.ok(!text.includes("[当前用户请求]"));
+  const msgs = result.body.messages as Array<{ role?: string; content?: string }>;
+  assert.equal(msgs.length, 4, "全量透传（含工具段）");
+  assert.equal(msgs[3]?.role, "tool");
+  assert.equal(msgs[3]?.content, "out");
 }
 
 // T5b：echo + 可追溯 tool + 末尾 user → normal 恢复（P1 端到端效果）
@@ -240,7 +236,9 @@ function testT5NormalAfterToolPairAndUser(): void {
   );
   assert.equal(result.divergence, "normal");
   assert.equal(result.suffixStart, 3);
-  assert.equal(bodyText(result.body), "next");
+  const msgs = result.body.messages as Array<{ role?: string; content?: string }>;
+  assert.equal(msgs.length, 5, "全量透传（含工具段与最新 user）");
+  assert.equal(msgs[4]?.content, "next");
 }
 
 // T8：tail-divergence 纯工具段（边界不相等，suffixStart=prefixLen）
@@ -255,12 +253,12 @@ function testT8TailToolSegmentBoundaryMismatch(): void {
   );
   assert.equal(result.divergence, "tail-divergence");
   assert.equal(result.suffixStart, 2);
-  const text = bodyText(result.body);
-  assert.ok(text.includes("[调用工具: find_path"), "含工具调用标注");
-  assert.ok(text.includes("[tool result: find_path]"), "含工具结果标注");
-  assert.ok(text.includes("file1"));
-  assert.ok(!text.includes("old"), "不得重复首条 user 内容");
-  assert.ok(!text.includes("[当前用户请求]"));
+  const msgs = result.body.messages as Array<{ role?: string; content?: string; tool_calls?: unknown }>;
+  assert.equal(msgs.length, 4, "全量透传（含外部工具段）");
+  assert.equal(msgs[2]?.role, "assistant");
+  assert.ok(Array.isArray(msgs[2]?.tool_calls));
+  assert.equal(msgs[3]?.role, "tool");
+  assert.equal(msgs[3]?.content, "file1");
 }
 
 // T9：纯 tool 段（边界相等，suffixStart=prefixLen+1）
@@ -276,9 +274,10 @@ function testT9TailToolOnlyBoundaryMatch(): void {
   );
   assert.equal(result.divergence, "tail-divergence");
   assert.equal(result.suffixStart, 3);
-  const text = bodyText(result.body);
-  assert.ok(text.includes("[tool result:"), "应携带工具结果");
-  assert.ok(!text.includes("old"));
+  const msgs = result.body.messages as Array<{ role?: string; content?: string }>;
+  assert.equal(msgs.length, 4, "全量透传（含工具段）");
+  assert.equal(msgs[3]?.role, "tool");
+  assert.equal(msgs[3]?.content, "out");
 }
 
 // T10：可追溯 tool + 末尾 user → normal（工具结果随增量前进）
@@ -293,7 +292,9 @@ function testT10TraceableToolWithUserNormal(): void {
     session,
   );
   assert.equal(result.divergence, "normal");
-  assert.equal(bodyText(result.body), "next");
+  const msgs = result.body.messages as Array<{ role?: string; content?: string }>;
+  assert.equal(msgs.length, 5, "全量透传");
+  assert.equal(msgs[4]?.content, "next");
 }
 
 testT5BoundaryMatchesAfterEchoNormalized();
@@ -320,7 +321,10 @@ function testT16ToolContinuationBypass(): void {
     session,
   );
   assert.equal(result.divergence, undefined, "tool continuation 旁路，不参与分类");
-  assert.ok((result.body.messages as unknown[]).length >= 1, "tool continuation 应携带 tool 消息");
+  const msgs = result.body.messages as Array<{ role?: string }>;
+  assert.equal(msgs.length, 5, "显式 tool_results 合成工具消息对附加到透传历史");
+  assert.equal(msgs[3]?.role, "assistant");
+  assert.equal(msgs[4]?.role, "tool");
 }
 
 function testT17CallerParentBypass(): void {
@@ -335,7 +339,8 @@ function testT17CallerParentBypass(): void {
     session,
   );
   assert.equal(result.divergence, undefined, "调用方提供 parent 时旁路检测");
-  assert.ok(isSingleUserMessage(result.body), "调用方 parent 旁路时仅发送最新 user turn");
+  const msgs = result.body.messages as unknown[];
+  assert.equal(msgs.length, 4, "旁路时同样全量透传");
 }
 
 function testT18SubAgentBypass(): void {

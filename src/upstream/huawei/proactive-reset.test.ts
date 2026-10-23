@@ -123,8 +123,8 @@ function testProactiveResetSkipsUnderThreshold(): void {
   assert.equal(result.divergence, "normal", "should stay normal");
   assert.equal(
     (result.body.messages as Array<{ content?: string }>).length,
-    1,
-    "should send only the latest user turn",
+    4,
+    "should pass through full history (no fold)",
   );
   assert.equal(result.proactiveReset, false, "should return proactiveReset=false");
 }
