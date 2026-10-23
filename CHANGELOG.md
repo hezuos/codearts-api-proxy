@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [2.4.1] - 2026-10-23
 
 ### Changed
 - **BREAKING**: 上游 chat 通道从 CodeArts 原生 `/v1/chat/chat` 统一切换到 OpenAI 兼容的 `/api/v2/chat/completions`（`HUAWEI_V2_CHAT_PATH` 可配置）。
@@ -12,12 +12,17 @@
   - v2 无 `parent_message_id`，续传判定完全依赖链状态（`chainStates`）与客户端回传历史。
   - 链指纹（`normalizeForChain`）移除 `reasoning_content`，避免客户端不回传 reasoning 时误判 divergence。
   - 缓存用量优先使用上游真实 `usage.prompt_tokens_details`，未返回时回退到 divergence 估算。
+  - **messages 全量透传**：实测 v2 上游无服务端会话状态（增量请求丢失上下文），每个请求全量透传客户端原生消息数组（保留 role / tool_calls 结构，token 效率最优）；折叠仅作逃生通道（forceResync 恢复重试 / 主动重置 / 超出字符预算）。
 
 ### Added
 - 配置项 `HUAWEI_V2_CHAT_PATH`（默认 `/api/v2/chat/completions`）与 `getChatUrl()` 辅助函数。
-- `buildV2RequestBody()`：v2 请求体构造（冷启动/热链续传/工具续传/子代理/折叠重置）。
+- `buildV2RequestBody()`：v2 请求体构造（默认全量透传；forceResync / 主动重置 / 超预算时折叠为压缩单条文本）。
 - `parseSSE` 支持 v2 OpenAI 兼容 `choices[].delta` 形状归一化。
-- 测试 `src/upstream/huawei/chat-v2-request.test.ts`：12 个用例覆盖 v2 请求体各场景。
+- 测试 `src/upstream/huawei/chat-v2-request.test.ts`：16 个用例覆盖 v2 请求体各场景。
+
+### Fixed
+- 非流式请求返回空内容：v2 上游请求恒 `stream: true`（客户端 `stream: false` 时上游返回普通 JSON、SSE 解析为空），非流式响应由聚合路径处理。
+- v2 链状态永不更新：v2 事件不含 `chat_id` / `response_message_id`，现将 chunk `id` 映射为 `response_message_id`，并以构建侧派生的 `chatId` 维护链状态与 prompt_tokens 追踪（客户端 `codearts` 元数据不再为空）。
 
 ## [2.2.5] - 2026-08-23
 
