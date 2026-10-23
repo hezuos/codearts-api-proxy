@@ -10,7 +10,7 @@ import { signRequest, type SigningCredentials } from "../../auth/huawei/credenti
 import type { StoredHuaweiSession } from "../../auth/huawei/session-store";
 import { UpstreamTimeoutError } from "../../utils/errors";
 import { logger } from "../../utils/logger";
-import type { OpenAIChatCompletionRequest, OpenAIChatMessage } from "../../types/openai";
+import type { OpenAIChatCompletionRequest, OpenAIChatMessage, CodeArtsToolResult } from "../../types/openai";
 import {
   extractUserMessage,
   extractToolResults,
