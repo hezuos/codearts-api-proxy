@@ -1,0 +1,232 @@
+// ---------------------------------------------------------------------------
+// v2 (OpenAI-compatible) request body construction
+// ---------------------------------------------------------------------------
+
+/**
+ * v2 通道 `max_tokens` 上限。
+ *
+ * 实测（glm-5.3，/api/v2/chat/completions）：65536 成功，65537 起返回
+ * `InferHub.001001005.400`（The request param is invalid）。
+ * 因此默认值与上限均取 65536，并对客户端传入值做 clamp。
+ */
+export const V2_MAX_TOKENS_LIMIT = 65536;
+
+/** v2 通道默认 max_tokens（等于上游允许的上限）。 */
+export const V2_DEFAULT_MAX_TOKENS = V2_MAX_TOKENS_LIMIT;
+
+/**
+ * 构造 v2 通道（`/api/v2/chat/completions`，OpenAI 兼容）请求体。
+ *
+ * 与 `buildRequestBody` 共享链状态/分叉分类/主动重置逻辑，但输出 OpenAI 兼容形状：
+ * `{ model, max_tokens, tool_stream, stream, messages, tools?, isSubAgent?, subAgent_type?, subAgent_prompt? }`。
+ *
+ * `messages` 构造规则（v2 上游已实测为无状态：增量请求丢失上下文）：
+ * - 默认：全量透传客户端 messages（原生 role/content/tool_calls 结构）
+ * - 逃生通道（forceResync / 主动重置 / 超出字符预算）：折叠为单条 `{ role: "user", content }`
+ * - 显式 codearts.tool_results（v1 遗留）：合成 `[assistant(tool_calls), tool(result)]` 附加
+ */
+export function buildV2RequestBody(
+  request: OpenAIChatCompletionRequest,
+  session: StoredHuaweiSession,
+  options: { forceResync?: boolean } = {},
+): { body: Record<string, unknown>; json: string; divergence?: Divergence; suffixStart?: number; isToolContinuation: boolean; proactiveReset: boolean; chatId: string } {
+  // 检测客户端回传的 forceResync tool_result（由 proxy 合成的 Bash echo tool_call 触发）。
+  // 检测到时：剥离该 tool exchange，自动走 forceResync 路径。
+  const forceResyncFromToolResult = detectForceResyncToolResult(request);
+  const effectiveRequest: OpenAIChatCompletionRequest = forceResyncFromToolResult
+    ? { ...request, messages: stripForceResyncToolExchange(request) }
+    : request;
+  if (forceResyncFromToolResult) {
+    logger.info("[client→proxy] detected forceResync tool_result — switching to forceResync path", {
+      messages_before: request.messages.length,
+      messages_after: effectiveRequest.messages.length,
+    });
+  }
+  const forceResync = options.forceResync || forceResyncFromToolResult;
+
+  const toolResults = extractToolResults(effectiveRequest);
+  const isToolContinuation = toolResults.length > 0;
+  const subAgent = request.codearts?.sub_agent;
+
+  const tools = resolveTools(request);
+  const modelId = resolveModelId(request);
+
+  const chatId =
+    request.codearts?.chat_id?.trim() || deriveConversationId(effectiveRequest.messages, session.providerAccountId);
+
+  // Sub-agent / main-agent chat_id collision detection
+  const currentRole = subAgent ? "sub" : "main";
+  const previousRole = getChatIdRole(chatId);
+  setChatIdRole(chatId, currentRole);
+
+  if (previousRole && previousRole !== currentRole) {
+    logger.warn("CHAT_ID COLLISION", {
+      chat_id: chatId,
+      previousRole,
+      currentRole,
+    });
+  } else if (subAgent) {
+    logger.info("Sub-agent request", { chat_id: chatId, previousRole: previousRole ?? "none" });
+  } else if (isToolContinuation) {
+    logger.info("Main-agent tool continuation", {
+      chat_id: chatId,
+      previousRole: previousRole ?? "none",
+      lastPromptTokens: getLastPromptTokens(chatId) ?? 0,
+    });
+  }
+
+  // v2 无 parent_message_id 字段；链状态（chainStates）是续传判定的唯一依据。
+  // 保留 trackedParent 仅用于判定「是否存在可续传的上一轮」。
+  const trackedParent = !!getLastResponseMessageId(chatId);
+  const callerProvidedParent = !!request.codearts?.parent_message_id;
+  const hasContinuity = trackedParent || callerProvidedParent;
+
+  const chainState = getChainState(chatId);
+  const canRepair =
+    config.chainDivergenceRepairEnabled &&
+    !isToolContinuation &&
+    !subAgent &&
+    !callerProvidedParent &&
+    !!chainState;
+
+  let divergence: Divergence | undefined;
+  let suffixStart: number | undefined;
+  let fullContextInjected = false;
+  let fullContextChars = 0;
+
+  if (forceResync && !isToolContinuation) {
+    divergence = "middle-damage";
+  } else if (canRepair) {
+    const classified = classifyDivergence(effectiveRequest.messages, chainState);
+    divergence = classified.divergence;
+    suffixStart = classified.suffixStart;
+  }
+
+  // 主动重置：当累积 prompt_tokens 接近上游硬限制时，强制全量折叠重置，
+  // 避免 ChatAgent.00001216 错误。仅在 normal 热链续传路径触发。
+  let proactiveReset = false;
+  if (
+    (divergence === undefined || divergence === "normal") &&
+    hasContinuity &&
+    !isToolContinuation &&
+    !subAgent &&
+    !callerProvidedParent &&
+    (getLastPromptTokens(chatId) ?? 0) > config.upstreamPromptTokenResetThreshold
+  ) {
+    divergence = "middle-damage";
+    proactiveReset = true;
+    logger.info("[proxy→codearts] PROACTIVE RESET (prompt_tokens threshold exceeded)", {
+      chat_id: chatId,
+      lastPromptTokens: getLastPromptTokens(chatId) ?? 0,
+      threshold: config.upstreamPromptTokenResetThreshold,
+    });
+  }
+
+  // 显式 codearts.tool_results（v1 遗留扩展）：客户端历史不含工具交换，合成标准消息对附加。
+  const explicitToolResults = request.codearts?.tool_results ?? [];
+  const effectiveMessages =
+    explicitToolResults.length > 0
+      ? appendExplicitToolExchange(effectiveRequest.messages, explicitToolResults)
+      : effectiveRequest.messages;
+
+  const messagesBody = buildV2Messages({
+    request: { ...effectiveRequest, messages: effectiveMessages },
+    modelId,
+    forceResync,
+    proactiveReset,
+    onFold: (chars) => {
+      fullContextInjected = true;
+      fullContextChars = chars;
+    },
+  });
+
+  const body: Record<string, unknown> = {
+    model: modelId,
+    max_tokens: Math.min(request.max_tokens ?? V2_DEFAULT_MAX_TOKENS, V2_MAX_TOKENS_LIMIT),
+    tool_stream: true,
+    // v2 上游始终以 SSE 流式返回（stream:false 会返回普通 JSON，parseSSE 解析为空）。
+    // 非流式客户端由 chat.ts 聚合 SSE 事件。
+    stream: true,
+    messages: messagesBody,
+  };
+
+  if (tools.length > 0) {
+    body.tools = tools;
+  }
+
+  if (subAgent) {
+    body.isSubAgent = true;
+    body.subAgent_type = subAgent.type;
+    body.subAgent_prompt = subAgent.prompt ?? "";
+  }
+
+  if (fullContextInjected || divergence) {
+    logger.info("[proxy→codearts] REQUEST context classification (v2)", {
+      chat_id: chatId,
+      divergence: divergence ?? "cold-start",
+      fullContextInjected,
+      foldedChars: fullContextChars,
+      suffixStart,
+      messagesCount: effectiveRequest.messages.length,
+      model_id: modelId,
+    });
+  }
+
+  return { body, json: JSON.stringify(body), divergence, suffixStart, isToolContinuation, proactiveReset, chatId };
+}
+
+/**
+ * 构造 v2 请求的 `messages` 数组（OpenAI 兼容形状）。
+ *
+ * v2 上游无服务端会话状态（实测确认：增量请求丢失上下文），
+ * 每个请求必须携带完整对话历史：
+ * - 默认：全量透传客户端 messages（原生 role/content/tool_calls 结构，token 效率最高）
+ * - 逃生通道（forceResync / 主动重置 / 总字符超预算）：折叠为压缩单条文本
+ */
+function buildV2Messages(params: {
+  request: OpenAIChatCompletionRequest;
+  modelId: string;
+  forceResync: boolean;
+  proactiveReset: boolean;
+  onFold: (chars: number) => void;
+}): unknown[] {
+  const { request, modelId, forceResync, proactiveReset, onFold } = params;
+  const budget = resolveFullContextMaxChars(modelId);
+  const totalChars = request.messages.reduce(
+    (sum, m) => sum + normalizeMessageContent(m.content).length,
+    0,
+  );
+
+  // 逃生通道：forceResync（00001216 恢复重试）/ 主动重置 / 历史超预算 → 折叠为压缩单条文本。
+  if (forceResync || proactiveReset || totalChars > budget) {
+    const folded = foldFullConversation(request.messages, budget);
+    if (folded) onFold(folded.length);
+    return [{ role: "user", content: folded || extractUserMessage(request.messages) }];
+  }
+
+  // v2 上游无状态：全量透传客户端历史（原生 OpenAI messages 结构）。
+  // 工具续传场景天然包含 [assistant(tool_calls), tool(result)] 段。
+  return request.messages.map(toV2Message);
+}
+
+/**
+ * 将客户端消息投影为 v2 上游接受的 OpenAI 消息形状。
+ * 剥离代理内部扩展字段（refusal / reasoning_content），developer 角色映射为 system。
+ */
+function toV2Message(m: OpenAIChatMessage): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    role: m.role === "developer" ? "system" : m.role,
+    content: m.content,
+  };
+  if (m.name) out.name = m.name;
+  if (m.tool_call_id) out.tool_call_id = m.tool_call_id;
+  if (m.tool_calls && m.tool_calls.length > 0) out.tool_calls = m.tool_calls;
+  return out;
+}
+
+/**
+ * 将 v1 遗留的显式 codearts.tool_results 合成为标准 OpenAI 工具交换消息，
+ * 附加到历史末尾（assistant(tool_calls) + tool(result) 消息对）。
+ * 标准流程（客户端在 messages 中携带工具交换）不经过此路径。
+ */
+function appendExplicitToolExchange(

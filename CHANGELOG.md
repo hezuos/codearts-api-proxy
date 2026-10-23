@@ -1,5 +1,24 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- **BREAKING**: 上游 chat 通道从 CodeArts 原生 `/v1/chat/chat` 统一切换到 OpenAI 兼容的 `/api/v2/chat/completions`（`HUAWEI_V2_CHAT_PATH` 可配置）。
+  - 新增 `glm-5.3` 支持（v1 通道对该模型返回 `ChatAgent.00001216` / `00001007`）。
+  - v2 默认返回 `reasoning_content`（thinking 能力默认开启），代理透传给客户端。
+  - 请求体改为 OpenAI 兼容形状：`{model, max_tokens, tool_stream, stream, messages, tools?}`；`max_tokens` 默认 65536（64k，上游实测上限），并对客户端传入值做 clamp。
+  - 工具续传从 `task_parameters.tool_result` 改为标准 `role: "tool"` 消息（`[assistant(tool_calls), tool(result)]`）。
+  - 子代理字段（`isSubAgent` / `subAgent_type` / `subAgent_prompt`）直接透传，不再降级。
+  - v2 无 `parent_message_id`，续传判定完全依赖链状态（`chainStates`）与客户端回传历史。
+  - 链指纹（`normalizeForChain`）移除 `reasoning_content`，避免客户端不回传 reasoning 时误判 divergence。
+  - 缓存用量优先使用上游真实 `usage.prompt_tokens_details`，未返回时回退到 divergence 估算。
+
+### Added
+- 配置项 `HUAWEI_V2_CHAT_PATH`（默认 `/api/v2/chat/completions`）与 `getChatUrl()` 辅助函数。
+- `buildV2RequestBody()`：v2 请求体构造（冷启动/热链续传/工具续传/子代理/折叠重置）。
+- `parseSSE` 支持 v2 OpenAI 兼容 `choices[].delta` 形状归一化。
+- 测试 `src/upstream/huawei/chat-v2-request.test.ts`：12 个用例覆盖 v2 请求体各场景。
+
 ## [2.2.5] - 2026-08-23
 
 ### Fixed

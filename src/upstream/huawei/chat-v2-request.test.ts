@@ -141,7 +141,7 @@ function testWarmContinuationPassesThroughFullHistory(): void {
   assert.equal(msgs[3].content, "next");
 }
 
-function testTailDivergenceFoldsMissingSegment(): void {
+function testTailDivergencePassesThroughFullHistory(): void {
   const chatId = "v2-444444444444444444444444444444";
   const prefix = [user("old"), assistant("old answer")];
   const lastReply = assistant("new answer");
@@ -178,7 +178,7 @@ function testMiddleDamagePassesThroughFullHistory(): void {
 // 工具续传
 // ---------------------------------------------------------------------------
 
-function testToolContinuationEmitsAssistantToolPair(): void {
+function testToolContinuationIncludesFullHistoryWithToolPair(): void {
   const chatId = "v2-666666666666666666666666666666";
   const prefix = [user("old"), assistant("old answer")];
   const lastReply = assistant("new answer");

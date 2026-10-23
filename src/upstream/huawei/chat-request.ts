@@ -551,7 +551,7 @@ export function buildV2RequestBody(
   request: OpenAIChatCompletionRequest,
   session: StoredHuaweiSession,
   options: { forceResync?: boolean } = {},
-): { body: Record<string, unknown>; json: string; divergence?: Divergence; suffixStart?: number; isToolContinuation: boolean; proactiveReset: boolean } {
+): { body: Record<string, unknown>; json: string; divergence?: Divergence; suffixStart?: number; isToolContinuation: boolean; proactiveReset: boolean; chatId: string } {
   // 检测客户端回传的 forceResync tool_result（由 proxy 合成的 Bash echo tool_call 触发）。
   // 检测到时：剥离该 tool exchange，自动走 forceResync 路径。
   const forceResyncFromToolResult = detectForceResyncToolResult(request);
@@ -644,15 +644,18 @@ export function buildV2RequestBody(
     });
   }
 
+  // 显式 codearts.tool_results（v1 遗留扩展）：客户端历史不含工具交换，合成标准消息对附加。
+  const explicitToolResults = request.codearts?.tool_results ?? [];
+  const effectiveMessages =
+    explicitToolResults.length > 0
+      ? appendExplicitToolExchange(effectiveRequest.messages, explicitToolResults)
+      : effectiveRequest.messages;
+
   const messagesBody = buildV2Messages({
-    request: effectiveRequest,
+    request: { ...effectiveRequest, messages: effectiveMessages },
     modelId,
-    divergence,
-    suffixStart,
     forceResync,
-    isToolContinuation,
-    subAgent: !!subAgent,
-    hasContinuity,
+    proactiveReset,
     onFold: (chars) => {
       fullContextInjected = true;
       fullContextChars = chars;
@@ -663,7 +666,9 @@ export function buildV2RequestBody(
     model: modelId,
     max_tokens: Math.min(request.max_tokens ?? V2_DEFAULT_MAX_TOKENS, V2_MAX_TOKENS_LIMIT),
     tool_stream: true,
-    stream: !!request.stream,
+    // v2 上游始终以 SSE 流式返回（stream:false 会返回普通 JSON，parseSSE 解析为空）。
+    // 非流式客户端由 chat.ts 聚合 SSE 事件。
+    stream: true,
     messages: messagesBody,
   };
 
@@ -689,144 +694,90 @@ export function buildV2RequestBody(
     });
   }
 
-  return { body, json: JSON.stringify(body), divergence, suffixStart, isToolContinuation, proactiveReset };
+  return { body, json: JSON.stringify(body), divergence, suffixStart, isToolContinuation, proactiveReset, chatId };
 }
 
 /**
  * 构造 v2 请求的 `messages` 数组（OpenAI 兼容形状）。
  *
- * 与 v1 的 `{ type: "text", content }` 不同，v2 使用标准 `{ role, content }`。
+ * v2 上游无服务端会话状态（实测确认：增量请求丢失上下文），
+ * 每个请求必须携带完整对话历史：
+ * - 默认：全量透传客户端 messages（原生 role/content/tool_calls 结构，token 效率最高）
+ * - 逃生通道（forceResync / 主动重置 / 总字符超预算）：折叠为压缩单条文本
  */
 function buildV2Messages(params: {
   request: OpenAIChatCompletionRequest;
   modelId: string;
-  divergence?: Divergence;
-  suffixStart?: number;
   forceResync: boolean;
-  isToolContinuation: boolean;
-  subAgent: boolean;
-  hasContinuity: boolean;
+  proactiveReset: boolean;
   onFold: (chars: number) => void;
 }): unknown[] {
-  const {
-    request,
-    modelId,
-    divergence,
-    suffixStart,
-    forceResync,
-    isToolContinuation,
-    subAgent,
-    hasContinuity,
-    onFold,
-  } = params;
+  const { request, modelId, forceResync, proactiveReset, onFold } = params;
+  const budget = resolveFullContextMaxChars(modelId);
+  const totalChars = request.messages.reduce(
+    (sum, m) => sum + normalizeMessageContent(m.content).length,
+    0,
+  );
 
-  // 工具续传：发送 [assistant(tool_calls), tool(result)] 消息对。
-  if (isToolContinuation) {
-    return buildV2ToolContinuationMessages(request);
-  }
-
-  // 中段损伤 / 重复陈旧 / forceResync：全量折叠为单条 user 消息。
-  if (divergence === "middle-damage" || divergence === "duplicate/stale" || forceResync) {
-    const folded = foldFullConversation(request.messages, resolveFullContextMaxChars(modelId));
-    const content = folded || extractUserMessage(request.messages);
+  // 逃生通道：forceResync（00001216 恢复重试）/ 主动重置 / 历史超预算 → 折叠为压缩单条文本。
+  if (forceResync || proactiveReset || totalChars > budget) {
+    const folded = foldFullConversation(request.messages, budget);
     if (folded) onFold(folded.length);
-    return [{ role: "user", content }];
+    return [{ role: "user", content: folded || extractUserMessage(request.messages) }];
   }
 
-  // 尾部偏差：折叠缺失尾部为单条 user 消息。
-  if (divergence === "tail-divergence" && suffixStart !== undefined) {
-    const folded = foldMissingSegment(request.messages, suffixStart, resolveFullContextMaxChars(modelId));
-    if (folded) {
-      onFold(folded.length);
-      return [{ role: "user", content: folded }];
-    }
-    // 防御分支（正常不可达）：折叠为空时全量折叠重置。
-    const fullFolded = foldFullConversation(request.messages, resolveFullContextMaxChars(modelId));
-    onFold(fullFolded.length);
-    return [{ role: "user", content: fullFolded || "" }];
-  }
-
-  // 冷启动 / 无链：全量折叠注入（若启用）或仅发送最新 user turn。
-  const shouldInject =
-    config.fullContextInjectionEnabled &&
-    !hasContinuity &&
-    !subAgent &&
-    request.messages.length > 1;
-
-  if (shouldInject) {
-    const folded = foldFullConversation(request.messages, resolveFullContextMaxChars(modelId));
-    if (folded) {
-      onFold(folded.length);
-      return [{ role: "user", content: folded }];
-    }
-    return [{ role: "user", content: extractUserMessage(request.messages) }];
-  }
-
-  // 热链续传（normal）：仅发送最新 user turn。
-  const userMsg = extractUserMessage(request.messages);
-  const lastMsg = request.messages[request.messages.length - 1];
-  if (lastMsg?.role === "tool" && lastMsg.content) {
-    // 非内置工具 result 降级：合并进 user 文本（上游无法处理未知工具的 tool 消息）。
-    const toolContent = normalizeMessageContent(lastMsg.content);
-    const combined = toolContent
-      ? `${userMsg ? `${userMsg}\n\n` : ""}[工具执行结果]\n${toolContent}`
-      : userMsg || "[工具执行结果为空]";
-    return [{ role: "user", content: combined }];
-  }
-  return [{ role: "user", content: userMsg }];
+  // v2 上游无状态：全量透传客户端历史（原生 OpenAI messages 结构）。
+  // 工具续传场景天然包含 [assistant(tool_calls), tool(result)] 段。
+  return request.messages.map(toV2Message);
 }
 
 /**
- * 构造 v2 工具续传消息对：`[assistant(tool_calls), tool(result), ...]`。
- *
- * 从客户端历史中定位携带匹配 `tool_call_id` 的 assistant 消息，
- * 并附上对应的 tool 结果消息。非内置工具结果合并进 user 文本。
+ * 将客户端消息投影为 v2 上游接受的 OpenAI 消息形状。
+ * 剥离代理内部扩展字段（refusal / reasoning_content），developer 角色映射为 system。
  */
-function buildV2ToolContinuationMessages(request: OpenAIChatCompletionRequest): unknown[] {
-  const messages = request.messages;
-  const toolResults = extractToolResults(request);
-  const resultIds = new Set(toolResults.map((tr) => tr.toolCallId).filter(Boolean) as string[]);
-
-  // 定位最后一条携带匹配 tool_call 的 assistant 消息。
-  let assistantIndex = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (msg.role !== "assistant" || !msg.tool_calls?.length) continue;
-    if (msg.tool_calls.some((tc) => tc.id && resultIds.has(tc.id))) {
-      assistantIndex = i;
-      break;
-    }
-  }
-
-  if (assistantIndex === -1) {
-    // 无法定位 assistant tool_call：降级为把 tool 结果合并进 user 文本。
-    const userMsg = extractUserMessage(messages);
-    const combined = toolResults
-      .map((tr) => `[工具执行结果: ${tr.name}]\n${tr.result}`)
-      .join("\n\n");
-    return [{ role: "user", content: userMsg ? `${userMsg}\n\n${combined}` : combined }];
-  }
-
-  const assistantMsg = messages[assistantIndex];
-  const out: unknown[] = [
-    {
-      role: "assistant",
-      content: assistantMsg.content ?? null,
-      tool_calls: assistantMsg.tool_calls,
-    },
-  ];
-
-  // 附上匹配的 tool 结果消息（按 tool_call_id 对齐）。
-  for (const tr of toolResults) {
-    if (!tr.toolCallId) continue;
-    out.push({
-      role: "tool",
-      tool_call_id: tr.toolCallId,
-      content: tr.result ?? "",
-    });
-  }
-
+function toV2Message(m: OpenAIChatMessage): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    role: m.role === "developer" ? "system" : m.role,
+    content: m.content,
+  };
+  if (m.name) out.name = m.name;
+  if (m.tool_call_id) out.tool_call_id = m.tool_call_id;
+  if (m.tool_calls && m.tool_calls.length > 0) out.tool_calls = m.tool_calls;
   return out;
+}
+
+/**
+ * 将 v1 遗留的显式 codearts.tool_results 合成为标准 OpenAI 工具交换消息，
+ * 附加到历史末尾（assistant(tool_calls) + tool(result) 消息对）。
+ * 标准流程（客户端在 messages 中携带工具交换）不经过此路径。
+ */
+function appendExplicitToolExchange(
+  messages: OpenAIChatMessage[],
+  toolResults: CodeArtsToolResult[],
+): OpenAIChatMessage[] {
+  const toolCalls = toolResults.map((tr, i) => ({
+    id: tr.toolCallId ?? `call_explicit_${i}`,
+    type: "function" as const,
+    function: { name: tr.name, arguments: JSON.stringify(tr.arguments ?? {}) },
+  }));
+  const assistantMsg: OpenAIChatMessage = {
+    role: "assistant",
+    content: null,
+    refusal: null,
+    tool_calls: toolCalls,
+  };
+  const toolMsgs: OpenAIChatMessage[] = toolResults.map((tr, i) => ({
+    role: "tool" as const,
+    content: tr.result ?? "",
+    refusal: null,
+    tool_call_id: toolCalls[i].id,
+    name: tr.name,
+  }));
+  logger.info("[client→proxy] explicit codearts.tool_results synthesized as tool messages", {
+    count: toolResults.length,
+    names: toolResults.map((tr) => tr.name),
+  });
+  return [...messages, assistantMsg, ...toolMsgs];
 }
 
 // ---------------------------------------------------------------------------
