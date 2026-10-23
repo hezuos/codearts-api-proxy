@@ -58,15 +58,13 @@ export function extractUserMessage(messages: OpenAIChatMessage[]): string {
 }
 
 export function normalizeForChain(msg: OpenAIChatMessage): string {
-  const rc = msg.reasoning_content;
-  const hasReasoning = rc !== undefined && rc !== null && rc !== "";
   return JSON.stringify({
     role: msg.role,
     content: normalizeMessageContent(msg.content),
     name: msg.name ?? null,
     refusal: msg.refusal ?? null,
-    // 归一化 reasoning_content：null/undefined/"" 统一为 null（客户端 echo 空值与缺失视为同值）
-    reasoning_content: hasReasoning ? rc : null,
+    // 链指纹统一忽略 reasoning_content：v2 通道默认返回 reasoning，
+    // 而客户端回传时可能不带（或为空），计入指纹会导致误判 divergence。
     tool_call_id: msg.tool_call_id ?? null,
     tool_calls: (msg.tool_calls ?? [])
       .slice()

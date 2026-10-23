@@ -11,6 +11,11 @@ export interface AppConfig {
   defaultApiKey: string;
   huaweiApiHost: string;
   huaweiChatHost: string;
+  /**
+   * Upstream chat endpoint path (OpenAI-compatible v2 channel).
+   * Default: /api/v2/chat/completions — the only channel that supports glm-5.3.
+   */
+  huaweiV2ChatPath: string;
   huaweiIamHost: string;
   huaweiRedirectHost: string;
   enableRefreshTask: boolean;
@@ -100,6 +105,8 @@ export const config: AppConfig = {
   huaweiChatHost:
     process.env.HUAWEI_CHAT_HOST ??
     "https://snap-access.cn-north-4.myhuaweicloud.com",
+  huaweiV2ChatPath:
+    process.env.HUAWEI_V2_CHAT_PATH ?? "/api/v2/chat/completions",
   huaweiIamHost:
     process.env.HUAWEI_IAM_HOST ?? "https://iam.cn-north-4.myhuaweicloud.com",
   huaweiRedirectHost:
@@ -167,6 +174,26 @@ export const upstreamTimeoutMs = Number(process.env.UPSTREAM_TIMEOUT_MS ?? 120_0
 
 /** Whether this node is the master node for refresh tasks (default: true). */
 export const isMasterNode = (process.env.IS_MASTER_NODE ?? "true") === "true";
+
+/**
+ * Derive the GPTs (agent-center) URL from config.
+ * If HUAWEI_GPTS_URL is set explicitly, use that.
+ * Otherwise, derive from HUAWEI_CHAT_HOST based on isInnerVersion:
+ *   - Internal: {chatHost}/PromptCenterService/v1/agent-center/agents
+ *   - External: {chatHost}/v1/agent-center/agents
+ */
+/**
+ * Derive the upstream chat endpoint URL.
+ * Always the OpenAI-compatible v2 channel — the CodeArts-native /v1/chat/chat
+ * channel does not support glm-5.3.
+ */
+export function getChatUrl(): string {
+  const base = config.huaweiChatHost.replace(/\/$/, "");
+  const path = config.huaweiV2ChatPath.startsWith("/")
+    ? config.huaweiV2ChatPath
+    : `/${config.huaweiV2ChatPath}`;
+  return `${base}${path}`;
+}
 
 /**
  * Derive the GPTs (agent-center) URL from config.

@@ -54,9 +54,7 @@ function error00001216Events(): string[] {
   ];
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 let mockHttpsPost: HttpsPostFn | null = null;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 let callCount = 0;
 const callBodies: string[] = [];
 

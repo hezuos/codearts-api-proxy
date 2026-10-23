@@ -520,6 +520,316 @@ export function buildRequestBody(
 }
 
 // ---------------------------------------------------------------------------
+// v2 (OpenAI-compatible) request body construction
+// ---------------------------------------------------------------------------
+
+/**
+ * v2 通道 `max_tokens` 上限。
+ *
+ * 实测（glm-5.3，/api/v2/chat/completions）：65536 成功，65537 起返回
+ * `InferHub.001001005.400`（The request param is invalid）。
+ * 因此默认值与上限均取 65536，并对客户端传入值做 clamp。
+ */
+export const V2_MAX_TOKENS_LIMIT = 65536;
+
+/** v2 通道默认 max_tokens（等于上游允许的上限）。 */
+export const V2_DEFAULT_MAX_TOKENS = V2_MAX_TOKENS_LIMIT;
+
+/**
+ * 构造 v2 通道（`/api/v2/chat/completions`，OpenAI 兼容）请求体。
+ *
+ * 与 `buildRequestBody` 共享链状态/分叉分类/主动重置逻辑，但输出 OpenAI 兼容形状：
+ * `{ model, max_tokens, tool_stream, stream, messages, tools?, isSubAgent?, subAgent_type?, subAgent_prompt? }`。
+ *
+ * `messages` 构造规则：
+ * - 冷启动 / 折叠场景：单条 `{ role: "user", content }`
+ * - 热链续传（normal）：仅发送最新 user turn
+ * - 工具续传：`[assistant(tool_calls), tool(result)]` 消息对
+ * - 非内置工具 result：合并进 user 文本
+ */
+export function buildV2RequestBody(
+  request: OpenAIChatCompletionRequest,
+  session: StoredHuaweiSession,
+  options: { forceResync?: boolean } = {},
+): { body: Record<string, unknown>; json: string; divergence?: Divergence; suffixStart?: number; isToolContinuation: boolean; proactiveReset: boolean } {
+  // 检测客户端回传的 forceResync tool_result（由 proxy 合成的 Bash echo tool_call 触发）。
+  // 检测到时：剥离该 tool exchange，自动走 forceResync 路径。
+  const forceResyncFromToolResult = detectForceResyncToolResult(request);
+  const effectiveRequest: OpenAIChatCompletionRequest = forceResyncFromToolResult
+    ? { ...request, messages: stripForceResyncToolExchange(request) }
+    : request;
+  if (forceResyncFromToolResult) {
+    logger.info("[client→proxy] detected forceResync tool_result — switching to forceResync path", {
+      messages_before: request.messages.length,
+      messages_after: effectiveRequest.messages.length,
+    });
+  }
+  const forceResync = options.forceResync || forceResyncFromToolResult;
+
+  const toolResults = extractToolResults(effectiveRequest);
+  const isToolContinuation = toolResults.length > 0;
+  const subAgent = request.codearts?.sub_agent;
+
+  const tools = resolveTools(request);
+  const modelId = resolveModelId(request);
+
+  const chatId =
+    request.codearts?.chat_id?.trim() || deriveConversationId(effectiveRequest.messages, session.providerAccountId);
+
+  // Sub-agent / main-agent chat_id collision detection
+  const currentRole = subAgent ? "sub" : "main";
+  const previousRole = getChatIdRole(chatId);
+  setChatIdRole(chatId, currentRole);
+
+  if (previousRole && previousRole !== currentRole) {
+    logger.warn("CHAT_ID COLLISION", {
+      chat_id: chatId,
+      previousRole,
+      currentRole,
+    });
+  } else if (subAgent) {
+    logger.info("Sub-agent request", { chat_id: chatId, previousRole: previousRole ?? "none" });
+  } else if (isToolContinuation) {
+    logger.info("Main-agent tool continuation", {
+      chat_id: chatId,
+      previousRole: previousRole ?? "none",
+      lastResponseMessageId: getLastResponseMessageId(chatId) ?? "(none)",
+    });
+  }
+
+  // v2 无 parent_message_id 字段；链状态（chainStates）是续传判定的唯一依据。
+  // 保留 trackedParent 仅用于判定「是否存在可续传的上一轮」。
+  const trackedParent = !!getLastResponseMessageId(chatId);
+  const callerProvidedParent = !!request.codearts?.parent_message_id;
+  const hasContinuity = trackedParent || callerProvidedParent;
+
+  const chainState = getChainState(chatId);
+  const canRepair =
+    config.chainDivergenceRepairEnabled &&
+    !isToolContinuation &&
+    !subAgent &&
+    !callerProvidedParent &&
+    !!chainState;
+
+  let divergence: Divergence | undefined;
+  let suffixStart: number | undefined;
+  let fullContextInjected = false;
+  let fullContextChars = 0;
+
+  if (forceResync && !isToolContinuation) {
+    divergence = "middle-damage";
+  } else if (canRepair) {
+    const classified = classifyDivergence(effectiveRequest.messages, chainState);
+    divergence = classified.divergence;
+    suffixStart = classified.suffixStart;
+  }
+
+  // 主动重置：当累积 prompt_tokens 接近上游硬限制时，强制全量折叠重置，
+  // 避免 ChatAgent.00001216 错误。仅在 normal 热链续传路径触发。
+  let proactiveReset = false;
+  if (
+    (divergence === undefined || divergence === "normal") &&
+    hasContinuity &&
+    !isToolContinuation &&
+    !subAgent &&
+    !callerProvidedParent &&
+    (getLastPromptTokens(chatId) ?? 0) > config.upstreamPromptTokenResetThreshold
+  ) {
+    divergence = "middle-damage";
+    proactiveReset = true;
+    logger.info("[proxy→codearts] PROACTIVE RESET (prompt_tokens threshold exceeded)", {
+      chat_id: chatId,
+      lastPromptTokens: getLastPromptTokens(chatId),
+      threshold: config.upstreamPromptTokenResetThreshold,
+    });
+  }
+
+  const messagesBody = buildV2Messages({
+    request: effectiveRequest,
+    modelId,
+    divergence,
+    suffixStart,
+    forceResync,
+    isToolContinuation,
+    subAgent: !!subAgent,
+    hasContinuity,
+    onFold: (chars) => {
+      fullContextInjected = true;
+      fullContextChars = chars;
+    },
+  });
+
+  const body: Record<string, unknown> = {
+    model: modelId,
+    max_tokens: Math.min(request.max_tokens ?? V2_DEFAULT_MAX_TOKENS, V2_MAX_TOKENS_LIMIT),
+    tool_stream: true,
+    stream: !!request.stream,
+    messages: messagesBody,
+  };
+
+  if (tools.length > 0) {
+    body.tools = tools;
+  }
+
+  if (subAgent) {
+    body.isSubAgent = true;
+    body.subAgent_type = subAgent.type;
+    body.subAgent_prompt = subAgent.prompt ?? "";
+  }
+
+  if (fullContextInjected || divergence) {
+    logger.info("[proxy→codearts] REQUEST context classification (v2)", {
+      chat_id: chatId,
+      divergence: divergence ?? "cold-start",
+      fullContextInjected,
+      foldedChars: fullContextChars,
+      suffixStart,
+      messagesCount: effectiveRequest.messages.length,
+      model_id: modelId,
+    });
+  }
+
+  return { body, json: JSON.stringify(body), divergence, suffixStart, isToolContinuation, proactiveReset };
+}
+
+/**
+ * 构造 v2 请求的 `messages` 数组（OpenAI 兼容形状）。
+ *
+ * 与 v1 的 `{ type: "text", content }` 不同，v2 使用标准 `{ role, content }`。
+ */
+function buildV2Messages(params: {
+  request: OpenAIChatCompletionRequest;
+  modelId: string;
+  divergence?: Divergence;
+  suffixStart?: number;
+  forceResync: boolean;
+  isToolContinuation: boolean;
+  subAgent: boolean;
+  hasContinuity: boolean;
+  onFold: (chars: number) => void;
+}): unknown[] {
+  const {
+    request,
+    modelId,
+    divergence,
+    suffixStart,
+    forceResync,
+    isToolContinuation,
+    subAgent,
+    hasContinuity,
+    onFold,
+  } = params;
+
+  // 工具续传：发送 [assistant(tool_calls), tool(result)] 消息对。
+  if (isToolContinuation) {
+    return buildV2ToolContinuationMessages(request);
+  }
+
+  // 中段损伤 / 重复陈旧 / forceResync：全量折叠为单条 user 消息。
+  if (divergence === "middle-damage" || divergence === "duplicate/stale" || forceResync) {
+    const folded = foldFullConversation(request.messages, resolveFullContextMaxChars(modelId));
+    const content = folded || extractUserMessage(request.messages);
+    if (folded) onFold(folded.length);
+    return [{ role: "user", content }];
+  }
+
+  // 尾部偏差：折叠缺失尾部为单条 user 消息。
+  if (divergence === "tail-divergence" && suffixStart !== undefined) {
+    const folded = foldMissingSegment(request.messages, suffixStart, resolveFullContextMaxChars(modelId));
+    if (folded) {
+      onFold(folded.length);
+      return [{ role: "user", content: folded }];
+    }
+    // 防御分支（正常不可达）：折叠为空时全量折叠重置。
+    const fullFolded = foldFullConversation(request.messages, resolveFullContextMaxChars(modelId));
+    onFold(fullFolded.length);
+    return [{ role: "user", content: fullFolded || "" }];
+  }
+
+  // 冷启动 / 无链：全量折叠注入（若启用）或仅发送最新 user turn。
+  const shouldInject =
+    config.fullContextInjectionEnabled &&
+    !hasContinuity &&
+    !subAgent &&
+    request.messages.length > 1;
+
+  if (shouldInject) {
+    const folded = foldFullConversation(request.messages, resolveFullContextMaxChars(modelId));
+    if (folded) {
+      onFold(folded.length);
+      return [{ role: "user", content: folded }];
+    }
+    return [{ role: "user", content: extractUserMessage(request.messages) }];
+  }
+
+  // 热链续传（normal）：仅发送最新 user turn。
+  const userMsg = extractUserMessage(request.messages);
+  const lastMsg = request.messages[request.messages.length - 1];
+  if (lastMsg?.role === "tool" && lastMsg.content) {
+    // 非内置工具 result 降级：合并进 user 文本（上游无法处理未知工具的 tool 消息）。
+    const toolContent = normalizeMessageContent(lastMsg.content);
+    const combined = toolContent
+      ? `${userMsg ? `${userMsg}\n\n` : ""}[工具执行结果]\n${toolContent}`
+      : userMsg || "[工具执行结果为空]";
+    return [{ role: "user", content: combined }];
+  }
+  return [{ role: "user", content: userMsg }];
+}
+
+/**
+ * 构造 v2 工具续传消息对：`[assistant(tool_calls), tool(result), ...]`。
+ *
+ * 从客户端历史中定位携带匹配 `tool_call_id` 的 assistant 消息，
+ * 并附上对应的 tool 结果消息。非内置工具结果合并进 user 文本。
+ */
+function buildV2ToolContinuationMessages(request: OpenAIChatCompletionRequest): unknown[] {
+  const messages = request.messages;
+  const toolResults = extractToolResults(request);
+  const resultIds = new Set(toolResults.map((tr) => tr.toolCallId).filter(Boolean) as string[]);
+
+  // 定位最后一条携带匹配 tool_call 的 assistant 消息。
+  let assistantIndex = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role !== "assistant" || !msg.tool_calls?.length) continue;
+    if (msg.tool_calls.some((tc) => tc.id && resultIds.has(tc.id))) {
+      assistantIndex = i;
+      break;
+    }
+  }
+
+  if (assistantIndex === -1) {
+    // 无法定位 assistant tool_call：降级为把 tool 结果合并进 user 文本。
+    const userMsg = extractUserMessage(messages);
+    const combined = toolResults
+      .map((tr) => `[工具执行结果: ${tr.name}]\n${tr.result}`)
+      .join("\n\n");
+    return [{ role: "user", content: userMsg ? `${userMsg}\n\n${combined}` : combined }];
+  }
+
+  const assistantMsg = messages[assistantIndex];
+  const out: unknown[] = [
+    {
+      role: "assistant",
+      content: assistantMsg.content ?? null,
+      tool_calls: assistantMsg.tool_calls,
+    },
+  ];
+
+  // 附上匹配的 tool 结果消息（按 tool_call_id 对齐）。
+  for (const tr of toolResults) {
+    if (!tr.toolCallId) continue;
+    out.push({
+      role: "tool",
+      tool_call_id: tr.toolCallId,
+      content: tr.result ?? "",
+    });
+  }
+
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // HTTP / SSE transport
 // ---------------------------------------------------------------------------
 
