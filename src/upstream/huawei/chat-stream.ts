@@ -3,12 +3,14 @@
  */
 
 import { randomUUID, createHash } from "crypto";
+import { setTimeout as delay } from "timers/promises";
 import type { Response } from "express";
-import { getChatUrl } from "../../config";
+import { config, getChatUrl } from "../../config";
 import { getCredentials } from "../../auth/huawei/credentials";
 import type { StoredHuaweiSession } from "../../auth/huawei/session-store";
-import { UpstreamAuthError } from "../../utils/errors";
+import { UpstreamAuthError, UpstreamConcurrencyError, UpstreamContextLengthError, isPromptLengthExceeded } from "../../utils/errors";
 import { logger } from "../../utils/logger";
+import { createOpenAIError } from "../../utils/openai-error";
 import type {
   OpenAIChatCompletionRequest,
   OpenAIChatCompletionChunk,
@@ -16,9 +18,9 @@ import type {
   OpenAIChatMessage,
 } from "../../types/openai";
 import { cleanToolCallDeltas, computeChainForMessages, normalizeForChain, normalizeToolCallsForChain } from "./chat-translate";
-import { buildRecoveryChunks, buildSyntheticRecoveryToolCalls, buildForceResyncToolCall } from "./chat-recovery";
 import { emitNoticeChunk } from "./chat-notice";
 import { parseSSE, type CodeArtsSSEEvent } from "./chat-protocol";
+import { acquireUpstreamSlot, isConcurrentSessionLimitError, reportConcurrencyLimit, reportUpstreamSuccess } from "./upstream-gate";
 import {
   buildV2RequestBody,
   buildChatHeaders,
@@ -58,18 +60,32 @@ export async function streamHuaweiChatToResponse(
   res: Response,
   signal?: AbortSignal,
 ): Promise<void> {
+  // 槽位覆盖整条上游流的生命周期，避免并行请求超过账号的并发会话上限。
+  const release = await acquireUpstreamSlot(session.providerAccountId, signal);
+  try {
+    await streamHuaweiChatToResponseInner(request, session, traceId, res, signal);
+  } finally {
+    release();
+  }
+}
+
+async function streamHuaweiChatToResponseInner(
+  request: OpenAIChatCompletionRequest,
+  session: StoredHuaweiSession,
+  traceId: string,
+  res: Response,
+  signal?: AbortSignal,
+): Promise<void> {
   const log = logger.withTrace(traceId);
   const credentials = getCredentials(session);
   const chatUrl = getChatUrl();
 
   // ── Build initial request ────────────────────────────────────────────────
-  const { body: requestBody, json: body, divergence: initialDivergence, isToolContinuation, proactiveReset, chatId } = buildV2RequestBody(request, session);
+  const { body: requestBody, json: body, divergence: initialDivergence, isToolContinuation, chatId } = buildV2RequestBody(request, session);
   const headers = buildChatHeaders(chatUrl, body, credentials, traceId);
 
-  // v2 无 parent_message_id；续传判定基于链状态（lastResponseMessageId，按派生 chatId 索引）。
-  const hasContinuity =
-    !!request.codearts?.parent_message_id ||
-    !!getLastResponseMessageId(chatId);
+  // v2 无 parent_message_id；续传判定完全依赖链状态（按派生 chatId 索引）。
+  const hasContinuity = !!getLastResponseMessageId(chatId);
 
   // ── Outgoing request log ──────────────────────────────────────────────────
   const msgArr = requestBody.messages as unknown[];
@@ -96,21 +112,59 @@ export async function streamHuaweiChatToResponse(
     });
   }
 
-  const { status, stream } = await httpsPost(chatUrl, headers, body, signal);
+  const { status: initialStatus, stream: initialStream } = await httpsPost(chatUrl, headers, body, signal);
+  let status = initialStatus;
+  let stream = initialStream;
 
-  // ── HTTP status log ───────────────────────────────────────────────────────
-  log.info("[codearts→proxy] HTTP response", { status });
-
-  if (status !== 200) {
+  // ── HTTP status handling (concurrent-session limit is retryable) ──────────
+  let concurrencyAttempt = 0;
+  while (status !== 200) {
     let errorBody = "";
     for await (const line of stream) errorBody += line;
-    log.error("[codearts→proxy] error body", { status, body: errorBody.slice(0, 500) });
+    log.error("[codearts→proxy] HTTP error body", { status, body: errorBody.slice(0, 500) });
+
     if (status === 401 || status === 403)
       throw new UpstreamAuthError(status, errorBody);
+
+    if (status === 413 || isPromptLengthExceeded(errorBody)) {
+      throw new UpstreamContextLengthError(errorBody, traceId);
+    }
+
+    if (isConcurrentSessionLimitError(errorBody)) {
+      // 每个请求只降一档：重试期间的再次撞限不重复降级。
+      if (concurrencyAttempt === 0) reportConcurrencyLimit(session.providerAccountId);
+      if (concurrencyAttempt < config.upstreamConcurrencyRetryMax) {
+        concurrencyAttempt++;
+        const delayMs =
+          config.upstreamConcurrencyRetryDelayMs * 2 ** (concurrencyAttempt - 1) +
+          Math.floor(Math.random() * 250);
+        log.warn("[codearts→proxy] concurrent session limit reached, retrying", {
+          attempt: concurrencyAttempt,
+          maxRetries: config.upstreamConcurrencyRetryMax,
+          delayMs,
+        });
+        await delay(delayMs, undefined, signal ? { signal } : undefined);
+        ({ status, stream } = await httpsPost(chatUrl, headers, body, signal));
+        continue;
+      }
+
+      throw new UpstreamConcurrencyError(
+        "Upstream concurrent session limit reached (TM.00001041, max 3). " +
+          `Retried ${config.upstreamConcurrencyRetryMax} time(s); ` +
+          "please close other CodeArts Agent sessions and retry.",
+        config.upstreamConcurrencyRetryDelayMs * 2 ** config.upstreamConcurrencyRetryMax,
+        traceId,
+      );
+    }
+
     throw new Error(
       `CodeArts chat returned HTTP ${status}: ${errorBody.substring(0, 500)}`,
     );
   }
+
+  // ── HTTP status log ─────────────────────────────────────────────────────
+  log.info("[codearts→proxy] HTTP response", { status });
+  reportUpstreamSuccess(session.providerAccountId);
 
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
@@ -124,28 +178,13 @@ export async function streamHuaweiChatToResponse(
   let sentMetadata = false;
   const responseMetadata: Record<string, string | undefined> = {};
 
-  // ── Proactive reset / folding notice chunk (before upstream stream starts) ──
-  // Gives client visibility that context was compressed/reset before the request.
-  if (proactiveReset) {
-    const result = emitNoticeChunk(res, {
-      id: completionId,
-      created,
-      model,
-      content: "\n[上下文已压缩：累积长度接近上游限制，已主动重置对话链继续。早期细节可能丢失。]\n",
-      sentRole,
-      sentMetadata,
-      responseMetadata,
-      extraMetadata: { context_reset: "proactive" },
-    });
-    sentRole = result.sentRole;
-    sentMetadata = result.sentMetadata;
-  }
-
   // ── SSE event counters ────────────────────────────────────────────────────
   let sseEventCount = 0;
   let sseTextChars = 0;
   let sseToolCallCount = 0;
   let sseHadError = false;
+  /** 已向客户端下发终态错误事件（如上下文超限）时，不再补 finish/usage chunk */
+  let terminalErrorSent = false;
   let responseContent = "";
   let responseToolCalls: OpenAIChatMessage["tool_calls"] = [];
   let promptTokens = 0;
@@ -156,7 +195,6 @@ export async function streamHuaweiChatToResponse(
 
   // ── SSE stream processing (retriable on rate-limit errors) ────────────────
   let retryCount = 0;
-  let resyncRetried = false;
   let currentStream = stream;
 
   while (true) {
@@ -196,6 +234,18 @@ export async function streamHuaweiChatToResponse(
         sseHadError = true;
         log.error("[codearts→proxy] SSE error", { code: event.error_code, msg: event.error_msg ?? "unknown" });
         sseDebugLog.push({ event: sseEventCount, error: JSON.stringify({ code: event.error_code, msg: event.error_msg }) });
+
+        // ── 上下文超限：终态错误，不改写历史也不重试 ────────────────────
+        if (isPromptLengthExceeded(event.error_code) || isPromptLengthExceeded(event.error_msg)) {
+          const errorBody = createOpenAIError(
+            `Upstream context length limit exceeded: ${event.error_code} - ${event.error_msg ?? "unknown"}`,
+            "invalid_request_error",
+            "context_length_exceeded",
+          );
+          res.write(`data: ${JSON.stringify(errorBody)}\n\n`);
+          terminalErrorSent = true;
+          break;
+        }
 
         // ── Retry on rate-limit errors ────────────────────────────────────
         if (isRetryableSSEError(event.error_code) && retryCount < MAX_SSE_RETRY) {
@@ -244,137 +294,14 @@ export async function streamHuaweiChatToResponse(
           break; // Exit the for-await loop to start consuming the new stream
         }
 
-        // ── Tail-divergence repair fallback ───────────────────────────────
-        // The parent chain may be unavailable or incompatible with the appended tail.
-        if (initialDivergence === "tail-divergence" && !resyncRetried) {
-          resyncRetried = true;
-          log.warn("[proxy→codearts] tail-divergence repair failed, retrying full reset", {
-            code: event.error_code,
-          });
-          // Emit notice chunk so client sees the resync attempt
-          const noticeResult = emitNoticeChunk(res, {
-            id: completionId,
-            created,
-            model,
-            content: "\n[链尾偏离修复失败，正在全量重置重试...]\n",
-            sentRole,
-            sentMetadata,
-            responseMetadata,
-            extraMetadata: { error_recovery: "tail-divergence-resync" },
-          });
-          sentRole = noticeResult.sentRole;
-          sentMetadata = noticeResult.sentMetadata;
-          const resyncBody = buildV2RequestBody(request, session, { forceResync: true });
-          const resyncHeaders = buildChatHeaders(chatUrl, resyncBody.json, credentials, traceId);
-          try {
-            const resyncResult = await httpsPost(chatUrl, resyncHeaders, resyncBody.json, signal);
-            if (resyncResult.status === 200) {
-              currentStream = resyncResult.stream;
-              shouldRetry = true;
-              sseHadError = false;
-              break;
-            }
-            log.error("[proxy→codearts] full-reset fallback HTTP error", { status: resyncResult.status });
-          } catch (resyncError) {
-            log.error("[proxy→codearts] full-reset fallback failed", {
-              error: resyncError instanceof Error ? resyncError.message : String(resyncError),
-            });
-          }
-        }
-
-        // ── ChatAgent.00001216 recovery: prompt length exceeds upstream limit ──
-        if (event.error_code === "ChatAgent.00001216" && !resyncRetried) {
-          resyncRetried = true;
-          log.warn("[proxy→codearts] prompt length exceeds upstream limit, retrying with full context reset", {
-            code: event.error_code,
-          });
-          const noticeResult = emitNoticeChunk(res, {
-            id: completionId,
-            created,
-            model,
-            content: "\n[上下文长度超过上游限制，正在全量重置重试...]\n",
-            sentRole,
-            sentMetadata,
-            responseMetadata,
-            extraMetadata: { error_recovery: "ChatAgent.00001216" },
-          });
-          sentRole = noticeResult.sentRole;
-          sentMetadata = noticeResult.sentMetadata;
-          const resyncBody = buildV2RequestBody(request, session, { forceResync: true });
-          const resyncHeaders = buildChatHeaders(chatUrl, resyncBody.json, credentials, traceId);
-          try {
-            const resyncResult = await httpsPost(chatUrl, resyncHeaders, resyncBody.json, signal);
-            if (resyncResult.status === 200) {
-              currentStream = resyncResult.stream;
-              shouldRetry = true;
-              sseHadError = false;
-              break;
-            }
-            log.error("[proxy→codearts] 00001216 full-reset fallback HTTP error", { status: resyncResult.status });
-          } catch (resyncError) {
-            log.error("[proxy→codearts] 00001216 full-reset fallback failed", {
-              error: resyncError instanceof Error ? resyncError.message : String(resyncError),
-            });
-          }
-        }
-
-        // ── Recovery path (non-retryable or retry exhausted) ──────────────
-        const recoveryToolCalls = buildSyntheticRecoveryToolCalls(request);
-        // 00001216 forceResync 重试仍失败时，合成 tool_call 让客户端续传。
-        // 根据客户端 tools 列表选择可执行的工具（Bash/Glob/Grep/Read/askFollowupQuestion）。
-        // 客户端执行后回传 tool_result，proxy 通过 tool_call_id 注册识别后走 forceResync 路径。
-        const clientToolNames = (request.tools ?? []).map((t) => t.function.name);
-        const forceResyncToolCall =
-          recoveryToolCalls.length === 0 && event.error_code === "ChatAgent.00001216"
-            ? buildForceResyncToolCall(clientToolNames)
-            : null;
-        if (recoveryToolCalls.length > 0 || forceResyncToolCall) {
-          const effectiveRecoveryToolCalls = forceResyncToolCall
-            ? [forceResyncToolCall]
-            : recoveryToolCalls;
-          log.warn("[proxy→client] synthetic recovery tool_calls", {
-            code: event.error_code,
-            count: effectiveRecoveryToolCalls.length,
-            names: effectiveRecoveryToolCalls.map((tc) => tc.function.name),
-            forceResync: !!forceResyncToolCall,
-          });
-          const recovery = buildRecoveryChunks({
-            completionId,
-            created,
-            model,
-            responseMetadata,
-            sentRole,
-            sentMetadata,
-            errorCode: event.error_code,
-            errorMsg: event.error_msg ?? undefined,
-            recoveryToolCalls: effectiveRecoveryToolCalls,
-          });
-          sentRole = recovery.sentRole;
-          sentMetadata = recovery.sentMetadata;
-          sseToolCallCount += effectiveRecoveryToolCalls.length;
-          for (const chunk of recovery.chunks) {
-            res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-          }
-          break;
-        }
-
-        const errChunk: OpenAIChatCompletionChunk = {
-          id: completionId,
-          object: "chat.completion.chunk",
-          created,
-          model,
-          codearts: responseMetadata,
-          choices: [
-            {
-              index: 0,
-              delta: {
-                content: `[Error: ${event.error_code} - ${event.error_msg ?? "unknown"}]`,
-              },
-              finish_reason: null,
-            },
-          ],
-        };
-        res.write(`data: ${JSON.stringify(errChunk)}\n\n`);
+        // ── 终态错误：如实上报，不合成工具调用、不伪装成正常输出 ────────
+        const terminalError = createOpenAIError(
+          `Upstream error: ${event.error_code} - ${event.error_msg ?? "unknown"}`,
+          "upstream_error",
+          event.error_code,
+        );
+        res.write(`data: ${JSON.stringify(terminalError)}\n\n`);
+        terminalErrorSent = true;
         break;
       }
 
@@ -459,7 +386,7 @@ export async function streamHuaweiChatToResponse(
     break;
   }
 
-  // ── Update parent_message_id tracker ──────────────────────────────────────
+  // ── Update response_message_id tracker ────────────────────────────────────
   if (!sseHadError && responseMetadata.response_message_id) {
     // v2 上游事件不含 chat_id；使用构建侧派生的 chatId 维护链状态。
     const cid = chatId;
@@ -514,18 +441,20 @@ export async function streamHuaweiChatToResponse(
   // otherwise the client treats the conversation as finished and won't execute tools.
   const finishReason = sseToolCallCount > 0 ? "tool_calls" : "stop";
 
-  res.write(
-    `data: ${JSON.stringify({
-      id: completionId,
-      object: "chat.completion.chunk",
-      created,
-      model,
-      choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
-    } as OpenAIChatCompletionChunk)}\n\n`,
-  );
+  if (!terminalErrorSent) {
+    res.write(
+      `data: ${JSON.stringify({
+        id: completionId,
+        object: "chat.completion.chunk",
+        created,
+        model,
+        choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
+      } as OpenAIChatCompletionChunk)}\n\n`,
+    );
+  }
 
   // 流式 usage chunk：仅在 stream_options.include_usage=true 时补发（OpenAI 协议 opt-in）
-  if (request.stream_options?.include_usage) {
+  if (request.stream_options?.include_usage && !terminalErrorSent) {
     // 优先使用上游真实 usage（v2 通道返回）；否则回退到 divergence 估算。
     const cacheUsage = upstreamPromptTokensDetails
       ? {

@@ -336,7 +336,6 @@ async function main() {
         osVersion: "win32",
         currentDate: new Date()
           .toISOString()
-          .replace("T", "T")
           .replace("Z", ""),
         currentWorkingDirectory: "d:\\proxy-test",
       },

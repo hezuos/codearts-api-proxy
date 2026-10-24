@@ -1,5 +1,6 @@
 import assert from "assert";
 import type { Request, Response } from "express";
+import { config } from "../config";
 import { bootstrapDefaultAuth } from "../auth/store";
 import {
   startBrowserHuaweiLogin,
@@ -169,9 +170,10 @@ async function testCallbackReturnsImmediatelyAndFinalizeSetsCookie(): Promise<vo
   }));
 
   const callbackRes = createResponse();
+  const allowedRedirect = `${config.huaweiRedirectHost.replace(/\/$/, "")}/continue`;
   await handleHuaweiCallback(
     createRequest({
-      query: { identifier: "identifier-1", redirect: "https://devcloud.example/continue" },
+      query: { identifier: "identifier-1", redirect: allowedRedirect },
       cookies: { huawei_login_ticket: startBody.ticket_id },
     }),
     callbackRes,
@@ -179,7 +181,7 @@ async function testCallbackReturnsImmediatelyAndFinalizeSetsCookie(): Promise<vo
 
   assert.equal(
     callbackRes.redirectUrl,
-    "https://devcloud.example/continue",
+    allowedRedirect,
   );
 
   await __testHooks.waitForBrowserExchangeTask(startBody.ticket_id);
@@ -203,6 +205,38 @@ async function testCallbackReturnsImmediatelyAndFinalizeSetsCookie(): Promise<vo
   __testHooks.resetExchangeHuaweiTicketForTest();
 }
 
+async function testUnsafeCallbackRedirectRejected(): Promise<void> {
+  __testHooks.resetLoginFlows();
+  __testHooks.setExchangeHuaweiTicketForTest(async () => {
+    throw new Error("not matched");
+  });
+
+  const startRes = createResponse();
+  await startBrowserHuaweiLogin(createRequest(), startRes);
+  const startBody = startRes.body as { ticket_id: string };
+
+  const callbackRes = createResponse();
+  await handleHuaweiCallback(
+    createRequest({
+      query: {
+        identifier: "identifier-1",
+        redirect: "https://evil.example.com/phish",
+      },
+      cookies: { huawei_login_ticket: startBody.ticket_id },
+    }),
+    callbackRes,
+  );
+
+  // 非白名单主机的 redirect 被拒绝，回退到本地完成页
+  assert.equal(
+    callbackRes.redirectUrl,
+    `/auth/huawei/browser/complete?ticket_id=${encodeURIComponent(startBody.ticket_id)}`,
+  );
+
+  await __testHooks.waitForBrowserExchangeTask(startBody.ticket_id);
+  __testHooks.resetExchangeHuaweiTicketForTest();
+}
+
 async function run(): Promise<void> {
   bootstrapDefaultAuth();
   await testCreateAndPollBrowserTicket();
@@ -210,6 +244,7 @@ async function run(): Promise<void> {
   await testExpiredTicketStatus();
   await testUnknownCallbackRejectedSafely();
   await testCallbackReturnsImmediatelyAndFinalizeSetsCookie();
+  await testUnsafeCallbackRedirectRejected();
   console.log("All Huawei browser login tests passed.");
 }
 

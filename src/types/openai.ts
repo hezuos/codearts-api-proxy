@@ -142,5 +142,4 @@ export type {
   OpenAICodeArtsRequestOptions,
   OpenAICodeArtsSubAgentOptions,
   OpenAICodeArtsResponseMetadata,
-  CodeArtsToolResult,
 } from "./openai-codearts";

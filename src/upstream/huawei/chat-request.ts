@@ -5,27 +5,18 @@
 import { randomUUID, createHash } from "crypto";
 import https from "https";
 import { config, upstreamTimeoutMs } from "../../config";
-import { getProviderAccount } from "../../auth/store";
 import { signRequest, type SigningCredentials } from "../../auth/huawei/credentials";
 import type { StoredHuaweiSession } from "../../auth/huawei/session-store";
 import { UpstreamTimeoutError } from "../../utils/errors";
 import { logger } from "../../utils/logger";
-import type { OpenAIChatCompletionRequest, OpenAIChatMessage, CodeArtsToolResult } from "../../types/openai";
+import type { OpenAIChatCompletionRequest, OpenAIChatMessage } from "../../types/openai";
 import {
-  extractUserMessage,
-  extractToolResults,
+  isToolContinuationRequest,
   resolveTools,
   normalizeMessageContent,
-  foldFullConversation,
-  foldMissingSegment,
-  resolveFullContextMaxChars,
   computeChainForMessages,
   normalizeForChain,
 } from "./chat-translate";
-import {
-  detectForceResyncToolResult,
-  stripForceResyncToolExchange,
-} from "./chat-recovery";
 
 // ---------------------------------------------------------------------------
 // Model mapping
@@ -47,7 +38,7 @@ function resolveModelId(request: OpenAIChatCompletionRequest): string {
 }
 
 // ---------------------------------------------------------------------------
-// In-memory parent_message_id tracker (with TTL eviction)
+// In-memory response_message_id tracker (with TTL eviction)
 // ---------------------------------------------------------------------------
 
 const TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
@@ -111,7 +102,7 @@ export function setLastPromptTokens(chatId: string, tokens: number): void {
 /**
  * 估算 DeepSeek 风格缓存计费字段。
  *
- * 组合 divergence + parent_message_id + isToolContinuation 三信号判断缓存命中：
+ * 组合 divergence + response_message_id + isToolContinuation 三信号判断缓存命中：
  * - normal / tail-divergence / duplicate/stale + 有 parent → 前缀缓存命中
  * - middle-damage / undefined → 全量重置，无缓存
  * - 无 parent + isToolContinuation → 服务端复用上轮完整上下文（messagesBody=[]）
@@ -262,264 +253,6 @@ function deriveConversationId(
 }
 
 // ---------------------------------------------------------------------------
-// Request body construction
-// ---------------------------------------------------------------------------
-
-function buildTaskParameters(
-  request: OpenAIChatCompletionRequest,
-  tools: ReturnType<typeof resolveTools>,
-): Record<string, unknown> {
-  const subAgent = request.codearts?.sub_agent;
-  const toolResults = extractToolResults(request);
-  const isToolContinuation = toolResults.length > 0;
-
-  // tool continuation: 只传 tool_result（和 spec 一致），其余字段由 CodeArts 从上下文获取
-  if (isToolContinuation) {
-    return { tool_result: toolResults };
-  }
-
-  const params: Record<string, unknown> = {
-    codebase_search: request.codearts?.codebase_search ?? false,
-    preferred_language: request.codearts?.preferred_language?.trim() || "zh-cn",
-    enable_code_interpreter: request.codearts?.enable_code_interpreter ?? false,
-    projectLevelPrompt: request.codearts?.project_level_prompt ?? "",
-    isSubAgent: !!subAgent,
-    tools,
-    environmentDetails: {
-      osVersion: request.codearts?.os_version?.trim() || "win32",
-      currentDate: new Date().toISOString().replace("Z", ""),
-      currentWorkingDirectory:
-        request.codearts?.current_working_directory?.trim() ||
-        request.codearts?.workspace_root?.trim() ||
-        "",
-    },
-    routerVersion: "v2",
-    isNewClient: true,
-    features: { support_end_tag: true },
-    ide: "CodeArts Agent",
-    contexts: request.codearts?.contexts ?? [],
-    expert_rules: request.codearts?.expert_rules ?? [],
-  };
-
-  if (toolResults.length > 0) {
-    params.tool_result = toolResults;
-  }
-
-  if (subAgent) {
-    params.subAgent_type = subAgent.type;
-    params.subAgent_prompt = subAgent.prompt ?? "";
-  }
-
-  return params;
-}
-
-export function buildRequestBody(
-  request: OpenAIChatCompletionRequest,
-  session: StoredHuaweiSession,
-  options: { forceResync?: boolean } = {},
-): { body: Record<string, unknown>; json: string; divergence?: Divergence; suffixStart?: number; isToolContinuation: boolean; proactiveReset: boolean } {
-  // 检测客户端回传的 forceResync tool_result（由 proxy 合成的 Bash echo tool_call 触发）。
-  // 检测到时：剥离该 tool exchange，自动走 forceResync 路径。
-  const forceResyncFromToolResult = detectForceResyncToolResult(request);
-  const effectiveRequest: OpenAIChatCompletionRequest = forceResyncFromToolResult
-    ? { ...request, messages: stripForceResyncToolExchange(request) }
-    : request;
-  if (forceResyncFromToolResult) {
-    logger.info("[client→proxy] detected forceResync tool_result — switching to forceResync path", {
-      messages_before: request.messages.length,
-      messages_after: effectiveRequest.messages.length,
-    });
-  }
-  const forceResync = options.forceResync || forceResyncFromToolResult;
-
-  const toolResults = extractToolResults(effectiveRequest);
-  const isToolContinuation = toolResults.length > 0;
-  const subAgent = request.codearts?.sub_agent;
-
-  const tools = resolveTools(request);
-  const modelId = resolveModelId(request);
-
-  const chatId =
-    request.codearts?.chat_id?.trim() || deriveConversationId(effectiveRequest.messages, session.providerAccountId);
-
-  // Sub-agent / main-agent chat_id collision detection
-  const currentRole = subAgent ? "sub" : "main";
-  const previousRole = getChatIdRole(chatId);
-  setChatIdRole(chatId, currentRole);
-
-  if (previousRole && previousRole !== currentRole) {
-    logger.warn("CHAT_ID COLLISION", {
-      chat_id: chatId,
-      previousRole,
-      currentRole,
-    });
-  } else if (subAgent) {
-    logger.info("Sub-agent request", { chat_id: chatId, previousRole: previousRole ?? "none" });
-  } else if (isToolContinuation) {
-    logger.info("Main-agent tool continuation", {
-      chat_id: chatId,
-      previousRole: previousRole ?? "none",
-      lastResponseMessageId: getLastResponseMessageId(chatId) ?? "(none)",
-    });
-  }
-
-  let parentMessageId =
-    request.codearts?.parent_message_id ??
-    getLastResponseMessageId(chatId) ??
-    "";
-
-  const providerAccount = getProviderAccount(session.providerAccountId);
-  const userId =
-    providerAccount?.providerUserName?.trim() ||
-    providerAccount?.providerUserId?.trim() ||
-    session.providerAccountId;
-
-  // 对于非内置工具，把 tool result 内容合并到用户消息中
-  // CodeArts 无法处理非内置工具的 tool_result，直接以文本形式发送
-  let messagesBody: unknown[];
-  let divergence: Divergence | undefined;
-  let suffixStart: number | undefined;
-  let fullContextInjected = false;
-  let fullContextChars = 0;
-  const chainState = getChainState(chatId);
-  const callerProvidedParent = !!request.codearts?.parent_message_id;
-  const canRepair =
-    config.chainDivergenceRepairEnabled &&
-    !isToolContinuation &&
-    !subAgent &&
-    !callerProvidedParent &&
-    !!chainState;
-
-  if (forceResync && !isToolContinuation) {
-    divergence = "middle-damage";
-    parentMessageId = "";
-  } else if (canRepair) {
-    const classified = classifyDivergence(effectiveRequest.messages, chainState);
-    divergence = classified.divergence;
-    suffixStart = classified.suffixStart;
-    if (divergence === "middle-damage" || divergence === "duplicate/stale") {
-      // 中段损伤或重复/陈旧请求均无法继续信任旧链：清空 parent，
-      // 走全量折叠重置让对话能继续（duplicate/stale 不再抛错，
-      // 避免客户端重试时永久卡死）。
-      parentMessageId = "";
-    }
-  }
-
-  // 主动重置：当累积 prompt_tokens 接近上游硬限制时，强制全量折叠重置，
-  // 避免 ChatAgent.00001216 错误。仅在 normal 热链续传路径触发。
-  let proactiveReset = false;
-  if (
-    (divergence === undefined || divergence === "normal") &&
-    parentMessageId &&
-    !isToolContinuation &&
-    !subAgent &&
-    !callerProvidedParent &&
-    (getLastPromptTokens(chatId) ?? 0) > config.upstreamPromptTokenResetThreshold
-  ) {
-    divergence = "middle-damage";
-    parentMessageId = "";
-    proactiveReset = true;
-    logger.info("[proxy→codearts] PROACTIVE RESET (prompt_tokens threshold exceeded)", {
-      chat_id: chatId,
-      lastPromptTokens: getLastPromptTokens(chatId),
-      threshold: config.upstreamPromptTokenResetThreshold,
-    });
-  }
-  if (isToolContinuation) {
-    messagesBody = [];
-  } else if (divergence === "middle-damage" || divergence === "duplicate/stale" || forceResync) {
-    const folded = foldFullConversation(
-      effectiveRequest.messages,
-      resolveFullContextMaxChars(modelId),
-    );
-    messagesBody = [{ type: "text", content: folded || extractUserMessage(effectiveRequest.messages) }];
-    fullContextInjected = !!folded;
-    fullContextChars = folded.length;
-  } else if (divergence === "tail-divergence" && suffixStart !== undefined) {
-    const folded = foldMissingSegment(
-      effectiveRequest.messages,
-      suffixStart,
-      resolveFullContextMaxChars(modelId),
-    );
-    if (folded) {
-      messagesBody = [{ type: "text", content: folded }];
-      fullContextChars = folded.length;
-    } else {
-      // 防御分支（正常不可达）：suffixStart < messages.length 且无 user 段已能折叠。
-      // 若折叠仍为空，绝不发送已确认的 user/system → 清空 parent 并全量折叠重置。
-      parentMessageId = "";
-      const fullFolded = foldFullConversation(
-        effectiveRequest.messages,
-        resolveFullContextMaxChars(modelId),
-      );
-      messagesBody = [{ type: "text", content: fullFolded || "" }];
-      fullContextInjected = true;
-      fullContextChars = fullFolded.length;
-    }
-  } else {
-    const trackedParent = !!getLastResponseMessageId(chatId);
-    const shouldInject =
-      config.fullContextInjectionEnabled &&
-      !callerProvidedParent &&
-      !trackedParent &&
-      !subAgent &&
-      effectiveRequest.messages.length > 1;
-
-    if (shouldInject) {
-      const folded = foldFullConversation(effectiveRequest.messages, resolveFullContextMaxChars(modelId));
-      if (folded) {
-        messagesBody = [{ type: "text", content: folded }];
-        fullContextInjected = true;
-        fullContextChars = folded.length;
-      } else {
-        messagesBody = [{ type: "text", content: extractUserMessage(effectiveRequest.messages) }];
-      }
-    } else {
-      const userMsg = extractUserMessage(effectiveRequest.messages);
-      const lastMsg = effectiveRequest.messages[effectiveRequest.messages.length - 1];
-      if (lastMsg?.role === "tool" && lastMsg.content) {
-        const toolContent = normalizeMessageContent(lastMsg.content);
-        const combined = toolContent
-          ? `${userMsg ? `${userMsg}\n\n` : ""}[工具执行结果]\n${toolContent}`
-          : userMsg || "[工具执行结果为空]";
-        messagesBody = [{ type: "text", content: combined }];
-      } else {
-        messagesBody = [{ type: "text", content: userMsg }];
-      }
-    }
-  }
-
-  const body: Record<string, unknown> = {
-    chat_id: chatId,
-    messages: messagesBody,
-    client: "IDE",
-    task: "plan-execute",
-    task_parameters: buildTaskParameters(effectiveRequest, tools),
-    batch_task_parameters: [],
-    attempt: 1,
-    user_id: userId,
-    agent_id: "CodeAgent",
-    parent_message_id: parentMessageId,
-    is_delta_response: true,
-    model_id: modelId,
-  };
-
-  if (fullContextInjected || divergence) {
-    logger.info("[proxy→codearts] REQUEST context classification", {
-      chat_id: chatId,
-      divergence: divergence ?? "cold-start",
-      fullContextInjected,
-      foldedChars: fullContextChars,
-      suffixStart,
-      messagesCount: effectiveRequest.messages.length,
-      model_id: modelId,
-    });
-  }
-
-  return { body, json: JSON.stringify(body), divergence, suffixStart, isToolContinuation, proactiveReset };
-}
-
-// ---------------------------------------------------------------------------
 // v2 (OpenAI-compatible) request body construction
 // ---------------------------------------------------------------------------
 
@@ -538,43 +271,23 @@ export const V2_DEFAULT_MAX_TOKENS = V2_MAX_TOKENS_LIMIT;
 /**
  * 构造 v2 通道（`/api/v2/chat/completions`，OpenAI 兼容）请求体。
  *
- * 与 `buildRequestBody` 共享链状态/分叉分类/主动重置逻辑，但输出 OpenAI 兼容形状：
+ * 输出 OpenAI 兼容形状：
  * `{ model, max_tokens, tool_stream, stream, messages, tools?, isSubAgent?, subAgent_type?, subAgent_prompt? }`。
  *
- * `messages` 构造规则：
- * - 冷启动 / 折叠场景：单条 `{ role: "user", content }`
- * - 热链续传（normal）：仅发送最新 user turn
- * - 工具续传：`[assistant(tool_calls), tool(result)]` 消息对
- * - 非内置工具 result：合并进 user 文本
+ * `messages` 始终按原顺序、原角色逐字透传客户端历史。
  */
 export function buildV2RequestBody(
   request: OpenAIChatCompletionRequest,
   session: StoredHuaweiSession,
-  options: { forceResync?: boolean } = {},
-): { body: Record<string, unknown>; json: string; divergence?: Divergence; suffixStart?: number; isToolContinuation: boolean; proactiveReset: boolean; chatId: string } {
-  // 检测客户端回传的 forceResync tool_result（由 proxy 合成的 Bash echo tool_call 触发）。
-  // 检测到时：剥离该 tool exchange，自动走 forceResync 路径。
-  const forceResyncFromToolResult = detectForceResyncToolResult(request);
-  const effectiveRequest: OpenAIChatCompletionRequest = forceResyncFromToolResult
-    ? { ...request, messages: stripForceResyncToolExchange(request) }
-    : request;
-  if (forceResyncFromToolResult) {
-    logger.info("[client→proxy] detected forceResync tool_result — switching to forceResync path", {
-      messages_before: request.messages.length,
-      messages_after: effectiveRequest.messages.length,
-    });
-  }
-  const forceResync = options.forceResync || forceResyncFromToolResult;
-
-  const toolResults = extractToolResults(effectiveRequest);
-  const isToolContinuation = toolResults.length > 0;
+): { body: Record<string, unknown>; json: string; divergence?: Divergence; suffixStart?: number; isToolContinuation: boolean; chatId: string } {
+  const isToolContinuation = isToolContinuationRequest(request.messages);
   const subAgent = request.codearts?.sub_agent;
 
   const tools = resolveTools(request);
   const modelId = resolveModelId(request);
 
   const chatId =
-    request.codearts?.chat_id?.trim() || deriveConversationId(effectiveRequest.messages, session.providerAccountId);
+    request.codearts?.chat_id?.trim() || deriveConversationId(request.messages, session.providerAccountId);
 
   // Sub-agent / main-agent chat_id collision detection
   const currentRole = subAgent ? "sub" : "main";
@@ -597,70 +310,21 @@ export function buildV2RequestBody(
     });
   }
 
-  // v2 无 parent_message_id 字段；链状态（chainStates）是续传判定的唯一依据。
-  // 保留 trackedParent 仅用于判定「是否存在可续传的上一轮」。
-  const trackedParent = !!getLastResponseMessageId(chatId);
-  const callerProvidedParent = !!request.codearts?.parent_message_id;
-  const hasContinuity = trackedParent || callerProvidedParent;
 
   const chainState = getChainState(chatId);
-  const canRepair =
-    config.chainDivergenceRepairEnabled &&
-    !isToolContinuation &&
-    !subAgent &&
-    !callerProvidedParent &&
-    !!chainState;
 
+  // 分叉分类仅用于日志与缓存估算，不改变请求内容、不触发修复。
+  // 工具续传与子代理请求旁路分类（与既有要求一致）。
   let divergence: Divergence | undefined;
   let suffixStart: number | undefined;
-  let fullContextInjected = false;
-  let fullContextChars = 0;
-
-  if (forceResync && !isToolContinuation) {
-    divergence = "middle-damage";
-  } else if (canRepair) {
-    const classified = classifyDivergence(effectiveRequest.messages, chainState);
+  if (chainState && !isToolContinuation && !subAgent) {
+    const classified = classifyDivergence(request.messages, chainState);
     divergence = classified.divergence;
     suffixStart = classified.suffixStart;
   }
 
-  // 主动重置：当累积 prompt_tokens 接近上游硬限制时，强制全量折叠重置，
-  // 避免 ChatAgent.00001216 错误。仅在 normal 热链续传路径触发。
-  let proactiveReset = false;
-  if (
-    (divergence === undefined || divergence === "normal") &&
-    hasContinuity &&
-    !isToolContinuation &&
-    !subAgent &&
-    !callerProvidedParent &&
-    (getLastPromptTokens(chatId) ?? 0) > config.upstreamPromptTokenResetThreshold
-  ) {
-    divergence = "middle-damage";
-    proactiveReset = true;
-    logger.info("[proxy→codearts] PROACTIVE RESET (prompt_tokens threshold exceeded)", {
-      chat_id: chatId,
-      lastPromptTokens: getLastPromptTokens(chatId),
-      threshold: config.upstreamPromptTokenResetThreshold,
-    });
-  }
-
-  // 显式 codearts.tool_results（v1 遗留扩展）：客户端历史不含工具交换，合成标准消息对附加。
-  const explicitToolResults = request.codearts?.tool_results ?? [];
-  const effectiveMessages =
-    explicitToolResults.length > 0
-      ? appendExplicitToolExchange(effectiveRequest.messages, explicitToolResults)
-      : effectiveRequest.messages;
-
-  const messagesBody = buildV2Messages({
-    request: { ...effectiveRequest, messages: effectiveMessages },
-    modelId,
-    forceResync,
-    proactiveReset,
-    onFold: (chars) => {
-      fullContextInjected = true;
-      fullContextChars = chars;
-    },
-  });
+  // v2 无状态：客户端历史按原顺序、原角色逐字透传，不合并、不改写、不截断。
+  const messagesBody = request.messages.map(toV2Message);
 
   const body: Record<string, unknown> = {
     model: modelId,
@@ -669,8 +333,20 @@ export function buildV2RequestBody(
     // v2 上游始终以 SSE 流式返回（stream:false 会返回普通 JSON，parseSSE 解析为空）。
     // 非流式客户端由 chat.ts 聚合 SSE 事件。
     stream: true,
+    // 与 IDE 客户端保持一致：流式请求显式索取 usage。
+    stream_options: request.stream_options ?? { include_usage: true },
     messages: messagesBody,
   };
+
+  // 标准 OpenAI 采样参数：仅在客户端显式提供时透传。
+  if (request.temperature != null) body.temperature = request.temperature;
+  if (request.top_p != null) body.top_p = request.top_p;
+  if (request.stop != null) body.stop = request.stop;
+  if (request.presence_penalty != null) body.presence_penalty = request.presence_penalty;
+  if (request.frequency_penalty != null) body.frequency_penalty = request.frequency_penalty;
+  if (request.seed != null) body.seed = request.seed;
+  if (request.response_format != null) body.response_format = request.response_format;
+  if (request.tool_choice != null) body.tool_choice = request.tool_choice;
 
   if (tools.length > 0) {
     body.tools = tools;
@@ -682,58 +358,24 @@ export function buildV2RequestBody(
     body.subAgent_prompt = subAgent.prompt ?? "";
   }
 
-  if (fullContextInjected || divergence) {
+  if (divergence) {
     logger.info("[proxy→codearts] REQUEST context classification (v2)", {
       chat_id: chatId,
-      divergence: divergence ?? "cold-start",
-      fullContextInjected,
-      foldedChars: fullContextChars,
+      divergence,
       suffixStart,
-      messagesCount: effectiveRequest.messages.length,
+      messagesCount: request.messages.length,
       model_id: modelId,
     });
   }
 
-  return { body, json: JSON.stringify(body), divergence, suffixStart, isToolContinuation, proactiveReset, chatId };
-}
-
-/**
- * 构造 v2 请求的 `messages` 数组（OpenAI 兼容形状）。
- *
- * v2 上游无服务端会话状态（实测确认：增量请求丢失上下文），
- * 每个请求必须携带完整对话历史：
- * - 默认：全量透传客户端 messages（原生 role/content/tool_calls 结构，token 效率最高）
- * - 逃生通道（forceResync / 主动重置 / 总字符超预算）：折叠为压缩单条文本
- */
-function buildV2Messages(params: {
-  request: OpenAIChatCompletionRequest;
-  modelId: string;
-  forceResync: boolean;
-  proactiveReset: boolean;
-  onFold: (chars: number) => void;
-}): unknown[] {
-  const { request, modelId, forceResync, proactiveReset, onFold } = params;
-  const budget = resolveFullContextMaxChars(modelId);
-  const totalChars = request.messages.reduce(
-    (sum, m) => sum + normalizeMessageContent(m.content).length,
-    0,
-  );
-
-  // 逃生通道：forceResync（00001216 恢复重试）/ 主动重置 / 历史超预算 → 折叠为压缩单条文本。
-  if (forceResync || proactiveReset || totalChars > budget) {
-    const folded = foldFullConversation(request.messages, budget);
-    if (folded) onFold(folded.length);
-    return [{ role: "user", content: folded || extractUserMessage(request.messages) }];
-  }
-
-  // v2 上游无状态：全量透传客户端历史（原生 OpenAI messages 结构）。
-  // 工具续传场景天然包含 [assistant(tool_calls), tool(result)] 段。
-  return request.messages.map(toV2Message);
+  return { body, json: JSON.stringify(body), divergence, suffixStart, isToolContinuation, chatId };
 }
 
 /**
  * 将客户端消息投影为 v2 上游接受的 OpenAI 消息形状。
- * 剥离代理内部扩展字段（refusal / reasoning_content），developer 角色映射为 system。
+ *
+ * v2 上游无服务端会话状态，每个请求都携带完整历史；投影只做字段映射
+ * （developer → system、剔除代理内部字段），不改变内容。
  */
 function toV2Message(m: OpenAIChatMessage): Record<string, unknown> {
   const out: Record<string, unknown> = {
@@ -744,40 +386,6 @@ function toV2Message(m: OpenAIChatMessage): Record<string, unknown> {
   if (m.tool_call_id) out.tool_call_id = m.tool_call_id;
   if (m.tool_calls && m.tool_calls.length > 0) out.tool_calls = m.tool_calls;
   return out;
-}
-
-/**
- * 将 v1 遗留的显式 codearts.tool_results 合成为标准 OpenAI 工具交换消息，
- * 附加到历史末尾（assistant(tool_calls) + tool(result) 消息对）。
- * 标准流程（客户端在 messages 中携带工具交换）不经过此路径。
- */
-function appendExplicitToolExchange(
-  messages: OpenAIChatMessage[],
-  toolResults: CodeArtsToolResult[],
-): OpenAIChatMessage[] {
-  const toolCalls = toolResults.map((tr, i) => ({
-    id: tr.toolCallId ?? `call_explicit_${i}`,
-    type: "function" as const,
-    function: { name: tr.name, arguments: JSON.stringify(tr.arguments ?? {}) },
-  }));
-  const assistantMsg: OpenAIChatMessage = {
-    role: "assistant",
-    content: null,
-    refusal: null,
-    tool_calls: toolCalls,
-  };
-  const toolMsgs: OpenAIChatMessage[] = toolResults.map((tr, i) => ({
-    role: "tool" as const,
-    content: tr.result ?? "",
-    refusal: null,
-    tool_call_id: toolCalls[i].id,
-    name: tr.name,
-  }));
-  logger.info("[client→proxy] explicit codearts.tool_results synthesized as tool messages", {
-    count: toolResults.length,
-    names: toolResults.map((tr) => tr.name),
-  });
-  return [...messages, assistantMsg, ...toolMsgs];
 }
 
 // ---------------------------------------------------------------------------
@@ -865,26 +473,39 @@ export function httpsPost(
               }
             }
 
-            res.on("data", (chunk: string) => {
+            const onData = (chunk: string) => {
               buf += chunk;
               const parts = buf.split("\n");
               buf = parts.pop() ?? "";
               for (const line of parts) lines.push(line);
               flush();
-            });
-            res.on("end", () => {
+            };
+            const onEnd = () => {
               if (buf) {
                 lines.push(buf);
                 buf = "";
               }
               done = true;
               flush();
-            });
-            res.on("error", (err: Error) => {
+            };
+            const onError = (err: Error) => {
               streamError = err;
               done = true;
               flush();
-            });
+            };
+            /**
+             * 中断/连接关闭时可能只发 'close'（不发 'end'/'error'）。
+             * 没有这个分支时迭代器会永久挂起，导致闸门槽位永远不释放。
+             */
+            const onClose = () => {
+              if (done) return;
+              done = true;
+              flush();
+            };
+            res.on("data", onData);
+            res.on("end", onEnd);
+            res.on("error", onError);
+            res.on("close", onClose);
 
             return {
               next() {
@@ -900,6 +521,21 @@ export function httpsPost(
                 return new Promise<IteratorResult<string>>((resolve) => {
                   pending.push({ resolve });
                 });
+              },
+              /**
+               * 调用方提前退出（重试/链路修复/中断）时立即释放上游连接。
+               * 否则被放弃的响应会继续占用上游并发会话槽位。
+               */
+              return(): Promise<IteratorResult<string>> {
+                if (!done) {
+                  done = true;
+                  res.off("data", onData);
+                  res.off("end", onEnd);
+                  res.off("close", onClose);
+                  flush();
+                  res.destroy();
+                }
+                return Promise.resolve({ value: "", done: true as const });
               },
             };
           },

@@ -1,14 +1,13 @@
 /**
- * 流式错误恢复测试（chat-stream.ts 00001216 + tail-divergence notice chunk）。
+ * 流式错误处理测试：限流重试仍保留；分叉不再修复；错误如实下发为 SSE error 事件。
  *
  * 通过劫持 require.cache 替换 httpsPost，mock res 捕获 res.write。
  */
 import assert from "assert";
+import { createHash } from "crypto";
 import type { Response } from "express";
-
-// ---------------------------------------------------------------------------
-// Mock helpers
-// ---------------------------------------------------------------------------
+import type { OpenAIChatMessage, OpenAIChatCompletionRequest } from "../../types/openai";
+import type { StoredHuaweiSession } from "../../auth/huawei/session-store";
 
 interface HttpsPostResult { status: number; stream: AsyncIterable<string> }
 type HttpsPostFn = (
@@ -50,7 +49,7 @@ function errorEvents(code: string, msg: string): string[] {
   ];
 }
 
-function mockRes(): { res: Response; writes: string[]; ended: boolean } {
+function mockRes(): { res: Response; writes: string[] } {
   const writes: string[] = [];
   const res = {
     write: (data: string) => { writes.push(data); return true; },
@@ -60,7 +59,7 @@ function mockRes(): { res: Response; writes: string[]; ended: boolean } {
     on: () => {},
     once: () => {},
   } as unknown as Response;
-  return { res, writes, ended: false };
+  return { res, writes };
 }
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -89,11 +88,6 @@ const { streamHuaweiChatToResponse } = require("./chat-stream") as typeof import
 const { encryptString } = require("../../auth/crypto/encryption") as typeof import("../../auth/crypto/encryption");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const translate = require("./chat-translate") as typeof import("./chat-translate");
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const { buildForceResyncToolCall } = require("./chat-recovery") as typeof import("./chat-recovery");
-import { createHash } from "crypto";
-import type { OpenAIChatMessage, OpenAIChatCompletionRequest } from "../../types/openai";
-import type { StoredHuaweiSession } from "../../auth/huawei/session-store";
 
 const session = {
   keyId: "test-key",
@@ -113,11 +107,11 @@ function seedChain(chatId: string, prefix: OpenAIChatMessage[], lastReply: OpenA
   chatRequestModule.setChainState(chatId, { prefixChain: chain.hash, prefixLen: chain.length, lastReplyHash: hash(lastReply) });
   chatRequestModule.setLastResponseMessageId(chatId, "parent-1");
 }
-function request(chatId: string, messages: OpenAIChatMessage[], tools?: OpenAIChatCompletionRequest["tools"]): OpenAIChatCompletionRequest {
-  return { model: "GLM-5.1", messages, stream: true, codearts: { chat_id: chatId }, tools };
+function request(chatId: string, messages: OpenAIChatMessage[]): OpenAIChatCompletionRequest {
+  return { model: "GLM-5.1", messages, stream: true, codearts: { chat_id: chatId } };
 }
 
-/** 从 res.writes 中提取所有 SSE chunk 的 content 文本 */
+/** 从 res.writes 中提取所有 SSE chunk 的 content 文本（含 notice chunk） */
 function extractContents(writes: string[]): string {
   let text = "";
   for (const w of writes) {
@@ -132,291 +126,108 @@ function extractContents(writes: string[]): string {
   return text;
 }
 
-/** 从 res.writes 中提取所有 chunk 的 codearts metadata */
-function extractMetadata(writes: string[]): Record<string, string | undefined>[] {
-  const metas: Record<string, string | undefined>[] = [];
+/** 提取 SSE error 事件体的集合 */
+function extractErrors(writes: string[]): Array<{ code?: string | null; message?: string }> {
+  const errors: Array<{ code?: string | null; message?: string }> = [];
   for (const w of writes) {
     if (!w.startsWith("data: ")) continue;
     const line = w.replace("data: ", "").trim();
     if (line === "[DONE]") continue;
     try {
       const chunk = JSON.parse(line);
-      if (chunk.codearts) metas.push(chunk.codearts);
+      if (chunk.error) errors.push(chunk.error);
     } catch { /* ignore */ }
   }
-  return metas;
+  return errors;
 }
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
-async function testStreaming00001216EmitsNoticeChunkAndRetries(): Promise<void> {
-  const chatId = "str-111111111111111111111111111111";
-  const prefix = [user("old"), assistant("old answer")];
-  const lastReply = assistant("new answer");
-  seedChain(chatId, prefix, lastReply);
-
+async function testRateLimitRetriesOnce(): Promise<void> {
+  const chatId = "str-rate-limit";
   let attempt = 0;
   installMock(async () => {
     attempt++;
-    if (attempt === 1) return { status: 200, stream: sseStream(errorEvents("ChatAgent.00001216", "Prompt length exceeds")) };
+    if (attempt === 1) return { status: 200, stream: sseStream(errorEvents("InferHub.ModelArts.81101.429", "rate limited")) };
     return { status: 200, stream: sseStream(successEvents()) };
   });
 
   const { res, writes } = mockRes();
-  await streamHuaweiChatToResponse(request(chatId, [...prefix, lastReply, user("next")]), session, "trace-1", res);
+  await streamHuaweiChatToResponse(request(chatId, [user("hi")]), session, "trace-rate-limit", res);
 
-  assert.equal(attempt, 2, "should retry once after 00001216");
+  assert.equal(attempt, 2, "限流错误应重试一次");
   const text = extractContents(writes);
-  assert.ok(text.includes("上下文长度超过上游限制"), `notice should mention context length; got: ${text}`);
-  assert.ok(text.includes("Hello world"), "should include retried successful content");
+  assert.ok(text.includes("正在重试"), `应提示正在重试；got: ${text}`);
+  assert.ok(text.includes("Hello world"), "重试成功后应输出内容");
 }
 
-async function testStreamingTailDivergenceEmitsNoticeChunk(): Promise<void> {
-  const chatId = "str-222222222222222222222222222222";
-  // 构造 tail-divergence：prefix + lastReply + new user（lastReply hash 不匹配 → tail-divergence）
-  const prefix = [user("old"), assistant("old answer")];
-  const lastReply = assistant("new answer");
-  seedChain(chatId, prefix, lastReply);
-  // 修改 lastReply 使 hash 不匹配 → tail-divergence
-  const modifiedReply = assistant("modified answer");
-
-  let attempt = 0;
-  installMock(async () => {
-    attempt++;
-    return { status: 200, stream: sseStream(successEvents()) };
-  });
+async function testPromptLengthEmitsTerminalErrorEvent(): Promise<void> {
+  installMock(async () => ({
+    status: 200,
+    stream: sseStream(errorEvents("ChatAgent.00001216", "Prompt length exceeds: 344632 must less than 196608")),
+  }));
 
   const { res, writes } = mockRes();
-  await streamHuaweiChatToResponse(request(chatId, [...prefix, modifiedReply, user("next")]), session, "trace-2", res);
+  await streamHuaweiChatToResponse(request("str-prompt-length", [user("hi")]), session, "trace-pl", res);
 
-  // tail-divergence 是静默末段补发修复，不重试、不发 notice chunk。
-  assert.equal(attempt, 1, "tail-divergence should not retry (silent suffix repair)");
-  const text = extractContents(writes);
-  assert.ok(text.includes("Hello world"), "should pass through upstream content");
-  assert.ok(!text.includes("上下文已重置"), "tail-divergence should not emit reset notice");
-  assert.ok(!text.includes("上下文已压缩"), "tail-divergence should not emit proactive notice");
+  assert.equal(callCount, 1, "上下文超限不得重试");
+  const errors = extractErrors(writes);
+  assert.equal(errors.length, 1, "应只下发一个终态错误事件");
+  assert.equal(errors[0]?.code, "context_length_exceeded");
+  assert.ok(writes.some((w) => w.includes("[DONE]")), "应正常结束流");
 }
 
-async function testStreaming00001216AfterResyncNotRetried(): Promise<void> {
-  const chatId = "str-333333333333333333333333333333";
+async function testTailDivergenceIsNotRepaired(): Promise<void> {
+  const chatId = "str-tail-divergence";
   const prefix = [user("old"), assistant("old answer")];
   const lastReply = assistant("new answer");
   seedChain(chatId, prefix, lastReply);
 
-  installMock(async () => {
-    // 每次都返回 00001216
-    return { status: 200, stream: sseStream(errorEvents("ChatAgent.00001216", "exceeds")) };
-  });
+  installMock(async () => ({
+    status: 200,
+    stream: sseStream(errorEvents("SomeError.000001", "boom")),
+  }));
 
   const { res, writes } = mockRes();
-  await streamHuaweiChatToResponse(request(chatId, [...prefix, lastReply, user("next")]), session, "trace-3", res);
-
-  assert.equal(callCount, 2, "should attempt exactly 2 times (resyncRetried guard)");
-  const text = extractContents(writes);
-  assert.ok(text.includes("上下文长度超过上游限制"), "should emit notice once");
-}
-
-async function testStreamingNoticeChunkCarriesMetadata(): Promise<void> {
-  const chatId = "str-444444444444444444444444444444";
-  const prefix = [user("old"), assistant("old answer")];
-  const lastReply = assistant("new answer");
-  seedChain(chatId, prefix, lastReply);
-
-  let attempt = 0;
-  installMock(async () => {
-    attempt++;
-    if (attempt === 1) return { status: 200, stream: sseStream(errorEvents("ChatAgent.00001216", "exceeds")) };
-    return { status: 200, stream: sseStream(successEvents()) };
-  });
-
-  const { res, writes } = mockRes();
-  await streamHuaweiChatToResponse(request(chatId, [...prefix, lastReply, user("next")]), session, "trace-4", res);
-
-  const metas = extractMetadata(writes);
-  const hasErrorRecovery = metas.some((m) => m.error_recovery === "ChatAgent.00001216");
-  assert.ok(hasErrorRecovery, `notice chunk should carry error_recovery metadata; got metas: ${JSON.stringify(metas)}`);
-}
-
-async function testStreaming00001216AfterResyncEmitsForceResyncToolCall(): Promise<void> {
-  // 00001216 重试仍失败时，应合成 tool_call 让客户端续传（而非 Error chunk + stop）。
-  // 客户端传了 Bash 工具，应选择 Bash echo 方案。
-  const chatId = "str-555555555555555555555555555555";
-  const prefix = [user("old"), assistant("old answer")];
-  const lastReply = assistant("new answer");
-  seedChain(chatId, prefix, lastReply);
-
-  installMock(async () => {
-    // 每次都返回 00001216
-    return { status: 200, stream: sseStream(errorEvents("ChatAgent.00001216", "exceeds")) };
-  });
-
-  const bashTool = { type: "function" as const, function: { name: "Bash", description: "", parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"], additionalProperties: false } } };
-  const { res, writes } = mockRes();
-  await streamHuaweiChatToResponse(request(chatId, [...prefix, lastReply, user("next")], [bashTool]), session, "trace-5", res);
-
-  // 应该只调用 2 次（resyncRetried guard）
-  assert.equal(callCount, 2, "should attempt exactly 2 times (resyncRetried guard)");
-
-  // 应该下发 tool_call chunk（Bash echo codearts::forceResync）
-  let foundToolCall = false;
-  let finishReason: string | undefined;
-  for (const w of writes) {
-    if (!w.startsWith("data: ")) continue;
-    const line = w.replace("data: ", "").trim();
-    if (line === "[DONE]") continue;
-    try {
-      const chunk = JSON.parse(line);
-      const delta = chunk.choices?.[0]?.delta;
-      if (delta?.tool_calls) {
-        for (const tc of delta.tool_calls) {
-          if (tc.function?.name === "Bash") {
-            const args = JSON.parse(tc.function.arguments);
-            if (args.command && args.command.includes("codearts::forceResync")) {
-              foundToolCall = true;
-            }
-          }
-        }
-      }
-      if (chunk.choices?.[0]?.finish_reason) {
-        finishReason = chunk.choices[0].finish_reason;
-      }
-    } catch { /* ignore */ }
-  }
-  assert.ok(foundToolCall, "should emit Bash echo codearts::forceResync tool_call");
-  assert.equal(finishReason, "tool_calls", `finish_reason should be "tool_calls" to let client continue; got: ${finishReason}`);
-}
-
-async function testForceResyncToolResultTriggersForceResyncPath(): Promise<void> {
-  // 客户端回传 forceResync tool_result 时，proxy 应走 forceResync 路径
-  // （全量折叠为单条 user 消息）。
-  // 通过 buildForceResyncToolCall 生成 tool_call（注册 id），模拟客户端回传。
-  const chatId = "str-666666666666666666666666666666";
-  const prefix = [user("old"), assistant("old answer")];
-  const lastReply = assistant("new answer");
-  seedChain(chatId, prefix, lastReply);
-
-  // 用 buildForceResyncToolCall 生成 tool_call（会注册 id 到 forceResyncToolCallIds）
-  const forceResyncToolCall = buildForceResyncToolCall(["Bash"]);
-  assert.ok(forceResyncToolCall, "should synthesize forceResync tool_call");
-  const forceResyncAssistant: OpenAIChatMessage = {
-    role: "assistant",
-    content: null,
-    refusal: null,
-    tool_calls: [forceResyncToolCall],
-  };
-  const forceResyncTool: OpenAIChatMessage = {
-    role: "tool",
-    content: "codearts::forceResync", // 客户端执行 echo 后的结果
-    refusal: null,
-    tool_call_id: forceResyncToolCall.id,
-  };
-
-  let capturedBody: string | null = null;
-  installMock(async (_url, _headers, body) => {
-    capturedBody = body;
-    return { status: 200, stream: sseStream(successEvents()) };
-  });
-
-  const { res } = mockRes();
   await streamHuaweiChatToResponse(
-    request(chatId, [...prefix, lastReply, user("next"), forceResyncAssistant, forceResyncTool]),
+    request(chatId, [...prefix, lastReply, user("external"), assistant("ext"), user("next")]),
     session,
-    "trace-6",
+    "trace-tail",
     res,
   );
 
-  assert.ok(capturedBody, "should have captured request body");
-  const parsed = JSON.parse(capturedBody as string);
-  // v2 请求体无 parent_message_id；forceResync 应折叠为单条 user 消息。
-  assert.ok(Array.isArray(parsed.messages) && parsed.messages.length === 1, "should fold to single message");
-  assert.equal(parsed.messages[0].role, "user", "folded message should be a user message");
-  assert.equal(parsed.parent_message_id, undefined, "v2 body should not carry parent_message_id");
+  assert.equal(callCount, 1, "分叉不得触发修复重试");
+  const errors = extractErrors(writes);
+  assert.equal(errors[0]?.code, "SomeError.000001", "错误应如实透传");
 }
 
-async function testStreaming00001216NoClientToolsFallsBackToErrorChunk(): Promise<void> {
-  // 客户端未传 tools 时，无法合成可执行的 tool_call，应回退到 Error chunk + stop。
-  const chatId = "str-777777777777777777777777777777";
-  const prefix = [user("old"), assistant("old answer")];
-  const lastReply = assistant("new answer");
-  seedChain(chatId, prefix, lastReply);
-
-  installMock(async () => {
-    return { status: 200, stream: sseStream(errorEvents("ChatAgent.00001216", "exceeds")) };
-  });
+async function testNonRetryableErrorEmitsErrorWithoutToolCalls(): Promise<void> {
+  installMock(async () => ({
+    status: 200,
+    stream: sseStream(errorEvents("SomeError.000042", "unexpected failure")),
+  }));
 
   const { res, writes } = mockRes();
-  // 不传 tools（undefined）
-  await streamHuaweiChatToResponse(request(chatId, [...prefix, lastReply, user("next")]), session, "trace-7", res);
+  await streamHuaweiChatToResponse(request("str-generic-error", [user("hi")]), session, "trace-generic", res);
 
-  let foundErrorChunk = false;
-  let finishReason: string | undefined;
-  for (const w of writes) {
-    if (!w.startsWith("data: ")) continue;
-    const line = w.replace("data: ", "").trim();
-    if (line === "[DONE]") continue;
-    try {
-      const chunk = JSON.parse(line);
-      if (chunk.choices?.[0]?.delta?.content?.includes("[Error:")) foundErrorChunk = true;
-      if (chunk.choices?.[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
-    } catch { /* ignore */ }
-  }
-  assert.ok(foundErrorChunk, "should emit Error chunk when no client tools available");
-  assert.equal(finishReason, "stop", `finish_reason should be "stop" for fallback; got: ${finishReason}`);
+  const errors = extractErrors(writes);
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0]?.code, "SomeError.000042");
+  const text = extractContents(writes);
+  assert.equal(text.trim(), "", "不得伪造内容或工具调用");
 }
 
-async function testStreaming00001216GlobOnlyClientUsesGlob(): Promise<void> {
-  // 客户端只传了 Glob（没有 Bash），应选择 Glob 方案合成 tool_call。
-  const chatId = "str-888888888888888888888888888888";
-  const prefix = [user("old"), assistant("old answer")];
-  const lastReply = assistant("new answer");
-  seedChain(chatId, prefix, lastReply);
-
-  installMock(async () => {
-    return { status: 200, stream: sseStream(errorEvents("ChatAgent.00001216", "exceeds")) };
-  });
-
-  const globTool = { type: "function" as const, function: { name: "Glob", description: "", parameters: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"], additionalProperties: false } } };
-  const { res, writes } = mockRes();
-  await streamHuaweiChatToResponse(request(chatId, [...prefix, lastReply, user("next")], [globTool]), session, "trace-8", res);
-
-  let foundGlobToolCall = false;
-  let finishReason: string | undefined;
-  for (const w of writes) {
-    if (!w.startsWith("data: ")) continue;
-    const line = w.replace("data: ", "").trim();
-    if (line === "[DONE]") continue;
-    try {
-      const chunk = JSON.parse(line);
-      const delta = chunk.choices?.[0]?.delta;
-      if (delta?.tool_calls) {
-        for (const tc of delta.tool_calls) {
-          if (tc.function?.name === "Glob") {
-            const args = JSON.parse(tc.function.arguments);
-            if (args.pattern === "codearts::forceResync") foundGlobToolCall = true;
-          }
-        }
-      }
-      if (chunk.choices?.[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
-    } catch { /* ignore */ }
-  }
-  assert.ok(foundGlobToolCall, "should emit Glob tool_call when only Glob available");
-  assert.equal(finishReason, "tool_calls", `finish_reason should be "tool_calls"; got: ${finishReason}`);
-}
-
-// ---------------------------------------------------------------------------
-// Run
-// ---------------------------------------------------------------------------
-
-(async () => {
-  await testStreaming00001216EmitsNoticeChunkAndRetries();
-  await testStreamingTailDivergenceEmitsNoticeChunk();
-  await testStreaming00001216AfterResyncNotRetried();
-  await testStreamingNoticeChunkCarriesMetadata();
-  await testStreaming00001216AfterResyncEmitsForceResyncToolCall();
-  await testForceResyncToolResultTriggersForceResyncPath();
-  await testStreaming00001216NoClientToolsFallsBackToErrorChunk();
-  await testStreaming00001216GlobOnlyClientUsesGlob();
+async function run(): Promise<void> {
+  await testRateLimitRetriesOnce();
+  await testPromptLengthEmitsTerminalErrorEvent();
+  await testTailDivergenceIsNotRepaired();
+  await testNonRetryableErrorEmitsErrorWithoutToolCalls();
   console.log("All stream-recovery tests passed.");
-})().catch((e) => { console.error(e); process.exit(1); });
+}
+
+run().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

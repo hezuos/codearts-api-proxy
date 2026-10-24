@@ -4,7 +4,6 @@
 
 import { randomUUID, createHash } from "crypto";
 import type {
-  CodeArtsToolResult,
   OpenAIChatMessage,
   OpenAIChatCompletionRequest,
   OpenAIToolCall,
@@ -19,9 +18,6 @@ import {
   type ToolDefinition,
 } from "./tools";
 import { logger } from "../../utils/logger";
-import { extractRecoveredToolResults } from "./chat-recovery";
-import { isCodeArtsBuiltinTool } from "./tools";
-import { config } from "../../config";
 
 // ---------------------------------------------------------------------------
 // Message content normalization
@@ -55,6 +51,11 @@ export function extractUserMessage(messages: OpenAIChatMessage[]): string {
     }
   }
   return "";
+}
+
+/** v2 工具续传判定：尾部消息为 tool role（客户端已携带 assistant(tool_calls) + tool(result)）。 */
+export function isToolContinuationRequest(messages: OpenAIChatMessage[]): boolean {
+  return messages[messages.length - 1]?.role === "tool";
 }
 
 export function normalizeForChain(msg: OpenAIChatMessage): string {
@@ -119,45 +120,6 @@ export function computeChainForMessages(
     hash = computeChainHash(hash, messages[i]);
   }
   return { hash, length: boundedLimit };
-}
-
-// ---------------------------------------------------------------------------
-// Tool result extraction
-// ---------------------------------------------------------------------------
-
-export function extractToolResults(
-  request: OpenAIChatCompletionRequest,
-): CodeArtsToolResult[] {
-  const explicit = request.codearts?.tool_results ?? [];
-  if (explicit.length > 0) {
-    logger.debug("[client→proxy] tool_results (explicit codearts)", {
-      count: explicit.length,
-      details: explicit.map((tr) => ({
-        name: tr.name,
-        toolCallId: tr.toolCallId,
-        status: tr.status,
-        result_preview: tr.result?.slice(0, 200),
-      })),
-    });
-    return explicit;
-  }
-
-  const lastMsg = request.messages[request.messages.length - 1];
-  if (!lastMsg || lastMsg.role !== "tool") return [];
-  const toolResults = extractRecoveredToolResults(request, normalizeMessageContent) ?? [];
-
-  // CodeArts 只接受内置工具的 tool_result。对于客户端自定义工具（如 sequentialthinking、find_path），
-  // CodeArts 无法处理其结果，返回 ChatAgent.00009999 / ChatAgent.00001208。
-  // 过滤掉非内置工具，让其通过下一轮消息传递结果。
-  const builtinResults = toolResults.filter((tr) => isCodeArtsBuiltinTool(tr.name));
-  if (builtinResults.length !== toolResults.length) {
-    const skipped = toolResults.filter((tr) => !isCodeArtsBuiltinTool(tr.name));
-    logger.info("[client→proxy] skipping non-builtin tool_results", {
-      skipped: skipped.map((tr) => tr.name),
-    });
-  }
-
-  return builtinResults;
 }
 
 // ---------------------------------------------------------------------------
@@ -288,272 +250,63 @@ export function cleanToolCalls(
   });
 }
 
+// ---------------------------------------------------------------------------
+// v2 tool_call 分片累加（非流式聚合）
+// ---------------------------------------------------------------------------
+
+/** 单次工具调用的累加状态。 */
+export interface ToolCallAccumulator {
+  index: number;
+  id?: string;
+  type?: string;
+  name: string;
+  arguments: string;
+}
+
+/**
+ * 按 `index` 累加 tool_call 分片。
+ *
+ * v2 通道即使 `stream=false` 仍以 SSE 分片下发工具调用：首个分片带 `id`/`name`，
+ * 后续分片只带 `arguments` 片段。若逐分片当作完整调用处理，同一次调用会被
+ * 拆成多个 tool_call（`name=unknown`、参数碎片化）。
+ */
+export function mergeToolCallDeltas(
+  accumulators: Map<number, ToolCallAccumulator>,
+  raw: CodeArtsRawToolCall[] | null | undefined,
+): void {
+  if (!raw || raw.length === 0) return;
+  raw.forEach((tc, fallbackIndex) => {
+    const index = tc.index ?? fallbackIndex;
+    const acc = accumulators.get(index) ?? { index, name: "", arguments: "" };
+    if (tc.id && tc.id !== "-") acc.id = tc.id;
+    if (tc.type === "function") acc.type = "function";
+    // 重复下发完整 name 时跳过，避免拼成 get_weatherget_weather
+    const name = tc.function?.name ?? tc.name;
+    if (name && name !== acc.name) acc.name += name;
+    const args = extractArguments(tc);
+    if (args) acc.arguments += args;
+    accumulators.set(index, acc);
+  });
+}
+
+/** 将累加结果按 index 顺序还原为完整工具调用（供 `cleanToolCalls` 处理）。 */
+export function flushToolCallDeltas(
+  accumulators: Map<number, ToolCallAccumulator>,
+): CodeArtsRawToolCall[] | undefined {
+  if (accumulators.size === 0) return undefined;
+  return [...accumulators.values()]
+    .sort((a, b) => a.index - b.index)
+    .map((acc) => ({
+      index: acc.index,
+      id: acc.id,
+      type: acc.type ?? "function",
+      function: {
+        name: acc.name || undefined,
+        arguments: acc.arguments || undefined,
+      },
+    }));
+}
+
 // Backward-compatible aliases
 export const mapToolCallDeltas = cleanToolCallDeltas;
 export const mapToolCalls = cleanToolCalls;
-
-function truncateMissingSegment(
-  hint: string,
-  segments: string[],
-  current: string,
-  maxChars: number,
-): string {
-  const fixedLength = hint.length + current.length + 4;
-  let budget = Math.max(0, maxChars - fixedLength);
-  const kept: string[] = [];
-  for (let i = segments.length - 1; i >= 0; i--) {
-    const cost = segments[i].length + (kept.length > 0 ? 2 : 0);
-    if (cost > budget) break;
-    budget -= cost;
-    kept.unshift(segments[i]);
-  }
-  // filter(Boolean) 兼容无 user 段（hint/current 为空）时不留多余分隔空项
-  return [hint, ...kept, current].filter(Boolean).join("\n\n");
-}
-
-export function foldMissingSegment(
-  messages: OpenAIChatMessage[],
-  suffixStart: number,
-  maxChars: number = 8000,
-): string {
-  if (!messages || suffixStart >= messages.length) return "";
-  const start = Math.max(0, suffixStart);
-  const tail = messages.slice(start);
-  const lastUserIndex = tail.reduce(
-    (index, message, currentIndex) => message.role === "user" ? currentIndex : index,
-    -1,
-  );
-
-  // 纯工具段（无 user）：按工具段真实语义折叠（assistant 工具调用 + tool 结果），
-  // 不套用「当前用户请求」结构，避免被模型误判为新用户输入。
-  if (lastUserIndex < 0) {
-    let userIndex = 0;
-    const segments: string[] = [];
-    for (const message of tail) {
-      if (message.role === "user") userIndex++;
-      const segment = foldMessageSegment(message, userIndex);
-      if (segment) segments.push(segment);
-    }
-    if (segments.length === 0) return "";
-    const joined = segments.join("\n\n");
-    if (joined.length <= maxChars) return joined;
-    return truncateMissingSegment("", segments, "", maxChars);
-  }
-
-  let userIndex = 0;
-  const segments: string[] = [];
-  for (let i = 0; i < lastUserIndex; i++) {
-    const message = tail[i];
-    if (message.role === "user") userIndex++;
-    const segment = foldMessageSegment(message, userIndex);
-    if (segment) segments.push(segment);
-  }
-  const currentUser = normalizeMessageContent(tail[lastUserIndex].content);
-  const hint = config.missingContextHint;
-  const current = `[当前用户请求]\n${currentUser}`;
-  const join = (items: string[]): string => [hint, ...items, current].join("\\n\\n");
-  const full = join(segments);
-  if (full.length <= maxChars) return full;
-  return truncateMissingSegment(hint, segments, current, maxChars);
-}
-
-
-/**
- * Continuation directive appended to the folded text (design D2).
- * Helps the model distinguish "history replay" from "current task" and avoid
- * restating the history instead of continuing it.
- */
-const FOLD_CONTINUATION_DIRECTIVE =
-  "[continuation]\n以下为历史对话上下文,请基于此继续响应最新用户请求。";
-
-/**
- * Truncation marker for a single oversized tool result (design D3 boundary 3).
- * Keeps head 2K + tail 2K chars, replaces the middle with this marker.
- */
-const TOOL_RESULT_HEAD_TAIL_CHARS = 2000;
-const TOOL_RESULT_TRUNCATE_MARKER = (originalLength: number) =>
-  `[...truncated ${originalLength} chars...]`;
-
-/**
- * Truncation marker for an oversized first user turn (design D3 boundary 1).
- */
-const USER_TRUNCATE_MARKER = "[...truncated...]";
-
-/**
- * Fold a single tool result content with head/tail preservation (design D3 boundary 3).
- * If content ≤ threshold, return as-is. Otherwise keep head 2K + marker + tail 2K.
- */
-function truncateToolResultContent(content: string): string {
-  if (content.length <= 2 * TOOL_RESULT_HEAD_TAIL_CHARS + 100) return content;
-  const head = content.slice(0, TOOL_RESULT_HEAD_TAIL_CHARS);
-  const tail = content.slice(content.length - TOOL_RESULT_HEAD_TAIL_CHARS);
-  return `${head}\n${TOOL_RESULT_TRUNCATE_MARKER(content.length)}\n${tail}`;
-}
-
-/**
- * Render a single message as a folded text segment (design D2).
- * Returns null if the message produces no meaningful segment (e.g. empty content
- * with no tool calls) — caller filters nulls out.
- *
- * Role mapping (D2):
- *   - system/developer → [system]
- *   - user → [user #N] (N tracked by caller via userIndex)
- *   - assistant → [assistant] + [调用工具: name(args)] for each tool_call
- *   - tool → [tool result: name]
- *   - unknown → [unknown: <role>]
- */
-function foldMessageSegment(
-  msg: OpenAIChatMessage,
-  userIndex: number,
-): string | null {
-  const content = normalizeMessageContent(msg.content);
-
-  switch (msg.role) {
-    case "system":
-    case "developer":
-      return content ? `[system]\n${content}` : null;
-    case "user":
-      return content ? `[user #${userIndex}]\n${content}` : null;
-    case "assistant": {
-      const parts: string[] = [];
-      if (content) parts.push(`[assistant]\n${content}`);
-      else parts.push("[assistant]");
-      // Tool calls textualized (D4): never route to task_parameters.tool_result
-      if (msg.tool_calls && msg.tool_calls.length > 0) {
-        for (const tc of msg.tool_calls) {
-          const name = tc.function?.name ?? "unknown";
-          const args = tc.function?.arguments ?? "{}";
-          parts.push(`[调用工具: ${name}(${args})]`);
-        }
-      }
-      // Only emit if there's content or tool_calls; bare "[assistant]" with neither is noise
-      if (!content && (!msg.tool_calls || msg.tool_calls.length === 0)) return null;
-      return parts.join("\n");
-    }
-    case "tool": {
-      const name = msg.name ?? "unknown";
-      const truncated = truncateToolResultContent(content);
-      return content ? `[tool result: ${name}]\n${truncated}` : `[tool result: ${name}]`;
-    }
-    default:
-      // Unknown role (e.g. "function") — render as marker, never bare text (D2)
-      return content ? `[unknown: ${msg.role}]\n${content}` : null;
-  }
-}
-
-/**
- * Fold the complete client message history into a single text string for
- * full-context injection on cache miss (design D2/D3/D4).
- *
- * Behavior:
- *   - Empty history or no meaningful segments → return "" (caller falls back to extractUserMessage)
- *   - Single message → return its folded form (no continuation directive; not injection per D1)
- *   - Multi-turn → join segments with blank-line separators + continuation directive
- *   - Truncation (D3): if total chars > maxChars, keep system + first user + greedy newest turns
- *
- * @param messages Client message history (OpenAI format)
- * @param maxChars Character budget for the folded text (default 8000)
- * @returns Folded text, or "" if no meaningful content
- */
-export function foldFullConversation(
-  messages: OpenAIChatMessage[],
-  maxChars: number = 8000,
-): string {
-  if (!messages || messages.length === 0) return "";
-
-  // First pass: render all segments with user index tracking
-  let userIndex = 0;
-  const segments: string[] = [];
-  for (const msg of messages) {
-    if (msg.role === "user") userIndex++;
-    const seg = foldMessageSegment(msg, userIndex);
-    if (seg !== null) segments.push(seg);
-  }
-
-  if (segments.length === 0) return "";
-  if (segments.length === 1) return segments[0];
-
-  // Join with blank-line separators + continuation directive
-  const body = segments.join("\n\n");
-  const folded = `${body}\n\n${FOLD_CONTINUATION_DIRECTIVE}`;
-
-  // D3 truncation: if within budget, return as-is
-  if (folded.length <= maxChars) return folded;
-
-  // D3 truncation: keep system + first user + greedy newest turns
-  return truncateFolded(segments, maxChars);
-}
-
-/**
- * D3 truncation: preserve system + first user (anchored context) + greedy newest turns.
- *
- * Strategy:
- *   1. Always keep the first segment if it's [system] or [user #1] (anchor)
- *   2. From the newest segments backward, greedily accumulate until char budget is hit
- *   3. If system + first user alone exceed budget, truncate first user (boundary 1)
- */
-export function truncateFolded(segments: string[], maxChars: number): string {
-  // Identify anchor: leading [system] and/or [user #1] segments
-  const anchorIndices: number[] = [];
-  for (let i = 0; i < segments.length; i++) {
-    if (segments[i].startsWith("[system]") || segments[i].startsWith("[user #1]")) {
-      anchorIndices.push(i);
-    } else {
-      break; // anchor is only the leading run
-    }
-  }
-  const anchorSegs = anchorIndices.map((i) => segments[i]);
-  const restSegs = segments.slice(anchorIndices.length);
-
-  // Budget for the continuation directive + separator overhead
-  const overhead = FOLD_CONTINUATION_DIRECTIVE.length + 4; // "\n\n" separators
-  let budget = Math.max(0, maxChars - overhead);
-
-  // Greedy newest: accumulate from the end of restSegs backward
-  const keptRest: string[] = [];
-  for (let i = restSegs.length - 1; i >= 0; i--) {
-    const seg = restSegs[i];
-    const cost = seg.length + 2; // "\n\n" separator
-    if (budget - cost < 0) break;
-    budget -= cost;
-    keptRest.unshift(seg);
-  }
-
-  // Anchor budget: whatever remains. Every anchor, including system,
-  // must obey the budget or be truncated — otherwise an oversized
-  // system prompt can push the folded text far past FULL_CONTEXT_MAX_CHARS.
-  let anchorBudget = budget;
-  const keptAnchor: string[] = [];
-  for (const seg of anchorSegs) {
-    const cost = seg.length + (keptAnchor.length > 0 ? 2 : 0);
-    if (anchorBudget - cost >= 0) {
-      anchorBudget -= cost;
-      keptAnchor.push(seg);
-    } else {
-      const remaining = anchorBudget - (USER_TRUNCATE_MARKER.length + 2);
-      const lines = seg.split("\n");
-      const header = lines[0]; // "[system]" or "[user #1]"
-      const rest = lines.slice(1).join("\n");
-      if (remaining > 0) {
-        keptAnchor.push(`${header}\n${rest.slice(0, remaining)}\n${USER_TRUNCATE_MARKER}`);
-      } else {
-        keptAnchor.push(`${header}\n${USER_TRUNCATE_MARKER}`);
-      }
-      anchorBudget = -1; // no more budget — later anchors get marker only
-    }
-  }
-
-  const allKept = [...keptAnchor, ...keptRest];
-  if (allKept.length === 0) return "";
-
-  return `${allKept.join("\n\n")}\n\n${FOLD_CONTINUATION_DIRECTIVE}`;
-}
-
-/**
- * Resolve the effective max chars for a given model (per-model override or global default).
- */
-export function resolveFullContextMaxChars(modelId: string): number {
-  const { fullContextMaxChars, fullContextMaxCharsByModel } = config;
-  const override = fullContextMaxCharsByModel[modelId];
-  return override ?? fullContextMaxChars;
-}

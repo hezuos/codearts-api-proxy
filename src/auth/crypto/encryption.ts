@@ -28,3 +28,15 @@ export function decryptString(cipherText: string): string {
   const plain = Buffer.concat([decipher.update(encrypted), decipher.final()]);
   return plain.toString("utf8");
 }
+
+/** 解开加密的敏感值（cookie 等）；缺失或解密失败返回 undefined。 */
+export function tryDecryptString(
+  cipherText: string | undefined,
+): string | undefined {
+  if (!cipherText) return undefined;
+  try {
+    return decryptString(cipherText);
+  } catch {
+    return undefined;
+  }
+}

@@ -11,7 +11,7 @@ import {
   sendHuaweiChatRequest,
   streamHuaweiChatToResponse,
 } from "../upstream/huawei/chat";
-import { UpstreamAuthError } from "../utils/errors";
+import { UpstreamAuthError, UpstreamConcurrencyError, UpstreamContextLengthError } from "../utils/errors";
 import { logger } from "../utils/logger";
 import {
   getModelList,
@@ -113,8 +113,6 @@ export function createChatCompletion(req: Request, res: Response): void {
     messagesCount: msgCount,
     lastMessage: `[${lastMsg?.role}] ${lastMsgPreview}`,
     codearts_chat_id: body.codearts?.chat_id ?? "(none)",
-    codearts_parent_message_id: body.codearts?.parent_message_id ?? "(none)",
-    codearts_tool_results_count: body.codearts?.tool_results?.length ?? 0,
     codearts_sub_agent_type: body.codearts?.sub_agent?.type,
   });
   log.debug("[client→proxy] body (full)", { body: req.body });
@@ -188,12 +186,12 @@ async function handleStreamingRequest(
           return;
         } catch (retryError) {
           log.error("Retry after refresh also failed", { error: retryError instanceof Error ? retryError.message : String(retryError) });
-          sendErrorResponse(res, retryError, request.model);
+          sendErrorResponse(res, retryError);
           return;
         }
       }
     }
-    sendErrorResponse(res, error, request.model);
+    sendErrorResponse(res, error);
   }
 }
 
@@ -231,12 +229,12 @@ async function handleNonStreamingRequest(
           return;
         } catch (retryError) {
           log.error("Retry after refresh also failed", { error: retryError instanceof Error ? retryError.message : String(retryError) });
-          sendErrorResponse(res, retryError, request.model);
+          sendErrorResponse(res, retryError);
           return;
         }
       }
     }
-    sendErrorResponse(res, error, request.model);
+    sendErrorResponse(res, error);
   }
 }
 
@@ -259,9 +257,35 @@ async function tryRefreshSession(
   }
 }
 
-function sendErrorResponse(res: Response, error: unknown, model: string): void {
+export function sendErrorResponse(res: Response, error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
   if (!res.headersSent) {
+    if (error instanceof UpstreamConcurrencyError) {
+      const retryAfterSeconds = Math.max(1, Math.ceil(error.retryAfterMs / 1000));
+      res.setHeader("Retry-After", String(retryAfterSeconds));
+      res
+        .status(429)
+        .json(
+          createOpenAIError(
+            `Chat request failed: ${message}`,
+            "rate_limit_error",
+            "upstream_concurrency_limit",
+          ),
+        );
+      return;
+    }
+    if (error instanceof UpstreamContextLengthError) {
+      res
+        .status(400)
+        .json(
+          createOpenAIError(
+            `Chat request failed: ${message}`,
+            "invalid_request_error",
+            "context_length_exceeded",
+          ),
+        );
+      return;
+    }
     const statusCode = error instanceof UpstreamAuthError ? 401 : 502;
     const errorType =
       error instanceof UpstreamAuthError ? "auth_error" : "upstream_error";
@@ -269,21 +293,16 @@ function sendErrorResponse(res: Response, error: unknown, model: string): void {
       .status(statusCode)
       .json(createOpenAIError(`Chat request failed: ${message}`, errorType));
   } else {
-    // SSE already started — send error as a chunk then close
-    const errChunk = {
-      id: "chatcmpl-error",
-      object: "chat.completion.chunk",
-      created: Math.floor(Date.now() / 1000),
-      model,
-      choices: [
-        {
-          index: 0,
-          delta: { content: `\n[Error: ${message}]` },
-          finish_reason: null,
-        },
-      ],
-    };
-    res.write(`data: ${JSON.stringify(errChunk)}\n\n`);
+    // SSE already started — 上下文超限用标准 error 事件下发，其余仍用文本 chunk
+    const errorBody =
+      error instanceof UpstreamContextLengthError
+        ? createOpenAIError(
+            `Chat request failed: ${message}`,
+            "invalid_request_error",
+            "context_length_exceeded",
+          )
+        : createOpenAIError(`[Error: ${message}]`, "upstream_error");
+    res.write(`data: ${JSON.stringify(errorBody)}\n\n`);
     res.write("data: [DONE]\n\n");
     res.end();
   }

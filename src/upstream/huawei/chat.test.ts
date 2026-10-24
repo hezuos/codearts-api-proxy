@@ -1,158 +1,119 @@
 /**
- * Stateless chat upstream behaviour tests.
+ * v2 无状态会话行为测试。
  *
- * These tests verify the protocol-adaptation logic without any
- * conversation-store dependency — the proxy is stateless by design.
+ * v2 上游不保存会话状态：每个请求全量透传 messages，
+ * chat_id 仅作为代理侧链状态/缓存追踪的索引（不会发送给上游）。
  */
 import assert from "assert";
-import { createHash } from "crypto";
+import type {
+  OpenAIChatCompletionRequest,
+  OpenAIChatMessage,
+} from "../../types/openai";
+import { buildV2RequestBody } from "./chat-request";
+import type { StoredHuaweiSession } from "../../auth/huawei/session-store";
 
-// ---------------------------------------------------------------------------
-// Helper: simulate what the caller maintains between turns
-// ---------------------------------------------------------------------------
+const session = {
+  keyId: "test-key",
+  providerAccountId: "test-provider",
+} as StoredHuaweiSession;
 
-interface CallerState {
-  chatId: string;
-  parentMessageId: string;
+function user(content: string): OpenAIChatMessage {
+  return { role: "user", content, refusal: null };
 }
 
-function newCallerState(): CallerState {
-  return { chatId: "", parentMessageId: "" };
+function tool(content: string, toolCallId: string): OpenAIChatMessage {
+  return { role: "tool", content, refusal: null, tool_call_id: toolCallId };
 }
 
-/** Called after each SSE meta event to advance caller state. */
-function advanceCallerState(
-  _state: CallerState,
-  metaChatId: string,
-  metaResponseMessageId: string,
-): CallerState {
+function request(
+  messages: OpenAIChatMessage[],
+  chatId?: string,
+): OpenAIChatCompletionRequest {
   return {
-    chatId: metaChatId,
-    parentMessageId: metaResponseMessageId,
+    model: "GLM-5.1",
+    messages,
+    stream: false,
+    ...(chatId ? { codearts: { chat_id: chatId } } : {}),
   };
 }
 
+function deriveChatId(messages: OpenAIChatMessage[]): string {
+  return buildV2RequestBody(request(messages), session).chatId;
+}
+
 // ---------------------------------------------------------------------------
-// Tests
+// chat_id 派生
 // ---------------------------------------------------------------------------
 
-function testNewConversationStartsWithEmptyParentMessageId(): void {
-  const state = newCallerState();
+function testChatIdStableForSameConversation(): void {
+  const messages = [user("old"), user("next")];
   assert.equal(
-    state.parentMessageId,
-    "",
-    "new conversation: parentMessageId should be ''",
+    deriveChatId(messages),
+    deriveChatId([...messages, user("later")]),
+    "同一会话（system + 首条 user 不变）应派生相同 chat_id",
   );
-  assert.equal(state.chatId, "", "new conversation: chatId should be ''");
 }
 
-function testCallerStateAdvancesAfterMetaEvent(): void {
-  let state = newCallerState();
-  state = advanceCallerState(state, "chat-abc", "resp-001");
-  assert.equal(state.chatId, "chat-abc");
-  assert.equal(state.parentMessageId, "resp-001");
+function testChatIdDiffersForDifferentFirstUserMessage(): void {
+  const system = { role: "system" as const, content: "You are opencode.", refusal: null };
+  const a = deriveChatId([system, user("分析一下项目")]);
+  const b = deriveChatId([system, user("修一下这个 bug")]);
+  assert.notEqual(a, b, "首条 user 不同应派生不同 chat_id");
 }
 
-function testSubsequentTurnUsesResponseMessageIdAsParent(): void {
-  let state = newCallerState();
-  // Turn 1 response
-  state = advanceCallerState(state, "chat-abc", "resp-001");
-  // Turn 2 should use resp-001 as parent
-  assert.equal(state.parentMessageId, "resp-001");
-  // Turn 2 response
-  state = advanceCallerState(state, "chat-abc", "resp-002");
-  assert.equal(state.parentMessageId, "resp-002");
-}
-
-function testChatIdRemainsStableWithinConversation(): void {
-  let state = newCallerState();
-  state = advanceCallerState(state, "chat-stable", "resp-001");
-  const chatIdAfterTurn1 = state.chatId;
-  state = advanceCallerState(state, "chat-stable", "resp-002");
+function testChatIdFallsBackToSystemPrompt(): void {
+  const system = { role: "system" as const, content: "You are a title generator.", refusal: null };
   assert.equal(
-    state.chatId,
-    chatIdAfterTurn1,
-    "chat_id must not change within a conversation",
+    deriveChatId([system]),
+    deriveChatId([system]),
+    "无 user 时应能稳定地从 system prompt 派生",
   );
 }
 
-function testToolContinuationPreservesParentMessageId(): void {
-  // After AI returns tool_calls, caller executes tools and sends back results.
-  // The parent_message_id should still be the response_message_id from the
-  // turn that issued the tool_calls — the caller must NOT update parentMessageId
-  // until the tool-result turn's SSE meta event arrives.
-  let state = newCallerState();
-  // Turn 1: user message → AI responds with tool_calls
-  state = advanceCallerState(state, "chat-tool", "resp-tool-turn");
-  const parentBeforeToolResult = state.parentMessageId;
+function testChatIdIsRandomWithoutAnyContextMessage(): void {
+  const a = deriveChatId([]);
+  const b = deriveChatId([]);
+  assert.match(a, /^[0-9a-f]{32}$/, "无上下文时应生成 32 位十六进制 chat_id");
+  assert.notEqual(a, b, "无上下文每次应生成不同的 chat_id");
+}
 
-  // Caller sends tool results — uses same parentMessageId
+function testCallerChatIdOverrideWins(): void {
+  const result = buildV2RequestBody(request([user("hi")], "pinned-chat-id"), session);
+  assert.equal(result.chatId, "pinned-chat-id", "调用方提供的 chat_id 应优先");
+}
+
+// ---------------------------------------------------------------------------
+// 无状态透传
+// ---------------------------------------------------------------------------
+
+function testEveryRequestCarriesFullHistory(): void {
+  const messages = [user("old"), { role: "assistant" as const, content: "reply", refusal: null }, user("next")];
+  const result = buildV2RequestBody(request(messages, "chat-1"), session);
   assert.equal(
-    parentBeforeToolResult,
-    "resp-tool-turn",
-    "tool result turn must use the parent_message_id from the tool-issuing turn",
-  );
-
-  // After tool-result SSE meta event arrives, state advances again
-  state = advanceCallerState(state, "chat-tool", "resp-after-tool");
-  assert.equal(state.parentMessageId, "resp-after-tool");
-}
-
-function deriveConversationIdForTest(
-  messages: Array<{ role: string; content: string }>,
-): string {
-  const firstMsg =
-    messages.find((m) => m.role === "user") ??
-    messages.find((m) => m.role === "system");
-  assert.ok(firstMsg, "test messages must contain a user or system message");
-  return createHash("sha256").update(firstMsg.content).digest("hex").slice(0, 32);
-}
-
-function testChatIdPrefersFirstUserMessageOverSystemPrompt(): void {
-  const systemPrompt = "You are opencode, an interactive CLI tool...";
-  const requestA = deriveConversationIdForTest([
-    { role: "system", content: systemPrompt },
-    { role: "user", content: "分析一下项目" },
-  ]);
-  const requestB = deriveConversationIdForTest([
-    { role: "system", content: systemPrompt },
-    { role: "user", content: "修一下这个 bug" },
-  ]);
-
-  assert.notEqual(
-    requestA,
-    requestB,
-    "chat_id should differ for different first user messages even when system prompt is identical",
+    (result.body.messages as unknown[]).length,
+    messages.length,
+    "v2 无服务端会话状态：每个请求都应全量携带历史",
   );
 }
 
-function testChatIdFallsBackToSystemWhenNoUserMessageExists(): void {
-  const systemPrompt = "You are a title generator.";
-  const chatId = deriveConversationIdForTest([
-    { role: "system", content: systemPrompt },
-  ]);
-  const expected = createHash("sha256")
-    .update(systemPrompt)
-    .digest("hex")
-    .slice(0, 32);
-
-  assert.equal(
-    chatId,
-    expected,
-    "chat_id should still be derivable from system message when no user message exists",
+function testToolContinuationDetection(): void {
+  const result = buildV2RequestBody(
+    request([user("run"), tool("output", "call_1")], "chat-2"),
+    session,
   );
+  assert.equal(result.isToolContinuation, true, "尾部 tool 消息应判定为工具续传");
 }
 
 // ---------------------------------------------------------------------------
 // Run
 // ---------------------------------------------------------------------------
 
-testNewConversationStartsWithEmptyParentMessageId();
-testCallerStateAdvancesAfterMetaEvent();
-testSubsequentTurnUsesResponseMessageIdAsParent();
-testChatIdRemainsStableWithinConversation();
-testToolContinuationPreservesParentMessageId();
-testChatIdPrefersFirstUserMessageOverSystemPrompt();
-testChatIdFallsBackToSystemWhenNoUserMessageExists();
+testChatIdStableForSameConversation();
+testChatIdDiffersForDifferentFirstUserMessage();
+testChatIdFallsBackToSystemPrompt();
+testChatIdIsRandomWithoutAnyContextMessage();
+testCallerChatIdOverrideWins();
+testEveryRequestCarriesFullHistory();
+testToolContinuationDetection();
 
-console.log("All chat stateless behaviour tests passed.");
+console.log("All v2 stateless chat behaviour tests passed.");

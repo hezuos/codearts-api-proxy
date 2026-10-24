@@ -350,6 +350,7 @@
         await fetch("/admin/logout", {
           method: "POST",
           redirect: "manual",
+          headers: { "x-csrf-token": getCsrfToken() },
         }).catch(() => {});
         window.location.href = "/";
       }

@@ -8,10 +8,7 @@ import assert from "assert";
 import { createHash } from "crypto";
 import type { OpenAIChatMessage, OpenAIChatCompletionRequest } from "../../types/openai";
 
-process.env.CHAIN_DIVERGENCE_REPAIR_ENABLED = "true";
-process.env.FULL_CONTEXT_INJECTION_ENABLED = "true";
-
-// 配置必须在设置环境变量之后懒加载。
+// 配置必须在环境变量就绪后懒加载。
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const chatRequest = require("./chat-request") as typeof import("./chat-request");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -93,6 +90,11 @@ function testColdStartSingleUserMessage(): void {
   assert.equal(result.body.stream, true);
   assert.equal(result.body.tool_stream, true, "v2 应始终携带 tool_stream");
   assert.equal(result.body.max_tokens, 65536, "默认 max_tokens 应为上游上限 64k");
+  assert.deepEqual(
+    result.body.stream_options,
+    { include_usage: true },
+    "默认应向流式上游索取 usage",
+  );
   const msgs = messagesOf(result.body);
   assert.equal(msgs.length, 1);
   assert.equal(msgs[0].role, "user");
@@ -100,6 +102,10 @@ function testColdStartSingleUserMessage(): void {
   assert.equal(result.body.parent_message_id, undefined, "v2 不应携带 parent_message_id");
   assert.equal(result.body.chat_id, undefined, "v2 不应携带 chat_id");
   assert.equal(result.body.task_parameters, undefined, "v2 不应携带 task_parameters");
+  assert.equal(result.body.task, undefined, "v2 不应携带 task");
+  assert.equal(result.body.user_id, undefined, "v2 不应携带 user_id");
+  assert.equal(result.body.agent_id, undefined, "v2 不应携带 agent_id");
+  assert.equal(result.body.is_delta_response, undefined, "v2 不应携带 is_delta_response");
 }
 
 function testColdStartPassesThroughFullHistory(): void {
@@ -286,8 +292,42 @@ function testMaxTokensOverride(): void {
   assert.equal(result.body.max_tokens, 1024, "客户端指定 max_tokens 时应透传");
 }
 
+function testSamplingParamsForwarded(): void {
+  const chatId = "v2-cccccccccccccccccccccccccccccccd";
+  const result = chatRequest.buildV2RequestBody(
+    {
+      ...request(chatId, [user("hi")]),
+      temperature: 0.2,
+      top_p: 0.9,
+      stop: ["END"],
+      presence_penalty: 0.1,
+      frequency_penalty: 0.2,
+      seed: 42,
+      response_format: { type: "json_object" },
+      tool_choice: "auto",
+    },
+    session,
+  );
+  assert.equal(result.body.temperature, 0.2);
+  assert.equal(result.body.top_p, 0.9);
+  assert.deepEqual(result.body.stop, ["END"]);
+  assert.equal(result.body.presence_penalty, 0.1);
+  assert.equal(result.body.frequency_penalty, 0.2);
+  assert.equal(result.body.seed, 42);
+  assert.deepEqual(result.body.response_format, { type: "json_object" });
+  assert.equal(result.body.tool_choice, "auto");
+}
+
+function testSamplingParamsOmittedWhenAbsent(): void {
+  const chatId = "v2-ccccccccccccccccccccccccccccccce";
+  const result = chatRequest.buildV2RequestBody(request(chatId, [user("hi")]), session);
+  assert.equal(result.body.temperature, undefined);
+  assert.equal(result.body.top_p, undefined);
+  assert.equal(result.body.tool_choice, undefined);
+}
+
 // ---------------------------------------------------------------------------
-// v2 专有行为：max_tokens clamp / 上游恒流式 / forceResync 折叠 / 显式 tool_results
+// v2 专有行为：max_tokens clamp / 上游恒流式
 // ---------------------------------------------------------------------------
 
 function testMaxTokensClampedToLimit(): void {
@@ -308,45 +348,36 @@ function testUpstreamStreamAlwaysTrue(): void {
   assert.equal(result.body.stream, true, "上游请求应始终 stream:true（非流式客户端由聚合路径处理）");
 }
 
-function testForceResyncFoldsToSingleUserMessage(): void {
-  const chatId = "v2-ffffffffffffffffffffffffffffffff";
-  const prefix = [user("old"), assistant("old answer")];
-  seedChain(chatId, prefix, assistant("new answer"));
+function testVerbatimPassthroughIncludesSystemAndToolMessages(): void {
+  const chatId = "v2-888888888888888888888888888888";
+  const longSystem = "S".repeat(50000);
+  const history: OpenAIChatMessage[] = [
+    { role: "system", content: longSystem, refusal: null },
+    user("first"),
+    assistantWithToolCall(null as unknown as string, "call_x", "Bash"),
+    tool("tool output", "call_x"),
+    user("next"),
+  ];
 
-  const result = chatRequest.buildV2RequestBody(
-    request(chatId, [...prefix, assistant("new answer"), user("next")]),
-    session,
-    { forceResync: true },
-  );
-
-  assert.equal(result.divergence, "middle-damage");
+  const result = chatRequest.buildV2RequestBody(request(chatId, history), session);
   const msgs = messagesOf(result.body);
-  assert.equal(msgs.length, 1, "forceResync 逃生通道：折叠为单条 user 消息");
-  assert.equal(msgs[0].role, "user");
+
+  assert.equal(msgs.length, history.length, "上游 messages 条数必须与客户端一致");
+  assert.equal(msgs[0].role, "system", "system 角色应保留");
+  assert.equal(msgs[0].content, longSystem, "超长 system 不得被截断");
+  assert.equal(msgs[2].role, "assistant");
+  assert.ok(Array.isArray(msgs[2].tool_calls), "assistant tool_calls 原样保留");
+  assert.equal(msgs[3].role, "tool");
+  assert.equal(msgs[3].content, "tool output");
+  assert.equal(msgs[4].content, "next");
+  for (const msg of msgs) {
+    assert.ok(
+      !String(msg.content ?? "").includes("[continuation]"),
+      "不得向历史注入续接指令",
+    );
+  }
 }
 
-function testExplicitToolResultsAppendedAsToolMessages(): void {
-  const chatId = "v2-10101010101010101010101010101010";
-  const result = chatRequest.buildV2RequestBody(
-    {
-      ...request(chatId, [user("next")]),
-      codearts: {
-        chat_id: chatId,
-        tool_results: [{ toolCallId: "c1", name: "find_path", status: "success", result: "ok" }],
-      },
-    },
-    session,
-  );
-
-  const msgs = messagesOf(result.body);
-  // 全量透传 [user("next")] + 合成 [assistant(tool_calls), tool(result)]
-  assert.equal(msgs.length, 3, "显式 tool_results 应合成为工具消息对附加");
-  assert.equal(msgs[1].role, "assistant");
-  assert.ok(Array.isArray(msgs[1].tool_calls));
-  assert.equal(msgs[2].role, "tool");
-  assert.equal(msgs[2].tool_call_id, "c1");
-  assert.equal(msgs[2].content, "ok");
-}
 
 // ---------------------------------------------------------------------------
 // Run
@@ -364,9 +395,10 @@ testSubAgentFiltersTools();
 testToolsForwardedWhenProvided();
 testToolsOmittedWhenAbsent();
 testMaxTokensOverride();
+testSamplingParamsForwarded();
+testSamplingParamsOmittedWhenAbsent();
 testMaxTokensClampedToLimit();
 testUpstreamStreamAlwaysTrue();
-testForceResyncFoldsToSingleUserMessage();
-testExplicitToolResultsAppendedAsToolMessages();
+testVerbatimPassthroughIncludesSystemAndToolMessages();
 
 console.log("All v2 request body tests passed.");

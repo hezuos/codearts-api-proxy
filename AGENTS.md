@@ -75,12 +75,12 @@ src/
 
 - **三路径 Token 刷新降级链**: OAuth2 refresh → AK/SK 签名 → legacy refresh_token
 - **per-session 刷新调度**: 每个 session 独立调度，基于 expiresAt 精准计算（过期前 2h + 随机抖动）
-- **错误恢复**: 上游错误时合成 tool_call 继续对话（`chat-recovery.ts`）
+- **错误如实上报**: 上游错误直接映射为错误响应或 SSE error 事件，不合成工具调用、不伪造续传。
 - **模型缓存三级降级**: agent-center API → 文件缓存(1h TTL) → 静态列表
 - **SSE 畸形行容错**: 跳过而非断开整个流
 - **Admin 会话令牌每次重启随机生成**: 防止 cookie 伪造
-- **全量上下文折叠注入（缓存未命中）**: 当无 `parent_message_id` 且内存 Map 未命中时，将完整对话历史折叠为带 role 标记的单条 text 注入上游（`foldFullConversation`），由 `FULL_CONTEXT_INJECTION_ENABLED` 控制（默认 false）。子代理永不注入；工具续传路径不受影响。
-- **热链分叉修复**: `CHAIN_DIVERGENCE_REPAIR_ENABLED` 开启后，校验客户端消息前缀与完整尾部结构；正常尾部增量续传，尾部链分叉只补发缺失尾部，中段损伤或无法确认时全量重置。`MISSING_CONTEXT_HINT` 控制补发提示词，`FULL_CONTEXT_MAX_CHARS`/`FULL_CONTEXT_MAX_CHARS_BY_MODEL` 控制折叠长度。详见 `docs/spike-full-context-injection.md` 与 `openspec/changes/warm-switch-context-repair/`。
+- **链分叉仅分类**: 分叉检测只用于日志与缓存估算，不改写历史、不触发修复重试。代理不做上下文压缩/折叠，历史逐字透传；超限（`ChatAgent.00001216` / HTTP 413）返回 `context_length_exceeded`，由客户端自行压缩。
+- **上游并发闸门**: v2 上游按**华为账号**限制 3 个并发会话（超出返回 HTTP 400 / `TM.00001041`），且该计数是账号级共享的 —— 官方 IDE、其他客户端同样占用，代理看不到外部在途数。官方客户端发送的 `x-session-affinity` 在该通道实测无效，它靠「同一会话本地拒绝并发」把在途数压到 1。代理侧按 `providerAccountId` FIFO 排队（`UPSTREAM_MAX_CONCURRENCY`，默认 3），撞限时自动下调有效上限至 `UPSTREAM_MIN_CONCURRENCY`（默认 1），连续 `UPSTREAM_CONCURRENCY_RECOVER_MS` 无撞限后逐级恢复；`UPSTREAM_QUEUE_WAIT_TIMEOUT_MS` 控制排队超时，`UPSTREAM_CONCURRENCY_RETRY_MAX` / `UPSTREAM_CONCURRENCY_RETRY_DELAY_MS` 控制撞限重试。被放弃的上游流会立即 `destroy()` 释放槽位。
 - **v2 通道（OpenAI 兼容）**: 所有模型请求统一走 `${HUAWEI_CHAT_HOST}${HUAWEI_V2_CHAT_PATH}`（默认 `/api/v2/chat/completions`），不再使用 CodeArts 原生 `/v1/chat/chat`。该通道是唯一支持 `glm-5.3` 的通道，且默认返回 `reasoning_content`（thinking）。请求体为 OpenAI 兼容形状（`model`/`max_tokens`/`tool_stream`/`stream`/`messages`/`tools`），无 `parent_message_id`，续传完全依赖链状态与客户端回传历史。子代理字段（`isSubAgent`/`subAgent_type`/`subAgent_prompt`）直接透传。详见 `openspec/changes/add-v2-chat-channel/`。
 
 ## COMMANDS

@@ -34,43 +34,35 @@ export interface AppConfig {
   /** Model list cache TTL in seconds (default: 300 = 5 minutes) */
   modelCacheTtl: number;
   /**
-   * Whether full-context injection is enabled on cache miss (default: false).
-   * When enabled, the proxy folds the complete client message history into a
-   * single text message and injects it upstream instead of forwarding only the
-   * last user message. See docs/spike-full-context-injection.md for the spike
-   * validation and openspec/changes/full-context-injection-on-cache-miss/design.md
-   * for the design (D1 trigger conditions, D2 fold format, D3 truncation).
-   */
-  fullContextInjectionEnabled: boolean;
-  /**
-   * Maximum character budget for the folded full-context injection text (default: 8000).
-   * Conservative default aligns with the smallest observed upstream context window
-   * (openpangu-2.0-flash ~9K tokens). Override per model via
-   * FULL_CONTEXT_MAX_CHARS_BY_MODEL JSON env var, e.g.
-   * `{"GLM-5.2":500000,"openpangu-2.0-pro":180000}`.
-   * See docs/spike-full-context-injection.md §3 for measured per-model limits.
-   */
-  fullContextMaxChars: number;
-  /**
-   * Per-model overrides for fullContextMaxChars (JSON map of model_id → char budget).
-   * Empty object = use fullContextMaxChars for all models.
-   */
-  fullContextMaxCharsByModel: Record<string, number>;
-  /** Whether warm-chain divergence repair is enabled. */
-  chainDivergenceRepairEnabled: boolean;
-  /**
    * Upstream CodeArts hard limit on cumulative prompt length in tokens (default: 196608).
    * Requests exceeding this trigger ChatAgent.00001216. Used for logging/docs only.
    */
   upstreamPromptTokenLimit: number;
   /**
-   * Proactive chain reset threshold in tokens (default: 180000).
-   * When getLastPromptTokens(chatId) exceeds this on a normal hot-chain continuation,
-   * the proxy proactively resets (folds full context, clears parent) to avoid hitting
-   * upstreamPromptTokenLimit. Must be < upstreamPromptTokenLimit.
+   * Maximum concurrent upstream chat requests per provider account (default: 3).
+   * CodeArts rejects the 4th in-flight request for one account with HTTP 400 /
+   * TM.00001041 ("并发会话数已达上限(3个)"). 0 disables the local gate.
    */
-  upstreamPromptTokenResetThreshold: number;
-  missingContextHint: string;
+  upstreamMaxConcurrency: number;
+  /**
+   * Maximum time a request may wait for an upstream slot (default: 120000ms).
+   * 0 waits forever (until the client aborts).
+   */
+  upstreamQueueWaitTimeoutMs: number;
+  /** Retries when upstream reports the concurrent-session limit (default: 2). */
+  upstreamConcurrencyRetryMax: number;
+  /** Base backoff for concurrent-session retries in milliseconds (default: 1500). */
+  upstreamConcurrencyRetryDelayMs: number;
+  /**
+   * Lower bound for the adaptive per-account concurrency limit (default: 1).
+   * 撞限后有效上限逐级下调，最低降到该值。
+   */
+  upstreamMinConcurrency: number;
+  /**
+   * 连续无撞限多久后逐级恢复有效上限（默认 60000ms）。
+   * 槽位是账号级共享的（官方 IDE / 其他客户端也会占用），无法预先感知。
+   */
+  upstreamConcurrencyRecoverMs: number;
 }
 
 function requireEnv(name: string, fallback?: string, hint?: string): string {
@@ -120,42 +112,18 @@ export const config: AppConfig = {
   huaweiAgentId:
     process.env.HUAWEI_AGENT_ID ?? "", // empty = derive from isInnerVersion
   modelCacheTtl: Number(process.env.MODEL_CACHE_TTL ?? 300),
-  fullContextInjectionEnabled:
-    (process.env.FULL_CONTEXT_INJECTION_ENABLED ?? "false") === "true",
-  fullContextMaxChars: Number(process.env.FULL_CONTEXT_MAX_CHARS ?? 8000),
-  fullContextMaxCharsByModel: parseMaxCharsByModel(
-    process.env.FULL_CONTEXT_MAX_CHARS_BY_MODEL ?? "",
-  ),
-  chainDivergenceRepairEnabled:
-    (process.env.CHAIN_DIVERGENCE_REPAIR_ENABLED ?? "false") === "true",
   upstreamPromptTokenLimit: Number(process.env.UPSTREAM_PROMPT_TOKEN_LIMIT ?? 196608),
-  upstreamPromptTokenResetThreshold: Number(
-    process.env.UPSTREAM_PROMPT_TOKEN_RESET_THRESHOLD ?? 180000,
+  upstreamMaxConcurrency: Number(process.env.UPSTREAM_MAX_CONCURRENCY ?? 3),
+  upstreamQueueWaitTimeoutMs: Number(process.env.UPSTREAM_QUEUE_WAIT_TIMEOUT_MS ?? 120_000),
+  upstreamConcurrencyRetryMax: Number(process.env.UPSTREAM_CONCURRENCY_RETRY_MAX ?? 2),
+  upstreamConcurrencyRetryDelayMs: Number(
+    process.env.UPSTREAM_CONCURRENCY_RETRY_DELAY_MS ?? 1500,
   ),
-  missingContextHint:
-    process.env.MISSING_CONTEXT_HINT ?? "[以下为补传的历史对话上下文，仅作参考，非用户新请求]",
+  upstreamMinConcurrency: Number(process.env.UPSTREAM_MIN_CONCURRENCY ?? 1),
+  upstreamConcurrencyRecoverMs: Number(
+    process.env.UPSTREAM_CONCURRENCY_RECOVER_MS ?? 60_000,
+  ),
 };
-
-/**
- * Parse the FULL_CONTEXT_MAX_CHARS_BY_MODEL JSON env var into a model_id → char budget map.
- * Returns empty object on missing/invalid input (falls back to fullContextMaxChars for all models).
- */
-function parseMaxCharsByModel(raw: string): Record<string, number> {
-  if (!raw.trim()) return {};
-  try {
-    const parsed = JSON.parse(raw);
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
-    const result: Record<string, number> = {};
-    for (const [key, value] of Object.entries(parsed)) {
-      if (typeof value === "number" && Number.isFinite(value) && value > 0) {
-        result[key] = Math.floor(value);
-      }
-    }
-    return result;
-  } catch {
-    return {};
-  }
-}
 
 /** Whether the process is running in production mode. */
 export const isProduction = config.nodeEnv === "production";
@@ -168,6 +136,33 @@ export const rateLimitChatMax = Number(process.env.RATE_LIMIT_CHAT_MAX ?? 60);
 
 /** Rate limit: max model list requests per window per API key. */
 export const rateLimitModelsMax = Number(process.env.RATE_LIMIT_MODELS_MAX ?? 120);
+
+/** Rate limit: max requests per window per source IP, covering routes without a dedicated limiter. */
+export const rateLimitGlobalMax = Number(process.env.RATE_LIMIT_GLOBAL_MAX ?? 300);
+
+function hostnameOf(url: string): string | null {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 回调 `redirect` 参数允许的主机白名单（开放重定向防护，CWE-601）。
+ * 默认包含华为云重定向主机与本地回环地址（IDE 本地回调），
+ * 可通过 `REDIRECT_ALLOWED_HOSTS` 追加（逗号分隔）。
+ */
+export const redirectAllowedHosts = new Set<string>(
+  [
+    hostnameOf(config.huaweiRedirectHost),
+    "127.0.0.1",
+    "localhost",
+    ...(process.env.REDIRECT_ALLOWED_HOSTS ?? "")
+      .split(",")
+      .map((host) => host.trim().toLowerCase()),
+  ].filter((host): host is string => !!host),
+);
 
 /** Upstream HTTPS request timeout in milliseconds (default: 120s). */
 export const upstreamTimeoutMs = Number(process.env.UPSTREAM_TIMEOUT_MS ?? 120_000);

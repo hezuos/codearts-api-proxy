@@ -1,5 +1,41 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- 上游并发闸门：按 `providerAccountId` FIFO 排队（`UPSTREAM_MAX_CONCURRENCY`，默认 3），并对 HTTP 400 / `TM.00001041`（并发会话数已达上限）做指数退避重试；超限时向客户端返回 429 + `Retry-After`。
+- 撞限自适应：3 个槽位是账号级共享的（官方 IDE / 其他客户端同样占用），代理观察不到外部在途数。因此撞限时将该账号的有效并发上限逐级下调（最低 `UPSTREAM_MIN_CONCURRENCY`），连续 `UPSTREAM_CONCURRENCY_RECOVER_MS` 无撞限后逐级恢复。
+- 上游流被放弃（重试/中断）时立即 `destroy()` 连接，释放上游会话槽位。
+
+### Fixed
+- 上游响应只发 `close`（不发 `end`/`error`）时，SSE 迭代器会永久挂起，导致闸门槽位泄漏且客户端请求悬挂；现监听 `close` 并唤醒等待者。
+
+### Changed
+- 移除 v1（CodeArts 原生 `/v1/chat/chat`）请求构造及其折叠/注入逻辑；v2 仅全量透传客户端 messages。
+- 移除 `FULL_CONTEXT_INJECTION_ENABLED`、`MISSING_CONTEXT_HINT`，以及 `codearts.parent_message_id` / `codearts.tool_results` 等 v1 输入字段。
+- 上下文超限（`ChatAgent.00001216` / HTTP 413）改为返回 OpenAI 兼容错误 `context_length_exceeded`（HTTP 400），由客户端自行压缩；不再重试或改写历史。
+
+### Removed
+- **BREAKING** 移除折叠与截断机制：历史一律逐字透传，不再改写、压缩或丢弃消息。
+- **BREAKING** 移除 `forceResync` 合成工具调用（含让客户端执行 `echo codearts::forceResync` 的假调用）及其注册表、检测与毒离逻辑。
+- **BREAKING** 移除主动重置（基于累计 token 阈值触发压缩）与相关提示消息。
+- **BREAKING** 移除链分叉修复与全量重置重试，分叉仅用于日志与缓存估算。
+- **BREAKING** 删除环境变量 `FULL_CONTEXT_MAX_CHARS`、`FULL_CONTEXT_MAX_CHARS_BY_MODEL`、`UPSTREAM_PROMPT_TOKEN_RESET_THRESHOLD`、`CHAIN_DIVERGENCE_REPAIR_ENABLED`。
+- 使用侧需同步：把客户端声明的模型窗口调到接近上游真实上限（约 18 万 token），由客户端负责上下文管理。
+
+## [2.4.3] - 2026-10-23
+
+### Fixed
+- 非流式响应的 `tool_calls` 被拆成多个调用（`name` 为 `unknown`、参数碎片化）：v2 上游即使 `stream=false` 仍以 SSE 分片下发工具调用，现按 `index` 累加合并后再返回。
+
+### Security
+- 修复 6 个 Dependabot 依赖漏洞（`pnpm-workspace.yaml` overrides 强制提升传递依赖至补丁版本）：`proxy-addr` ^2.0.8（critical，runtime）、`brace-expansion` ^5.0.10（high，dev）、`ip-address` ^10.7.1（medium ×2，runtime）、`qs` ^6.16.0（medium ×2，runtime）。
+
+## [2.4.2] - 2026-10-23
+
+### Fixed
+- 修正 middle-damage 场景测试断言（语义反转为「静默」）与 T17 旁路透传消息数断言。
+
 ## [2.4.1] - 2026-10-23
 
 ### Changed

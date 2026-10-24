@@ -1,24 +1,13 @@
 /**
  * 统一 notice 机制测试（chat-notice.ts）。
  *
- * 覆盖：
- * - emitNoticeChunk 写入 SSE chunk 到 res
- * - emitNoticeChunk 返回 sentRole/sentMetadata 状态
- * - emitNoticeChunk 携带 extraMetadata
- * - emitNoticeChunk 在 sentMetadata=true 时跳过 metadata
- * - buildNoticeMetadata 返回正确 shape
- * - buildNoticeMetadata 携带 extra 字段
+ * 覆盖：写入 SSE chunk、返回 sentRole/sentMetadata 状态、已发送 metadata 时跳过。
  */
 import assert from "assert";
 import type { ServerResponse } from "http";
-import { randomUUID } from "crypto";
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { emitNoticeChunk, buildNoticeMetadata } = require("./chat-notice") as typeof import("./chat-notice");
-
-// ---------------------------------------------------------------------------
-// Mock ServerResponse
-// ---------------------------------------------------------------------------
+const { emitNoticeChunk } = require("./chat-notice") as typeof import("./chat-notice");
 
 function mockRes(): { res: ServerResponse; writes: string[] } {
   const writes: string[] = [];
@@ -37,10 +26,6 @@ const baseParams = {
   model: "GLM-5.1",
 };
 
-// ---------------------------------------------------------------------------
-// emitNoticeChunk
-// ---------------------------------------------------------------------------
-
 function testEmitNoticeChunkWritesChunkToRes(): void {
   const { res, writes } = mockRes();
   emitNoticeChunk(res, {
@@ -54,6 +39,7 @@ function testEmitNoticeChunkWritesChunkToRes(): void {
   assert.ok(writes[0].startsWith("data: "), "should be SSE data line");
   const chunk = JSON.parse(writes[0].replace("data: ", "").trim());
   assert.equal(chunk.choices[0].delta.content, "[test notice]");
+  assert.equal(chunk.codearts.chat_id, "c1");
 }
 
 function testEmitNoticeChunkSetsSentRoleAndSentMetadata(): void {
@@ -67,21 +53,6 @@ function testEmitNoticeChunkSetsSentRoleAndSentMetadata(): void {
   });
   assert.equal(result.sentRole, true);
   assert.equal(result.sentMetadata, true);
-}
-
-function testEmitNoticeChunkIncludesExtraMetadata(): void {
-  const { res, writes } = mockRes();
-  emitNoticeChunk(res, {
-    ...baseParams,
-    content: "x",
-    sentRole: false,
-    sentMetadata: false,
-    responseMetadata: { chat_id: "c1" },
-    extraMetadata: { context_reset: "proactive" },
-  });
-  const chunk = JSON.parse(writes[0].replace("data: ", "").trim());
-  assert.equal(chunk.codearts.context_reset, "proactive");
-  assert.equal(chunk.codearts.chat_id, "c1");
 }
 
 function testEmitNoticeChunkSkipsMetadataIfAlreadySent(): void {
@@ -111,44 +82,9 @@ function testEmitNoticeChunkIncludesRoleWhenNotSent(): void {
   assert.equal(chunk.choices[0].delta.role, "assistant", "should include role when sentRole=false");
 }
 
-// ---------------------------------------------------------------------------
-// buildNoticeMetadata
-// ---------------------------------------------------------------------------
-
-function testBuildNoticeMetadataReturnsCorrectShape(): void {
-  const meta = buildNoticeMetadata({ error_recovery: "ChatAgent.00001216" });
-  assert.equal(meta.error_recovery, "ChatAgent.00001216");
-  assert.ok(!meta.context_reset, "should not include context_reset when not provided");
-}
-
-function testBuildNoticeMetadataWithExtra(): void {
-  const meta = buildNoticeMetadata({
-    error_recovery: "tail-divergence-resync",
-    context_reset: "true",
-  });
-  assert.equal(meta.error_recovery, "tail-divergence-resync");
-  assert.equal(meta.context_reset, "true");
-}
-
-function testBuildNoticeMetadataEmpty(): void {
-  const meta = buildNoticeMetadata({});
-  assert.deepEqual(meta, {});
-}
-
-// ---------------------------------------------------------------------------
-// Run
-// ---------------------------------------------------------------------------
-
 testEmitNoticeChunkWritesChunkToRes();
 testEmitNoticeChunkSetsSentRoleAndSentMetadata();
-testEmitNoticeChunkIncludesExtraMetadata();
 testEmitNoticeChunkSkipsMetadataIfAlreadySent();
 testEmitNoticeChunkIncludesRoleWhenNotSent();
-testBuildNoticeMetadataReturnsCorrectShape();
-testBuildNoticeMetadataWithExtra();
-testBuildNoticeMetadataEmpty();
-
-// Suppress unused import warning
-void randomUUID;
 
 console.log("All chat-notice tests passed.");

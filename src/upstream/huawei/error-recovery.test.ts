@@ -1,13 +1,12 @@
 /**
- * 错误恢复测试（chat.ts HTTP/SSE 00001216 恢复）。
+ * 上游错误映射测试：上下文超限（ChatAgent.00001216 / HTTP 413）必须映射为
+ * 明确的 context_length_exceeded 错误，且不得重试或用改写后的历史重发。
  *
- * 通过劫持 require.cache 替换 httpsPost，模拟上游 00001216 错误 + forceResync 成功。
+ * 通过劫持 require.cache 替换 httpsPost 模拟上游响应。
  */
 import assert from "assert";
-
-// ---------------------------------------------------------------------------
-// Mock httpsPost via require.cache
-// ---------------------------------------------------------------------------
+import type { OpenAIChatMessage, OpenAIChatCompletionRequest } from "../../types/openai";
+import type { StoredHuaweiSession } from "../../auth/huawei/session-store";
 
 interface HttpsPostResult { status: number; stream: AsyncIterable<string> }
 type HttpsPostFn = (
@@ -17,7 +16,6 @@ type HttpsPostFn = (
   signal?: AbortSignal,
 ) => Promise<HttpsPostResult>;
 
-/** 模拟 SSE 事件流 */
 function sseStream(events: string[]): AsyncIterable<string> {
   return {
     [Symbol.asyncIterator]() {
@@ -34,37 +32,14 @@ function sseStream(events: string[]): AsyncIterable<string> {
   };
 }
 
-/** 成功 SSE 响应事件 */
-function successEvents(): string[] {
-  return [
-    `data: ${JSON.stringify({ chat_id: "test-chat", response_message_id: "resp-1", request_message_id: "req-1" })}\n`,
-    `data: ${JSON.stringify({ delta: { content: "Hello" } })}\n`,
-    `data: ${JSON.stringify({ delta: { content: " world" } })}\n`,
-    `data: ${JSON.stringify({ finish_reason: "stop", usage: { prompt_tokens: 100, completion_tokens: 10 } })}\n`,
-    "data: [DONE]\n",
-  ];
-}
-
-/** 00001216 SSE 错误事件 */
-function error00001216Events(): string[] {
-  return [
-    `data: ${JSON.stringify({ chat_id: "test-chat", response_message_id: "resp-1", request_message_id: "req-1" })}\n`,
-    `data: ${JSON.stringify({ error_code: "ChatAgent.00001216", error_msg: "Prompt length exceeds: 344632 must less than 196608" })}\n`,
-    "data: [DONE]\n",
-  ];
-}
-
 let mockHttpsPost: HttpsPostFn | null = null;
 let callCount = 0;
-const callBodies: string[] = [];
 
 function installMock(fn: HttpsPostFn): void {
   mockHttpsPost = fn;
   callCount = 0;
-  callBodies.length = 0;
 }
 
-// 劫持 chat-request 模块的 httpsPost
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const chatRequestModule = require("./chat-request");
 const originalHttpsPost = chatRequestModule.httpsPost;
@@ -72,7 +47,6 @@ Object.defineProperty(chatRequestModule, "httpsPost", {
   get: () => {
     return (urlStr: string, headers: Record<string, string>, body: string, signal?: AbortSignal) => {
       callCount++;
-      callBodies.push(body);
       if (mockHttpsPost) return mockHttpsPost(urlStr, headers, body, signal);
       return originalHttpsPost(urlStr, headers, body, signal);
     };
@@ -83,10 +57,10 @@ Object.defineProperty(chatRequestModule, "httpsPost", {
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { sendHuaweiChatRequest } = require("./chat") as typeof import("./chat");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const translate = require("./chat-translate") as typeof import("./chat-translate");
-import { createHash } from "crypto";
-import type { OpenAIChatMessage, OpenAIChatCompletionRequest } from "../../types/openai";
-import type { StoredHuaweiSession } from "../../auth/huawei/session-store";
+const { streamHuaweiChatToResponse } = require("./chat-stream") as typeof import("./chat-stream");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { sendErrorResponse } = require("../../routes/openai") as typeof import("../../routes/openai");
+import { UpstreamContextLengthError, isPromptLengthExceeded } from "../../utils/errors";
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { encryptString } = require("../../auth/crypto/encryption") as typeof import("../../auth/crypto/encryption");
@@ -102,157 +76,220 @@ const session = {
 function user(content: string): OpenAIChatMessage {
   return { role: "user", content, refusal: null };
 }
-function assistant(content: string): OpenAIChatMessage {
-  return { role: "assistant", content, refusal: null };
-}
-function hash(message: OpenAIChatMessage): string {
-  return createHash("sha256").update(translate.normalizeForChain(message)).digest("hex");
-}
 
-function seedChain(chatId: string, prefix: OpenAIChatMessage[], lastReply: OpenAIChatMessage): void {
-  const chain = translate.computeChainForMessages(prefix);
-  chatRequestModule.setChainState(chatId, {
-    prefixChain: chain.hash,
-    prefixLen: chain.length,
-    lastReplyHash: hash(lastReply),
-  });
-  chatRequestModule.setLastResponseMessageId(chatId, "parent-1");
-}
-
-function request(chatId: string, messages: OpenAIChatMessage[]): OpenAIChatCompletionRequest {
-  return { model: "GLM-5.1", messages, stream: false, codearts: { chat_id: chatId } };
+function request(chatId: string): OpenAIChatCompletionRequest {
+  return {
+    model: "glm-5.3",
+    messages: [user("hi")],
+    stream: false,
+    codearts: { chat_id: chatId },
+  };
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// 错误体识别
 // ---------------------------------------------------------------------------
 
-async function testNonStreaming00001216TriggersForceResyncRetry(): Promise<void> {
-  const chatId = "err-111111111111111111111111111111";
-  const prefix = [user("old"), assistant("old answer")];
-  const lastReply = assistant("new answer");
-  seedChain(chatId, prefix, lastReply);
+function testPromptLengthDetection(): void {
+  assert.equal(isPromptLengthExceeded('{"error_code":"ChatAgent.00001216"}'), true);
+  assert.equal(
+    isPromptLengthExceeded("ChatAgent.00001216: Prompt length exceeds: 344632 must less than 196608"),
+    true,
+  );
+  assert.equal(isPromptLengthExceeded("Prompt length exceeds limit"), true);
+  assert.equal(isPromptLengthExceeded("ChatAgent.00000042"), false);
+  assert.equal(isPromptLengthExceeded(undefined), false);
+}
 
-  let attempt = 0;
-  installMock(async () => {
-    attempt++;
-    if (attempt === 1) {
-      // 第一次：SSE 00001216 错误
-      return { status: 200, stream: sseStream(error00001216Events()) };
-    }
-    // 第二次（forceResync）：成功
-    return { status: 200, stream: sseStream(successEvents()) };
-  });
+// ---------------------------------------------------------------------------
+// HTTP 层映射
+// ---------------------------------------------------------------------------
 
-  const result = await sendHuaweiChatRequest(
-    request(chatId, [...prefix, lastReply, user("next")]),
+async function testHttp400PromptLengthMapsToContextLength(): Promise<void> {
+  installMock(async () => ({
+    status: 400,
+    stream: sseStream([
+      '{"error_code":"ChatAgent.00001216","error_msg":"Prompt length exceeds: 344632 must less than 196608"}',
+    ]),
+  }));
+
+  await assert.rejects(
+    sendHuaweiChatRequest(request("ctx-http-400"), session, "trace-ctx-400"),
+    (error: unknown) => {
+      assert.ok(error instanceof UpstreamContextLengthError, "应抛出 UpstreamContextLengthError");
+      assert.ok(error.message.includes("context length"), "message 应含 context length 字样");
+      return true;
+    },
+  );
+  assert.equal(callCount, 1, "上下文超限不得重试");
+}
+
+async function testHttp413MapsToContextLength(): Promise<void> {
+  installMock(async () => ({ status: 413, stream: sseStream([]) }));
+
+  await assert.rejects(
+    sendHuaweiChatRequest(request("ctx-http-413"), session, "trace-ctx-413"),
+    (error: unknown) => error instanceof UpstreamContextLengthError,
+  );
+  assert.equal(callCount, 1, "413 不得重试");
+}
+
+async function testOtherHttpErrorStaysGeneric(): Promise<void> {
+  installMock(async () => ({
+    status: 400,
+    stream: sseStream(['{"error_code":"SomeOther.0001","error_msg":"bad request"}']),
+  }));
+
+  await assert.rejects(
+    sendHuaweiChatRequest(request("ctx-http-other"), session, "trace-ctx-other"),
+    (error: unknown) => {
+      assert.ok(!(error instanceof UpstreamContextLengthError));
+      assert.ok(error instanceof Error && error.message.includes("HTTP 400"));
+      return true;
+    },
+  );
+  assert.equal(callCount, 1);
+}
+
+// ---------------------------------------------------------------------------
+// SSE 层映射
+// ---------------------------------------------------------------------------
+
+async function testSsePromptLengthMapsToContextLength(): Promise<void> {
+  installMock(async () => ({
+    status: 200,
+    stream: sseStream([
+      `data: ${JSON.stringify({ chat_id: "c1", response_message_id: "r1" })}\n`,
+      `data: ${JSON.stringify({ error_code: "ChatAgent.00001216", error_msg: "Prompt length exceeds: 344632 must less than 196608" })}\n`,
+      "data: [DONE]\n",
+    ]),
+  }));
+
+  await assert.rejects(
+    sendHuaweiChatRequest(request("ctx-sse-1216"), session, "trace-ctx-sse"),
+    (error: unknown) => error instanceof UpstreamContextLengthError,
+  );
+  assert.equal(callCount, 1, "SSE 上下文超限不得重试");
+}
+
+// ---------------------------------------------------------------------------
+// 客户端响应映射
+// ---------------------------------------------------------------------------
+
+interface MockRes {
+  headersSent: boolean;
+  writableEnded: boolean;
+  statusCode?: number;
+  body?: unknown;
+  chunks: string[];
+  ended: boolean;
+  status(code: number): MockRes;
+  json(payload: unknown): void;
+  write(chunk: string): boolean;
+  end(): void;
+  setHeader(): void;
+  flushHeaders(): void;
+}
+
+function mockRes(headersSent: boolean): MockRes {
+  const res: MockRes = {
+    headersSent,
+    writableEnded: false,
+    chunks: [],
+    ended: false,
+    status(code: number): MockRes {
+      res.statusCode = code;
+      return res;
+    },
+    json(payload: unknown): void {
+      res.body = payload;
+    },
+    write(chunk: string): boolean {
+      res.chunks.push(chunk);
+      return true;
+    },
+    end(): void {
+      res.ended = true;
+    },
+    setHeader(): void {
+      /* noop */
+    },
+    flushHeaders(): void {
+      res.headersSent = true;
+    },
+  };
+  return res;
+}
+
+function testNonStreamingErrorResponseIs400(): void {
+  const res = mockRes(false);
+  sendErrorResponse(
+    res as unknown as Parameters<typeof sendErrorResponse>[0],
+    new UpstreamContextLengthError("ChatAgent.00001216: too long"),
+  );
+  assert.equal(res.statusCode, 400);
+  const body = res.body as { error: { code: string; message: string; type: string } };
+  assert.equal(body.error.code, "context_length_exceeded");
+  assert.equal(body.error.type, "invalid_request_error");
+  assert.ok(body.error.message.toLowerCase().includes("context length"));
+}
+
+function testStreamingErrorResponseUsesErrorEvent(): void {
+  const res = mockRes(true);
+  sendErrorResponse(
+    res as unknown as Parameters<typeof sendErrorResponse>[0],
+    new UpstreamContextLengthError("ChatAgent.00001216: too long"),
+  );
+  assert.equal(res.statusCode, undefined, "已发送 headers 时无法改状态码");
+  const first = res.chunks[0] ?? "";
+  assert.ok(first.startsWith("data: "), "应以 SSE data 行下发");
+  const payload = JSON.parse(first.slice("data: ".length)) as { error: { code: string } };
+  assert.equal(payload.error.code, "context_length_exceeded");
+  assert.ok(res.chunks.some((c) => c.includes("[DONE]")), "结束时应发送 [DONE]");
+  assert.equal(res.ended, true);
+}
+
+async function testStreamingInStreamPromptLengthEmitsErrorEvent(): Promise<void> {
+  installMock(async () => ({
+    status: 200,
+    stream: sseStream([
+      `data: ${JSON.stringify({ chat_id: "c1", response_message_id: "r1" })}\n`,
+      `data: ${JSON.stringify({ error_code: "ChatAgent.00001216", error_msg: "Prompt length exceeds: 344632 must less than 196608" })}\n`,
+      "data: [DONE]\n",
+    ]),
+  }));
+
+  const res = mockRes(false);
+  await streamHuaweiChatToResponse(
+    { ...request("ctx-stream-inline"), stream: true },
     session,
-    "trace-1",
+    "trace-ctx-stream-inline",
+    res as unknown as Parameters<typeof streamHuaweiChatToResponse>[3],
   );
 
-  assert.equal(attempt, 2, "should retry once after 00001216");
-  assert.ok(result.choices[0].message.content?.includes("Hello world"), "should return successful content");
-}
-
-async function testNonStreaming00001216RetryAlsoFails(): Promise<void> {
-  const chatId = "err-222222222222222222222222222222";
-  const prefix = [user("old"), assistant("old answer")];
-  const lastReply = assistant("new answer");
-  seedChain(chatId, prefix, lastReply);
-
-  installMock(async () => {
-    // 每次都返回 00001216
-    return { status: 200, stream: sseStream(error00001216Events()) };
-  });
-
-  let threw = false;
-  try {
-    await sendHuaweiChatRequest(
-      request(chatId, [...prefix, lastReply, user("next")]),
-      session,
-      "trace-2",
-    );
-  } catch (e) {
-    threw = true;
-    assert.ok(
-      (e as Error).message.includes("ChatAgent.00001216"),
-      "should throw 00001216 error after retry also fails",
-    );
-  }
-  assert.equal(threw, true, "should throw (not infinite retry)");
-  assert.equal(callCount, 2, "should attempt exactly 2 times (original + 1 retry)");
-}
-
-async function testNonStreamingOtherErrorNotRetried(): Promise<void> {
-  const chatId = "err-333333333333333333333333333333";
-  const prefix = [user("old"), assistant("old answer")];
-  const lastReply = assistant("new answer");
-  seedChain(chatId, prefix, lastReply);
-
-  installMock(async () => {
-    // 返回非 00001216 错误
-    return {
-      status: 200,
-      stream: sseStream([
-        `data: ${JSON.stringify({ chat_id: chatId, response_message_id: "r1", request_message_id: "q1" })}\n`,
-        `data: ${JSON.stringify({ error_code: "SOME_OTHER_ERROR", error_msg: "something else" })}\n`,
-        "data: [DONE]\n",
-      ]),
-    };
-  });
-
-  let threw = false;
-  try {
-    await sendHuaweiChatRequest(
-      request(chatId, [...prefix, lastReply, user("next")]),
-      session,
-      "trace-3",
-    );
-  } catch (e) {
-    threw = true;
-    assert.ok((e as Error).message.includes("SOME_OTHER_ERROR"), "should throw original error");
-  }
-  assert.equal(threw, true, "should throw without retry");
-  assert.equal(callCount, 1, "should attempt only once (no retry for non-00001216)");
-}
-
-async function testNonStreamingHttp00001216TriggersRetry(): Promise<void> {
-  const chatId = "err-444444444444444444444444444444";
-  const prefix = [user("old"), assistant("old answer")];
-  const lastReply = assistant("new answer");
-  seedChain(chatId, prefix, lastReply);
-
-  let attempt = 0;
-  installMock(async () => {
-    attempt++;
-    if (attempt === 1) {
-      // HTTP 错误，body 含 00001216
-      return { status: 500, stream: sseStream(["ChatAgent.00001216: Prompt length exceeds"]) };
-    }
-    return { status: 200, stream: sseStream(successEvents()) };
-  });
-
-  const result = await sendHuaweiChatRequest(
-    request(chatId, [...prefix, lastReply, user("next")]),
-    session,
-    "trace-4",
+  const output = res.chunks.join("");
+  assert.ok(
+    output.includes('"code":"context_length_exceeded"'),
+    "流内超限应下发 context_length_exceeded 错误事件",
   );
-
-  assert.equal(attempt, 2, "should retry after HTTP 00001216");
-  assert.ok(result.choices[0].message.content?.includes("Hello world"), "should succeed on retry");
+  assert.ok(!output.includes("finish_reason\":\"stop"), "终态错误后不再补 finish chunk");
+  assert.ok(output.includes("[DONE]"), "应正常结束流");
+  assert.equal(res.ended, true);
 }
 
-// ---------------------------------------------------------------------------
-// Run
-// ---------------------------------------------------------------------------
+async function run(): Promise<void> {
+  testPromptLengthDetection();
+  await testHttp400PromptLengthMapsToContextLength();
+  await testHttp413MapsToContextLength();
+  await testOtherHttpErrorStaysGeneric();
+  await testSsePromptLengthMapsToContextLength();
+  await testStreamingInStreamPromptLengthEmitsErrorEvent();
+  testNonStreamingErrorResponseIs400();
+  testStreamingErrorResponseUsesErrorEvent();
+  console.log("All context-length error mapping tests passed.");
+}
 
-(async () => {
-  await testNonStreaming00001216TriggersForceResyncRetry();
-  await testNonStreaming00001216RetryAlsoFails();
-  await testNonStreamingOtherErrorNotRetried();
-  await testNonStreamingHttp00001216TriggersRetry();
-  console.log("All error-recovery tests passed.");
-})().catch((e) => {
-  console.error(e);
-  process.exit(1);
+run().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
 });

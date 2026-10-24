@@ -55,6 +55,39 @@ export class UpstreamTimeoutError extends AppError {
   }
 }
 
+export class UpstreamConcurrencyError extends AppError {
+  public readonly retryAfterMs: number;
+
+  constructor(message: string, retryAfterMs = 0, traceId?: string) {
+    super(message, traceId);
+    this.name = "UpstreamConcurrencyError";
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+/**
+ * 上游因 prompt/上下文长度超限拒绝请求（HTTP 413 或 ChatAgent.00001216）。
+ * 代理不再改写历史，直接把这一语义透传给客户端，由其决定压缩或摘要。
+ */
+export class UpstreamContextLengthError extends AppError {
+  public readonly responseBody: string;
+
+  constructor(responseBody: string, traceId?: string) {
+    super(
+      `Upstream context length limit exceeded: ${responseBody.substring(0, 300)}`,
+      traceId,
+    );
+    this.name = "UpstreamContextLengthError";
+    this.responseBody = responseBody;
+  }
+}
+
+/** 判断上游错误体是否表示 prompt 长度超限。 */
+export function isPromptLengthExceeded(text: string | undefined): boolean {
+  if (!text) return false;
+  return text.includes("ChatAgent.00001216") || /prompt\s*length/i.test(text);
+}
+
 export class ProtocolError extends AppError {
   public readonly rawData?: string;
 

@@ -1,10 +1,10 @@
 import type { Request, Response } from "express";
 import { randomUUID } from "crypto";
-import { encryptString } from "../auth/crypto/encryption";
+import { encryptString, tryDecryptString } from "../auth/crypto/encryption";
 import { createHuaweiLoginFlow, type PKCEPair } from "../auth/huawei/login-flow";
 import { storeSession } from "../auth/huawei/session-store";
 import { scheduleSessionRefresh } from "../auth/huawei/refresh-task";
-import { config, isProduction } from "../config";
+import { config, isProduction, redirectAllowedHosts } from "../config";
 import { getRequestAuth } from "../middleware/authenticate-api-key";
 import { getTraceId } from "../middleware/request-context";
 import { logger } from "../utils/logger";
@@ -310,8 +310,42 @@ function getCallbackHost(req: Request): string {
   return `${req.protocol}://${req.get("host") ?? `127.0.0.1:${config.port}`}`;
 }
 
+/**
+ * 校验回调 `redirect` 参数（开放重定向防护，CWE-601）。
+ * 仅放行：
+ *   - 同源相对路径（单个 "/" 开头，拒绝 "//host" 协议相对写法）
+ *   - 白名单主机上的绝对 http(s) URL（华为云重定向主机 + 本地回环 + 环境变量扩展）
+ * 不合规时返回 undefined，调用方回退到本地完成页。
+ */
+function resolveSafeRedirect(target: string | undefined): string | undefined {
+  if (!target) return undefined;
+  const trimmed = target.trim();
+  if (!trimmed) return undefined;
+
+  if (trimmed.startsWith("/") && !trimmed.startsWith("//") && !trimmed.startsWith("/\\")) {
+    return trimmed;
+  }
+
+  try {
+    const url = new URL(trimmed);
+    if (
+      (url.protocol === "http:" || url.protocol === "https:") &&
+      redirectAllowedHosts.has(url.hostname.toLowerCase())
+    ) {
+      return trimmed;
+    }
+  } catch {
+    // 非法 URL —— 按不安全处理
+  }
+  logger.warn("[huawei-auth] rejected unsafe redirect target", {
+    redirect: maskValue(trimmed),
+  });
+  return undefined;
+}
+
 function setAuthKeyCookie(res: Response, apiKey: string): void {
-  res.cookie("auth_key", apiKey, {
+  // AES-256-GCM 加密后写入，避免明文 API Key 落在 cookie（CWE-312）；读取侧见 requireUiAuth。
+  res.cookie("auth_key", encryptString(apiKey), {
     httpOnly: true,
     secure: isProduction,
     sameSite: "lax",
@@ -320,7 +354,8 @@ function setAuthKeyCookie(res: Response, apiKey: string): void {
 }
 
 function setAuthKeyIdCookie(res: Response, apiKeyId: string): void {
-  res.cookie("auth_key_id", apiKeyId, {
+  // 同 auth_key：keyId 一并加密，保持 cookie 形态统一。
+  res.cookie("auth_key_id", encryptString(apiKeyId), {
     httpOnly: true,
     secure: isProduction,
     sameSite: "lax",
@@ -346,8 +381,10 @@ function clearBrowserLoginTicketCookie(res: Response): void {
 }
 
 function resolveBrowserLoginUserId(req: Request): string | null {
-  const cookieApiKey =
-    typeof req.cookies.auth_key === "string" ? req.cookies.auth_key : undefined;
+  // cookie 中的 API Key 为 AES-256-GCM 密文，需先解开再校验。
+  const cookieApiKey = tryDecryptString(
+    typeof req.cookies.auth_key === "string" ? req.cookies.auth_key : undefined,
+  );
   if (cookieApiKey) {
     const auth = validateApiKey(cookieApiKey);
     if (auth) {
@@ -716,7 +753,9 @@ export function finalizeBrowserHuaweiLogin(req: Request, res: Response): void {
   const redirectUrl = flow.apiKeyId
     ? `/success?keyId=${encodeURIComponent(flow.apiKeyId)}`
     : "/success";
-  res.json({ success: true, redirect_url: redirectUrl });
+  // api_key 直接随响应返回（与 cookie 同信任级：仅持票者可得），供 CLI 验证脚本获取密钥
+  // —— cookie 值已加密，无法再从 Set-Cookie 提取明文。
+  res.json({ success: true, redirect_url: redirectUrl, api_key: flow.apiKey });
 }
 
 export async function handleHuaweiCallback(
@@ -731,6 +770,8 @@ export async function handleHuaweiCallback(
   const identifier = typeof req.query.identifier === "string" ? req.query.identifier : undefined;
   const redirect =
     typeof req.query.redirect === "string" ? req.query.redirect : undefined;
+  // 开放重定向防护：仅放行相对路径与白名单主机（见 resolveSafeRedirect）。
+  const safeRedirect = resolveSafeRedirect(redirect);
   const preferredTicketId =
     typeof req.query.ticket_id === "string"
       ? req.query.ticket_id
@@ -805,9 +846,9 @@ export async function handleHuaweiCallback(
       `[huawei-auth] callback received ticketId=${maskValue(browserFlow.ticketId)} identifier=${maskValue(identifier)} redirect=${redirect ?? "missing"}`,
     );
 
-    startBrowserFlowExchange(browserFlow, identifier, redirect);
-    if (redirect) {
-      res.redirect(307, redirect);
+    startBrowserFlowExchange(browserFlow, identifier, safeRedirect);
+    if (safeRedirect) {
+      res.redirect(307, safeRedirect);
       return;
     }
 
@@ -840,11 +881,11 @@ export async function handleHuaweiCallback(
   loginFlows.set(apiFlow.ticketId, {
     ...apiFlow,
     identifier,
-    redirect,
+    redirect: safeRedirect,
   });
 
-  if (redirect) {
-    res.redirect(307, redirect);
+  if (safeRedirect) {
+    res.redirect(307, safeRedirect);
     return;
   }
 

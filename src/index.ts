@@ -13,11 +13,12 @@ import {
   setRefreshTaskEnabled,
 } from "./auth/huawei/refresh-task";
 import { loadAdminConfig } from "./auth/admin";
-import { config, rateLimitChatMax, rateLimitModelsMax, isDevEncryptionKey } from "./config";
+import { config, rateLimitChatMax, rateLimitModelsMax, rateLimitGlobalMax, isDevEncryptionKey } from "./config";
 import { authenticateApiKey } from "./middleware/authenticate-api-key";
 import { withRequestContext } from "./middleware/request-context";
 import { requireUiAuth } from "./middleware/authenticate-ui";
 import { requireAdminAuth } from "./middleware/authenticate-admin";
+import { issueCsrfCookie, verifyCsrfToken } from "./middleware/csrf";
 import {
   authorizeHuaweiLogin,
   initiateHuaweiLogin,
@@ -65,9 +66,21 @@ import { logger, closeLogger } from "./utils/logger";
 const app = express();
 
 app.use(cookieParser());
+// 双提交 CSRF：尽早下发 csrf_token cookie（可被前端 JS 读取），供 fetch 回传 x-csrf-token。
+app.use(issueCsrfCookie);
 app.use(express.json({ limit: config.requestBodyLimit }));
 app.use(express.static("public"));
 app.use(withRequestContext);
+
+// 全局 IP 限流：兜底覆盖所有无专用限流器的路由（/ready、OAuth 回调、Web UI、Admin 只读等）。
+// /v1/chat、/v1/models、/admin/login 等已有专用限流器的路由为双计数（全局 + 专用）。
+const globalLimiter = rateLimit({
+  windowMs: 60_000,
+  max: rateLimitGlobalMax,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use(globalLimiter);
 
 loadPersistedAuthStore();
 bootstrapDefaultAuth();
@@ -156,38 +169,41 @@ app.get("/success", requireUiAuth, successPage);
 app.get("/api/ui/account", requireUiAuth, getAccountInfo);
 app.get("/api/ui/status", requireUiAuth, getAccountStatus);
 app.get("/api/ui/login-result", requireUiAuth, getLoginResult);
-app.post("/api/ui/regenerate-key", requireUiAuth, regenerateApiKey);
+app.post("/api/ui/regenerate-key", requireUiAuth, verifyCsrfToken, regenerateApiKey);
 app.post(
   "/api/ui/accounts/:accountId/refresh",
   requireUiAuth,
+  verifyCsrfToken,
   refreshAccountToken,
 );
-app.delete("/api/ui/accounts/:accountId", requireUiAuth, unbindAccount);
+app.delete("/api/ui/accounts/:accountId", requireUiAuth, verifyCsrfToken, unbindAccount);
 app.post(
   "/api/ui/accounts/:accountId/default",
   requireUiAuth,
+  verifyCsrfToken,
   setDefaultAccount,
 );
 
 // Admin routes
 app.get("/admin/setup", adminSetupPage);
-app.post("/admin/setup", adminLimiter, adminSetup);
+app.post("/admin/setup", adminLimiter, verifyCsrfToken, adminSetup);
 app.get("/admin/login", adminLoginPage);
-app.post("/admin/login", adminLimiter, adminLogin);
-app.post("/admin/logout", adminLogout);
+app.post("/admin/login", adminLimiter, verifyCsrfToken, adminLogin);
+app.post("/admin/logout", verifyCsrfToken, adminLogout);
 app.get("/admin", requireAdminAuth, adminPanel);
 app.get("/admin/api/users", requireAdminAuth, getAllUsers);
 app.get("/admin/api/accounts", requireAdminAuth, getAllAccounts);
 app.get("/admin/api/accounts/:id", requireAdminAuth, getAccountDetails);
-app.post("/admin/api/keys/:id/revoke", requireAdminAuth, revokeApiKey);
-app.delete("/admin/api/keys/:id", requireAdminAuth, deleteApiKey);
-app.post("/admin/api/keys/:id/refresh", requireAdminAuth, refreshApiKey);
+app.post("/admin/api/keys/:id/revoke", requireAdminAuth, verifyCsrfToken, revokeApiKey);
+app.delete("/admin/api/keys/:id", requireAdminAuth, verifyCsrfToken, deleteApiKey);
+app.post("/admin/api/keys/:id/refresh", requireAdminAuth, verifyCsrfToken, refreshApiKey);
 app.post(
   "/admin/api/accounts/:id/refresh",
   requireAdminAuth,
+  verifyCsrfToken,
   forceRefreshAccount,
 );
-app.delete("/admin/api/accounts/:id", requireAdminAuth, deleteAccount);
+app.delete("/admin/api/accounts/:id", requireAdminAuth, verifyCsrfToken, deleteAccount);
 
 app.use(
   (

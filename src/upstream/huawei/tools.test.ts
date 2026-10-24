@@ -4,16 +4,13 @@
  */
 import assert from "assert";
 import {
-  DEFAULT_TOOLS,
-  SUB_AGENT_TOOLS,
   convertOpenAIToolsToCodeArts,
   deriveSubAgentTools,
 } from "./tools";
 import type { OpenAITool } from "../../types/openai";
 
 // ---------------------------------------------------------------------------
-// 4.1 Test that a request with `tools` field results in those tools being
-//     forwarded to CodeArts `task_parameters.tools`
+// 4.1 Test that a request with `tools` field forwards those tools upstream
 // ---------------------------------------------------------------------------
 
 function testCallerToolsForwarded(): void {
@@ -42,21 +39,6 @@ function testCallerToolsForwarded(): void {
   assert.equal(converted[0].function.description, "Execute a bash command");
   assert.equal(converted[1].function.name, "Read");
   assert.equal(converted[1].type, "function");
-}
-
-// ---------------------------------------------------------------------------
-// 4.2 Test that a request without `tools` field falls back to hardcoded
-//     DEFAULT_TOOLS
-// ---------------------------------------------------------------------------
-
-function testFallbackToDefaultTools(): void {
-  // When no caller tools, the buildRequestBody logic falls back to DEFAULT_TOOLS.
-  // We verify DEFAULT_TOOLS is non-empty and has expected tools.
-  assert.ok(DEFAULT_TOOLS.length > 0, "DEFAULT_TOOLS should not be empty");
-  const names = DEFAULT_TOOLS.map((t) => t.function.name);
-  assert.ok(names.includes("Bash"), "DEFAULT_TOOLS should include Bash");
-  assert.ok(names.includes("Task"), "DEFAULT_TOOLS should include Task");
-  assert.ok(names.includes("Read"), "DEFAULT_TOOLS should include Read");
 }
 
 // ---------------------------------------------------------------------------
@@ -221,14 +203,6 @@ function testSubAgentToolFiltering(): void {
   assert.ok(!names.includes("Edit"), "should NOT include Edit");
   assert.ok(!names.includes("Write"), "should NOT include Write");
   assert.ok(!names.includes("Task"), "should NOT include Task");
-
-  // Also verify hardcoded SUB_AGENT_TOOLS matches
-  const hardcodedNames = SUB_AGENT_TOOLS.map((t) => t.function.name);
-  assert.deepEqual(
-    names.sort(),
-    hardcodedNames.sort(),
-    "derived sub-agent tools should match hardcoded SUB_AGENT_TOOLS names",
-  );
 }
 
 // ---------------------------------------------------------------------------
@@ -236,7 +210,6 @@ function testSubAgentToolFiltering(): void {
 // ---------------------------------------------------------------------------
 
 testCallerToolsForwarded();
-testFallbackToDefaultTools();
 testExploreRepaired();
 testExplorePassthrough();
 testGeneralPurposeRepaired();

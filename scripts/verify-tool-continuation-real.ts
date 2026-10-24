@@ -22,7 +22,7 @@
  *   npm run verify:tool-continuation
  */
 
-import { exec } from "node:child_process";
+import { execFile } from "node:child_process";
 import { randomBytes } from "crypto";
 
 interface Message {
@@ -67,25 +67,20 @@ function sleep(ms: number): Promise<void> {
 // ---------------------------------------------------------------------------
 
 function openBrowser(url: string): void {
-  const cmd =
-    process.platform === "win32"
-      ? `start "" "${url}"`
-      : process.platform === "darwin"
-        ? `open "${url}"`
-        : `xdg-open "${url}"`;
-  exec(cmd, () => { /* 忽略打开失败 */ });
-}
-
-function extractAuthKeyFromSetCookie(res: Response): string | undefined {
-  const setCookies: string[] =
-    typeof res.headers.getSetCookie === "function"
-      ? res.headers.getSetCookie()
-      : [res.headers.get("set-cookie") ?? ""];
-  for (const cookie of setCookies) {
-    const match = /auth_key=([^;\s]+)/.exec(cookie);
-    if (match) return decodeURIComponent(match[1]);
+  // execFile 直接传参数数组、不经 shell —— 消除命令行注入面（CWE-78）。
+  if (process.platform === "win32") {
+    execFile("cmd", ["/c", "start", "", url], () => {
+      /* 忽略打开失败 */
+    });
+  } else if (process.platform === "darwin") {
+    execFile("open", [url], () => {
+      /* 忽略打开失败 */
+    });
+  } else {
+    execFile("xdg-open", [url], () => {
+      /* 忽略打开失败 */
+    });
   }
-  return undefined;
 }
 
 async function modelsOk(key: string): Promise<boolean> {
@@ -142,10 +137,15 @@ async function obtainApiKey(): Promise<string> {
   const finalize = await fetch(`${baseUrl}/auth/huawei/browser/finalize/${flow.ticket_id}`, {
     method: "POST",
   });
-  const key = extractAuthKeyFromSetCookie(finalize);
-  if (!key) {
+  // auth_key cookie 已改为加密存储；finalize 响应体直接返回 api_key（仅持票者可得）。
+  if (!finalize.ok) {
     const raw = await finalize.text();
-    throw new Error(`登录完成但 finalize 未返回 auth_key: HTTP ${finalize.status} ${raw.slice(0, 300)}`);
+    throw new Error(`登录完成但 finalize 失败: HTTP ${finalize.status} ${raw.slice(0, 300)}`);
+  }
+  const finalizeBody = (await finalize.json()) as { api_key?: string };
+  const key = finalizeBody.api_key;
+  if (!key) {
+    throw new Error("登录完成但 finalize 未返回 api_key");
   }
   console.log("已获取 API Key。");
   return key;

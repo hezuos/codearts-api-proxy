@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from "express";
 import { validateApiKey } from "../auth/store";
+import { tryDecryptString } from "../auth/crypto/encryption";
 
 export interface UiAuthContext {
   apiKeyId: string;
@@ -21,8 +22,10 @@ export function requireUiAuth(
   res: Response,
   next: NextFunction,
 ): void {
-  // Extract API key from cookie
-  const apiKey = req.cookies.auth_key;
+  // cookie 中的 API Key 为 AES-256-GCM 密文（见 huawei-auth.ts setAuthKeyCookie），需先解开再校验。
+  const apiKey = tryDecryptString(
+    typeof req.cookies.auth_key === "string" ? req.cookies.auth_key : undefined,
+  );
 
   if (!apiKey) {
     res.redirect("/");

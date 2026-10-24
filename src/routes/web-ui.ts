@@ -1,5 +1,6 @@
 import type { Request, Response } from "express";
 import { isProduction } from "../config";
+import { encryptString, tryDecryptString } from "../auth/crypto/encryption";
 import {
   getUser,
   listProviderAccounts,
@@ -48,7 +49,7 @@ export function getAccountInfo(req: Request, res: Response): void {
   const session = defaultKey ? getSession(defaultKey.id) : null;
 
   res.json({
-    apiKey: req.cookies.auth_key,
+    apiKey: tryDecryptString(req.cookies.auth_key),
     userName: defaultAccount?.providerUserName,
     domainId: defaultAccount?.domainId,
     accountId: defaultAccount?.providerUserId,
@@ -115,7 +116,7 @@ export function getAccountStatus(req: Request, res: Response): void {
   });
 
   res.json({
-    apiKey: req.cookies.auth_key,
+    apiKey: tryDecryptString(req.cookies.auth_key),
     user: {
       id: user?.id,
       email: user?.email,
@@ -138,8 +139,9 @@ export function regenerateApiKey(req: Request, res: Response): void {
 
   // Find the current active key to copy its session
   const existingKeys = listApiKeysByUser(auth.userId);
+  // uiAuth 来自 requireUiAuth 对加密 cookie 的解密校验，apiKeyId 即当前密钥。
   const currentKey = existingKeys.find(
-    (k) => !k.revokedAt && k.keyHash === req.cookies.auth_key,
+    (k) => k.id === auth.apiKeyId && !k.revokedAt,
   );
   const currentSession = currentKey
     ? getSessionByKeyId(currentKey.id)
@@ -173,8 +175,8 @@ export function regenerateApiKey(req: Request, res: Response): void {
     });
   }
 
-  // Update cookie
-  res.cookie("auth_key", newKey, {
+  // Update cookie（与登录一致：AES-256-GCM 加密后写入）
+  res.cookie("auth_key", encryptString(newKey), {
     httpOnly: true,
     secure: isProduction,
     sameSite: "lax",
@@ -309,7 +311,7 @@ export function getLoginResult(req: Request, res: Response): void {
     : null;
 
   res.json({
-    apiKey: req.cookies.auth_key,
+    apiKey: tryDecryptString(req.cookies.auth_key),
     account: account
       ? {
           id: account.id,

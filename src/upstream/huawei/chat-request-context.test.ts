@@ -8,10 +8,7 @@ import assert from "assert";
 import { createHash } from "crypto";
 import type { OpenAIChatMessage, OpenAIChatCompletionRequest } from "../../types/openai";
 
-process.env.CHAIN_DIVERGENCE_REPAIR_ENABLED = "true";
-process.env.FULL_CONTEXT_INJECTION_ENABLED = "true";
-
-// 配置必须在设置环境变量之后懒加载。
+// 配置必须在环境变量就绪后懒加载。
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const chatRequest = require("./chat-request") as typeof import("./chat-request");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -124,20 +121,21 @@ function testTailDivergenceStartsAtBoundaryWhenReplyMissing(): void {
   assert.ok(text.includes("external user"));
 }
 
-function testMiddleDamageResetsParent(): void {
+function testMiddleDamagePassesThrough(): void {
   const chatId = "44444444444444444444444444444444";
   const prefix = [user("old"), assistant("old answer")];
   const lastReply = assistant("new answer");
   seedChain(chatId, prefix, lastReply);
 
-  const result = chatRequest.buildRequestBody(
+  const result = chatRequest.buildV2RequestBody(
     request(chatId, [user("edited old"), assistant("old answer"), lastReply, user("current")]),
     session,
   );
 
   assert.equal(result.divergence, "middle-damage");
-  assert.equal(result.body.parent_message_id, "");
-  assert.ok(bodyText(result.body).includes("edited old"));
+  const msgs = result.body.messages as Array<{ role?: string; content?: string }>;
+  assert.equal(msgs.length, 4, "v2 中段损伤不折叠：全量透传");
+  assert.equal(msgs[0]?.content, "edited old");
 }
 
 function testUntraceableToolResetsParent(): void {
@@ -162,7 +160,7 @@ function testDuplicateRequestAutoRepairs(): void {
   seedChain(chatId, prefix, assistant("new answer"));
 
   // duplicate/stale 不应抛错导致用户无法继续对话（issue: 用户重试后永久卡死）。
-  // 应自动重置链并全量折叠重发当前历史。
+  // v2 无状态：直接全量透传重发，无副作用。
   const result = chatRequest.buildV2RequestBody(request(chatId, prefix), session);
   assert.ok(result, "buildV2RequestBody should not throw on duplicate/stale");
   assert.equal(result.divergence, "duplicate/stale");
@@ -175,7 +173,7 @@ function testDuplicateRequestAutoRepairs(): void {
 testNormalContinuation();
 testTailDivergenceSkipsParentReply();
 testTailDivergenceStartsAtBoundaryWhenReplyMissing();
-testMiddleDamageResetsParent();
+testMiddleDamagePassesThrough();
 testUntraceableToolResetsParent();
 testDuplicateRequestAutoRepairs();
 
@@ -214,9 +212,8 @@ function testT5BoundaryMatchesAfterEchoNormalized(): void {
     request(chatId, [...prefix, echo, tool("out", "call_1")]),
     session,
   );
-  // 纯工具段无 user → 仍 tail-divergence，但边界成立（suffixStart=prefixLen+1=3）
-  assert.equal(result.divergence, "tail-divergence");
-  assert.equal(result.suffixStart, 3);
+  // 纯工具段 → v2 工具续传旁路，不参与链分类
+  assert.equal(result.divergence, undefined, "尾部 tool → 工具续传旁路分类");
   const msgs = result.body.messages as Array<{ role?: string; content?: string }>;
   assert.equal(msgs.length, 4, "全量透传（含工具段）");
   assert.equal(msgs[3]?.role, "tool");
@@ -251,8 +248,7 @@ function testT8TailToolSegmentBoundaryMismatch(): void {
     request(chatId, [...prefix, external, { ...tool("file1", "call_1"), name: "find_path" }]),
     session,
   );
-  assert.equal(result.divergence, "tail-divergence");
-  assert.equal(result.suffixStart, 2);
+  assert.equal(result.divergence, undefined, "尾部 tool → 工具续传旁路分类");
   const msgs = result.body.messages as Array<{ role?: string; content?: string; tool_calls?: unknown }>;
   assert.equal(msgs.length, 4, "全量透传（含外部工具段）");
   assert.equal(msgs[2]?.role, "assistant");
@@ -272,8 +268,7 @@ function testT9TailToolOnlyBoundaryMatch(): void {
     request(chatId, [...prefix, echo, tool("out", "call_1")]),
     session,
   );
-  assert.equal(result.divergence, "tail-divergence");
-  assert.equal(result.suffixStart, 3);
+  assert.equal(result.divergence, undefined, "尾部 tool → 工具续传旁路分类");
   const msgs = result.body.messages as Array<{ role?: string; content?: string }>;
   assert.equal(msgs.length, 4, "全量透传（含工具段）");
   assert.equal(msgs[3]?.role, "tool");
@@ -311,37 +306,21 @@ function testT16ToolContinuationBypass(): void {
   const prefix = [user("old"), assistant("old answer")];
   seedChain(chatId, prefix, assistant("new answer"));
   const result = chatRequest.buildV2RequestBody(
-    {
-      ...request(chatId, [...prefix, user("next")]),
-      codearts: {
-        chat_id: chatId,
-        tool_results: [{ toolCallId: "c1", name: "find_path", status: "success", result: "ok" }],
-      },
-    },
+    request(chatId, [
+      ...prefix,
+      assistantWithToolCallMsg("new answer", "find_path", "function"),
+      tool("ok", "call_1"),
+    ]),
     session,
   );
+  assert.equal(result.isToolContinuation, true, "尾部 tool 消息应识别为工具续传");
   assert.equal(result.divergence, undefined, "tool continuation 旁路，不参与分类");
   const msgs = result.body.messages as Array<{ role?: string }>;
-  assert.equal(msgs.length, 5, "显式 tool_results 合成工具消息对附加到透传历史");
-  assert.equal(msgs[3]?.role, "assistant");
-  assert.equal(msgs[4]?.role, "tool");
+  assert.equal(msgs.length, 4, "工具续传全量透传");
+  assert.equal(msgs[2]?.role, "assistant");
+  assert.equal(msgs[3]?.role, "tool");
 }
 
-function testT17CallerParentBypass(): void {
-  const chatId = "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b";
-  const prefix = [user("old"), assistant("old answer")];
-  seedChain(chatId, prefix, assistant("new answer"));
-  const result = chatRequest.buildV2RequestBody(
-    {
-      ...request(chatId, [...prefix, user("next")]),
-      codearts: { chat_id: chatId, parent_message_id: "caller-parent" },
-    },
-    session,
-  );
-  assert.equal(result.divergence, undefined, "调用方提供 parent 时旁路检测");
-  const msgs = result.body.messages as unknown[];
-  assert.equal(msgs.length, 3, "旁路时同样全量透传");
-}
 
 function testT18SubAgentBypass(): void {
   const chatId = "3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b";
@@ -372,7 +351,7 @@ function testT20ColdStartNoChain(): void {
 }
 
 testT16ToolContinuationBypass();
-testT17CallerParentBypass();
+
 testT18SubAgentBypass();
 testT20ColdStartNoChain();
 

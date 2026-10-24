@@ -44,7 +44,7 @@ docker run -d --name codearts-proxy \
 - **数据卷**：`/app/data` 持久化加密的账号会话、API Key 与运行时数据。删除容器不会丢失登录态，但**更换 `ENCRYPTION_KEY` 会使存量加密数据无法解密**。
 - **`ENCRYPTION_KEY` 必填**：生产环境必须注入独立随机密钥，否则回落到内置默认值（不安全）。
 - **健康检查**：镜像内置 `HEALTHCHECK`（每 30s 调 `/ready`，同时校验数据卷可写）。
-- **默认开关**：容器默认已开启 `CHAIN_DIVERGENCE_REPAIR_ENABLED` 与 `FULL_CONTEXT_INJECTION_ENABLED`（见 Dockerfile `ENV`），如需关闭用 `-e` 覆盖。
+
 - **日志**：规则输出到 stdout（`docker logs -f codearts-proxy` 查看）；如需落盘可设 `LOG_FILE` 指向挂载卷内路径。
 
 ### 环境变量注入
@@ -52,7 +52,7 @@ docker run -d --name codearts-proxy \
 ```bash
 # 方式一：-e 显式传入
 docker run ... -e LOG_LEVEL=debug \
-  -e FULL_CONTEXT_MAX_CHARS_BY_MODEL='{"GLM-5.2":500000}'
+  -e UPSTREAM_MAX_CONCURRENCY=2
 
 # 方式二：以宿主机 .env 作为 env-file（.dockerignore 已排除 .env，不会进入镜像）
 docker run ... --env-file .env
@@ -161,13 +161,15 @@ volumes:
 | `RATE_LIMIT_MODELS_MAX`     | `120`                                                | 每窗口每 Key 最大 models 请求数            |
 | `UPSTREAM_TIMEOUT_MS`       | `120000`                                             | 上游 HTTPS 请求超时（毫秒）                |
 | `IS_MASTER_NODE`            | `true`                                               | 是否为刷新任务主节点（多实例部署时使用）    |
-| `FULL_CONTEXT_INJECTION_ENABLED` | `false` | 冷启动全量注入开关：Map 未命中时折叠完整历史注入而非只发最后一条 |
-| `FULL_CONTEXT_MAX_CHARS` | `8000` | 折叠文本最大字符数（保守对齐 openpangu-2.0-flash ~9K token 窗口） |
-| `FULL_CONTEXT_MAX_CHARS_BY_MODEL` | `{}` | 按模型覆盖折叠阈值，JSON 格式，如 `{"GLM-5.2":500000,"openpangu-2.0-pro":180000}` |
-| `CHAIN_DIVERGENCE_REPAIR_ENABLED` | `false` | 热链分叉检测与修复开关：切换 provider 后检测上下文分叉，尾部补发/中段重置 |
+| `UPSTREAM_MAX_CONCURRENCY` | `3` | 每 ProviderAccount 最大上游并发请求数，超出者 FIFO 排队（0 = 不限） |
+| `UPSTREAM_MIN_CONCURRENCY` | `1` | 撞限自适应降级的下限 |
+| `UPSTREAM_CONCURRENCY_RECOVER_MS` | `60000` | 连续无撞限多久后逐级恢复有效上限 |
+| `REDIRECT_ALLOWED_HOSTS`      | `""`                                                  | 追加到回调 redirect 白名单的主机（逗号分隔，防开放重定向） |
+| `RATE_LIMIT_GLOBAL_MAX`       | `300`                                                  | 全局 IP 限流（覆盖无专用限流器的路由） |
+| `UPSTREAM_QUEUE_WAIT_TIMEOUT_MS` | `120000` | 排队等待槽位超时（0 = 无限等待） |
+| `UPSTREAM_CONCURRENCY_RETRY_MAX` | `2` | 上游返回 TM.00001041 时的重试次数 |
+| `UPSTREAM_CONCURRENCY_RETRY_DELAY_MS` | `1500` | 撞限重试基础退避（指数增长） |
 | `UPSTREAM_PROMPT_TOKEN_LIMIT` | `196608` | 上游 CodeArts 累积 prompt 长度硬限制（token），超过触发 `ChatAgent.00001216` |
-| `UPSTREAM_PROMPT_TOKEN_RESET_THRESHOLD` | `180000` | 主动重置阈值：累积 prompt_tokens 超过此值时，热链续传自动全量折叠重置（须 < LIMIT） |
-| `MISSING_CONTEXT_HINT` | 中文默认模板 | 缺失段补发的辅助提示词模板：标记补传历史仅作参考与当前用户请求 |
 | `ADMIN_PASSWORD`             | 无                                                   | Admin 密码（优先于文件存储的密码）         |
 | `LOG_LEVEL`                 | `debug`（开发）/ `info`（生产）                      | 日志级别                                   |
 
@@ -187,17 +189,14 @@ cp .env.example .env
 pnpm dev
 ```
 
-### 上下文连续性配置
+### 上下文与并发
 
-- `CHAIN_DIVERGENCE_REPAIR_ENABLED` 开启后，代理会检查客户端历史与热链是否分叉；尾部链分叉只补发缺失段，中段损伤或无法确认时全量重置。
-- `FULL_CONTEXT_INJECTION_ENABLED` 只控制冷启动（Map 未命中）全量注入。热链修复中的中段重置和补发失败回退不受该开关控制。
-- `FULL_CONTEXT_MAX_CHARS_BY_MODEL` 优先于 `FULL_CONTEXT_MAX_CHARS`，用于按模型设置折叠文本上限。
-- `MISSING_CONTEXT_HINT` 仅影响缺失段补发文本的提示语，不改变消息判定逻辑。
+- 代理不再改写、压缩或截断客户端历史：请求始终按原顺序、原角色逐字透传。
+- 上下文超限（上游 `ChatAgent.00001216` 或 HTTP 413）会返回 `context_length_exceeded`，由客户端自行压缩或摘要。请把客户端声明的模型窗口调到接近上游真实上限（约 18 万 token）。
+- 上游单账号并发会话上限为 3，且是**账号级共享**的：官方 IDE、其他客户端会同时占用。代理只能观察到自己的在途数，所以撞限时会把该账号的有效上限自动下调（最低 `UPSTREAM_MIN_CONCURRENCY`），连续 `UPSTREAM_CONCURRENCY_RECOVER_MS` 无撞限后逐级恢复。
 
 ```bash
-FULL_CONTEXT_INJECTION_ENABLED=true
-CHAIN_DIVERGENCE_REPAIR_ENABLED=true
-FULL_CONTEXT_MAX_CHARS_BY_MODEL='{"GLM-5.2":500000,"openpangu-2.0-pro":180000}'
+UPSTREAM_MAX_CONCURRENCY=3
 ```
 
 ## 日志配置
@@ -249,7 +248,7 @@ pnpm lint    # ESLint 检查
 
 ### 真实热链分叉验证
 
-先启动本地代理并完成华为云登录，确保 `CHAIN_DIVERGENCE_REPAIR_ENABLED=true`。然后使用代理生成的 API Key 运行：
+先启动本地代理并完成华为云登录。然后使用代理生成的 API Key 运行：
 
 ```bash
 set OPENAI_BASE_URL=http://localhost:1455
@@ -307,17 +306,18 @@ data/
 
 ### 最小有状态设计
 
-代理保持**最小有状态设计**：进程内维护 `Map<chat_id, response_message_id>`（含 4 小时 TTL 自动淘汰）和 `Map<chat_id, "main"|"sub">`，用于自动填充 `parent_message_id` 和区分主/子 Agent，不存储消息历史。
+代理保持**最小有状态设计**：进程内维护 `Map<chat_id, response_message_id>`（含 4 小时 TTL 自动淘汰）、链指纹与 `Map<chat_id, "main"|"sub">`，仅用于续传判定、缓存估算与主/子 Agent 区分，不存储消息历史。v2 请求全量透传客户端 messages，`chat_id` 不会发送给上游。
 
 核心模块：
 
-- `src/upstream/huawei/chat-request.ts` — 请求体构造、HTTP 传输、会话 ID 推导、parent_message_id 追踪
+- `src/upstream/huawei/chat-request.ts` — v2 请求体构造、HTTP/SSE 传输、会话 ID 推导
+- `src/upstream/huawei/upstream-gate.ts` — 上游并发槽位排队与 TM.00001041 识别
 - `src/upstream/huawei/chat-stream.ts` — 流式 SSE 处理、OpenAI chunk 包装
 - `src/upstream/huawei/chat-protocol.ts` — CodeArts SSE 协议解析
 - `src/upstream/huawei/chat-translate.ts` — OpenAI ↔ CodeArts 消息/工具调用转换
 - `src/upstream/huawei/chat-recovery.ts` — 上游错误恢复（合成 tool_call 继续）
 - `src/upstream/huawei/models.ts` — 动态模型列表获取（agent-center API + 文件缓存）
-- `src/upstream/huawei/tools.ts` — 工具定义（DEFAULT_TOOLS 11 个 + SUB_AGENT_TOOLS 5 个）
+- `src/upstream/huawei/tools.ts` — 工具定义格式转换与子代理工具过滤
 - `src/auth/huawei/sign.ts` — AK/SK HMAC-SHA256 签名（勿修改）
 - `src/auth/huawei/credentials.ts` — 凭证提取 + 签名请求封装
 - `src/auth/huawei/session-store.ts` — 华为会话存储 + 刷新逻辑

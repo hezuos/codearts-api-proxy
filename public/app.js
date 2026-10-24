@@ -62,19 +62,36 @@ async function copyToClipboard(text, button) {
 }
 
 /**
+ * Read the double-submit CSRF token (issued by the server as csrf_token cookie)
+ * @returns {string} The CSRF token, or "" if not yet issued
+ */
+function getCsrfToken() {
+  const match = document.cookie.match(/(?:^|;\s*)csrf_token=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
+/**
  * Fetch wrapper with error handling
+ * Automatically attaches the x-csrf-token header on state-changing requests
+ * (double-submit CSRF protection; see src/middleware/csrf.ts)
  * @param {string} url - URL to fetch
  * @param {Object} options - Fetch options
  * @returns {Promise<Object>} Response data
  */
 async function fetchJson(url, options = {}) {
   try {
+    const method = (options.method || "GET").toUpperCase();
+    const headers = {
+      "Content-Type": "application/json",
+      ...options.headers,
+    };
+    if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
+      const csrfToken = getCsrfToken();
+      if (csrfToken) headers["x-csrf-token"] = csrfToken;
+    }
     const response = await fetch(url, {
       ...options,
-      headers: {
-        "Content-Type": "application/json",
-        ...options.headers,
-      },
+      headers,
     });
 
     if (!response.ok) {

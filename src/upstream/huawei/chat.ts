@@ -3,17 +3,18 @@
  */
 
 import { randomUUID, createHash } from "crypto";
-import { getChatUrl } from "../../config";
+import { setTimeout as delay } from "timers/promises";
+import { config, getChatUrl } from "../../config";
 import { getCredentials } from "../../auth/huawei/credentials";
 import type { StoredHuaweiSession } from "../../auth/huawei/session-store";
-import { UpstreamAuthError } from "../../utils/errors";
+import { UpstreamAuthError, UpstreamConcurrencyError, UpstreamContextLengthError, isPromptLengthExceeded } from "../../utils/errors";
 import { logger } from "../../utils/logger";
 import type {
   OpenAIChatCompletion,
   OpenAIChatCompletionRequest,
   OpenAIChatMessage,
 } from "../../types/openai";
-import { cleanToolCalls, computeChainForMessages, normalizeForChain, normalizeToolCallsForChain } from "./chat-translate";
+import { cleanToolCalls, computeChainForMessages, flushToolCallDeltas, mergeToolCallDeltas, normalizeForChain, normalizeToolCallsForChain, type ToolCallAccumulator } from "./chat-translate";
 import { parseSSE, type CodeArtsSSEEvent } from "./chat-protocol";
 import {
   buildV2RequestBody,
@@ -27,6 +28,7 @@ import {
   setLastPromptTokens,
   computeCacheUsage,
 } from "./chat-request";
+import { acquireUpstreamSlot, isConcurrentSessionLimitError, reportConcurrencyLimit, reportUpstreamSuccess } from "./upstream-gate";
 
 // Re-export public API
 export { streamHuaweiChatToResponse } from "./chat-stream";
@@ -36,23 +38,42 @@ export { DEFAULT_MODEL_ID, MODEL_MAP } from "./chat-request";
 // Non-streaming chat handler
 // ---------------------------------------------------------------------------
 
+/** 读尽一个失败响应体（仅用于非 200 分支）。 */
+async function readErrorBody(stream: AsyncIterable<string>): Promise<string> {
+  let body = "";
+  for await (const line of stream) body += line;
+  return body;
+}
+
 export async function sendHuaweiChatRequest(
   request: OpenAIChatCompletionRequest,
   session: StoredHuaweiSession,
   traceId: string,
   signal?: AbortSignal,
-  options: { forceResync?: boolean } = {},
+): Promise<OpenAIChatCompletion> {
+  // 槽位覆盖整个请求，避免并行请求超过账号的并发会话上限。
+  const release = await acquireUpstreamSlot(session.providerAccountId, signal);
+  try {
+    return await sendHuaweiChatRequestInner(request, session, traceId, signal);
+  } finally {
+    release();
+  }
+}
+
+async function sendHuaweiChatRequestInner(
+  request: OpenAIChatCompletionRequest,
+  session: StoredHuaweiSession,
+  traceId: string,
+  signal?: AbortSignal,
 ): Promise<OpenAIChatCompletion> {
   const log = logger.withTrace(traceId);
   const credentials = getCredentials(session);
   const chatUrl = getChatUrl();
-  const { body: requestBody, json: body, divergence, isToolContinuation, proactiveReset, chatId } = buildV2RequestBody(request, session, options);
+  const { body: requestBody, json: body, divergence, isToolContinuation, chatId } = buildV2RequestBody(request, session);
   const headers = buildChatHeaders(chatUrl, body, credentials, traceId);
 
-  // v2 无 parent_message_id；续传判定基于链状态（lastResponseMessageId，按派生 chatId 索引）。
-  const hasContinuity =
-    !!request.codearts?.parent_message_id ||
-    !!getLastResponseMessageId(chatId);
+  // v2 无 parent_message_id；续传判定完全依赖链状态（按派生 chatId 索引）。
+  const hasContinuity = !!getLastResponseMessageId(chatId);
 
   // ── Outgoing request log ──────────────────────────────────────────────────
   const msgArr = requestBody.messages as unknown[];
@@ -71,23 +92,56 @@ export async function sendHuaweiChatRequest(
     log.info("chat_id derived from message hash (v2)");
   }
 
-  const { status, stream } = await httpsPost(chatUrl, headers, body, signal);
+  const { status: initialStatus, stream: initialStream } = await httpsPost(chatUrl, headers, body, signal);
+  let status = initialStatus;
+  let stream = initialStream;
 
   log.info("CodeArts HTTP response", { status });
 
-  if (status !== 200) {
-    let errorBody = "";
-    for await (const line of stream) errorBody += line;
+  // ── Concurrent-session limit is retryable (HTTP 400 / TM.00001041) ────────
+  let concurrencyAttempt = 0;
+  let errorBody = "";
+  while (status !== 200) {
+    errorBody = await readErrorBody(stream);
     log.error("CodeArts error body", { status, body: errorBody.slice(0, 500) });
+
+    if (!isConcurrentSessionLimitError(errorBody)) break;
+    // 每个请求只降一档：重试期间的再次撞限不重复降级。
+    if (concurrencyAttempt === 0) reportConcurrencyLimit(session.providerAccountId);
+
+    if (concurrencyAttempt >= config.upstreamConcurrencyRetryMax) {
+      throw new UpstreamConcurrencyError(
+        "Upstream concurrent session limit reached (TM.00001041, max 3). " +
+          `Retried ${config.upstreamConcurrencyRetryMax} time(s); ` +
+          "please close other CodeArts Agent sessions and retry.",
+        config.upstreamConcurrencyRetryDelayMs * 2 ** config.upstreamConcurrencyRetryMax,
+        traceId,
+      );
+    }
+    concurrencyAttempt++;
+    const delayMs =
+      config.upstreamConcurrencyRetryDelayMs * 2 ** (concurrencyAttempt - 1) +
+      Math.floor(Math.random() * 250);
+    log.warn("[codearts→proxy] concurrent session limit reached, retrying", {
+      attempt: concurrencyAttempt,
+      maxRetries: config.upstreamConcurrencyRetryMax,
+      delayMs,
+    });
+    await delay(delayMs, undefined, signal ? { signal } : undefined);
+    ({ status, stream } = await httpsPost(chatUrl, headers, body, signal));
+    log.info("CodeArts HTTP response", { status });
+  }
+
+  reportUpstreamSuccess(session.providerAccountId);
+
+  if (status !== 200) {
     if (status === 401 || status === 403)
       throw new UpstreamAuthError(status, errorBody);
-    if (divergence === "tail-divergence" && !options.forceResync) {
-      log.warn("[proxy→codearts] tail-divergence repair HTTP failure, retrying full reset", { status });
-      return sendHuaweiChatRequest(request, session, traceId, signal, { forceResync: true });
+    if (status === 413 || isPromptLengthExceeded(errorBody)) {
+      throw new UpstreamContextLengthError(errorBody, traceId);
     }
-    if (errorBody.includes("ChatAgent.00001216") && !options.forceResync) {
-      log.warn("[proxy→codearts] prompt length exceeds upstream limit, retrying with full context reset", { status });
-      return sendHuaweiChatRequest(request, session, traceId, signal, { forceResync: true });
+    if (divergence === "tail-divergence") {
+      log.info("[proxy→codearts] tail-divergence classified (no repair)", { status });
     }
     throw new Error(
       `CodeArts chat returned HTTP ${status}: ${errorBody.substring(0, 500)}`,
@@ -98,7 +152,8 @@ export async function sendHuaweiChatRequest(
   let fullReasoning = "";
   let promptTokens = 0;
   let completionTokens = 0;
-  let toolCalls: OpenAIChatMessage["tool_calls"];
+  /** v2 工具调用分片累加器（按 index 合并，非流式响应也需聚合） */
+  const toolCallAccumulators = new Map<number, ToolCallAccumulator>();
   /** 上游真实缓存用量（v2 通道返回时优先使用） */
   let upstreamPromptTokensDetails: CodeArtsSSEEvent["prompt_tokens_details"] | undefined;
   const responseMetadata: Record<string, string | undefined> = {};
@@ -123,17 +178,16 @@ export async function sendHuaweiChatRequest(
         continue;
       }
       log.error("SSE error from CodeArts", { code: event.error_code, msg: event.error_msg ?? "unknown" });
-      if (divergence === "tail-divergence" && !options.forceResync) {
-        log.warn("[proxy→codearts] tail-divergence repair SSE failure, retrying full reset", {
-          code: event.error_code,
-        });
-        return sendHuaweiChatRequest(request, session, traceId, signal, { forceResync: true });
+      if (isPromptLengthExceeded(event.error_code) || isPromptLengthExceeded(event.error_msg)) {
+        throw new UpstreamContextLengthError(
+          `${event.error_code}: ${event.error_msg ?? "unknown"}`,
+          traceId,
+        );
       }
-      if (event.error_code === "ChatAgent.00001216" && !options.forceResync) {
-        log.warn("[proxy→codearts] prompt length exceeds upstream limit (SSE), retrying with full context reset", {
+      if (divergence === "tail-divergence") {
+        log.info("[proxy→codearts] tail-divergence classified (no repair)", {
           code: event.error_code,
         });
-        return sendHuaweiChatRequest(request, session, traceId, signal, { forceResync: true });
       }
       throw new Error(
         `CodeArts error ${event.error_code}: ${event.error_msg ?? "unknown"}`,
@@ -150,17 +204,17 @@ export async function sendHuaweiChatRequest(
           log.debug("SSE tool_call", { id: tc.id, name: tc.function?.name ?? tc.name });
         }
       }
-    }
-    const mapped = cleanToolCalls(event.delta?.tool_calls);
-    if (mapped) {
-      toolCalls = toolCalls ? [...toolCalls, ...mapped] : mapped;
+      mergeToolCallDeltas(toolCallAccumulators, event.delta.tool_calls);
     }
     if (event.prompt_tokens) promptTokens = event.prompt_tokens;
     if (event.completion_tokens) completionTokens = event.completion_tokens;
     if (event.prompt_tokens_details) upstreamPromptTokensDetails = event.prompt_tokens_details;
   }
 
-  // Update parent_message_id tracker only on successful turns
+  // 分片累加完成后一次性还原为完整工具调用
+  const toolCalls = cleanToolCalls(flushToolCallDeltas(toolCallAccumulators));
+
+  // Update response_message_id tracker only on successful turns
   if (responseMetadata.response_message_id) {
     // v2 上游事件不含 chat_id；使用构建侧派生的 chatId 维护链状态。
     const cid = chatId;
@@ -230,11 +284,6 @@ export async function sendHuaweiChatRequest(
   // 导致 cacheHit 永远等于 promptTokens、cacheMiss 永远为 0。
   if (responseMetadata.response_message_id && promptTokens > 0) {
     setLastPromptTokens(chatId, promptTokens);
-  }
-
-  // Mark context reset in metadata for client visibility (proactive reset triggers fold)
-  if (proactiveReset) {
-    responseMetadata.context_reset = "proactive";
   }
 
   return {
