@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-10-28
+
 ### Added
 - 上游并发闸门：按 `providerAccountId` FIFO 排队（`UPSTREAM_MAX_CONCURRENCY`，默认 3），并对 HTTP 400 / `TM.00001041`（并发会话数已达上限）做指数退避重试；超限时向客户端返回 429 + `Retry-After`。
 - 撞限自适应：3 个槽位是账号级共享的（官方 IDE / 其他客户端同样占用），代理观察不到外部在途数。因此撞限时将该账号的有效并发上限逐级下调（最低 `UPSTREAM_MIN_CONCURRENCY`），连续 `UPSTREAM_CONCURRENCY_RECOVER_MS` 无撞限后逐级恢复。
@@ -9,6 +11,15 @@
 
 ### Fixed
 - 上游响应只发 `close`（不发 `end`/`error`）时，SSE 迭代器会永久挂起，导致闸门槽位泄漏且客户端请求悬挂；现监听 `close` 并唤醒等待者。
+
+### Security
+- 新增双提交 CSRF 防护（`csrf_token` cookie + `x-csrf-token` 头校验），覆盖所有依赖 cookie 认证的状态变更路由（Web UI / Admin）；Bearer API Key 客户端天然免疫，予以豁免。
+- 新增开放重定向防护（`resolveSafeRedirect`）：回调 `redirect` 参数仅放行同源相对路径与白名单主机（华为云重定向域 + 本地回环 + `REDIRECT_ALLOWED_HOSTS` 扩展），其余回退到本地完成页。
+- cookie 中的 API Key / KeyID 改用 AES-256-GCM 加密存储（`encryptString`），不再以明文落入 `Set-Cookie`；读取侧 (`requireUiAuth`) 解密后校验。
+- 新增全局 IP 限流器兜底覆盖所有路由（`RATE_LIMIT_GLOBAL_MAX`，默认每分钟 100 次），与 `/v1/chat`、`/v1/models`、`/admin/login` 的专用限流器形成双计数。
+- 验证脚本 `openBrowser`：Windows 分支从 `cmd /c start`（shell，存在 CWE-78 命令行注入）改为非 shell 的 `explorer.exe`，并对 URL 做 http(s) 协议校验。
+- 修复 `refresh-and-test.mjs` 中 `.replace("T", "T")` 无效恒等替换。
+- 修复 `body-parser` DoS 漏洞（2.3.0 → 2.4.0）、升级 `jose` 6.2.10、`openai` 7.8.0、`eslint` 10.9.1、`typescript-eslint` 8.68.0。
 
 ### Changed
 - 移除 v1（CodeArts 原生 `/v1/chat/chat`）请求构造及其折叠/注入逻辑；v2 仅全量透传客户端 messages。
