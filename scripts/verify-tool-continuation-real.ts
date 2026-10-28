@@ -67,17 +67,28 @@ function sleep(ms: number): Promise<void> {
 // ---------------------------------------------------------------------------
 
 function openBrowser(url: string): void {
-  // execFile 直接传参数数组、不经 shell —— 消除命令行注入面（CWE-78）。
+  // 仅放行解析合法的 http(s) URL；非 URL 值不交给系统打开命令（CWE-78 纵深防御）。
+  let target: URL;
+  try {
+    target = new URL(url);
+  } catch {
+    return;
+  }
+  if (target.protocol !== "http:" && target.protocol !== "https:") {
+    return;
+  }
+  const href = target.href;
   if (process.platform === "win32") {
-    execFile("cmd", ["/c", "start", "", url], () => {
-      /* 忽略打开失败 */
+    // explorer.exe 不是 shell、不解释 & 等元字符（cmd /c start 会被注入）。
+    execFile("explorer.exe", [href], () => {
+      /* 忽略打开失败（explorer 成功时也返回非零退出码） */
     });
   } else if (process.platform === "darwin") {
-    execFile("open", [url], () => {
+    execFile("open", [href], () => {
       /* 忽略打开失败 */
     });
   } else {
-    execFile("xdg-open", [url], () => {
+    execFile("xdg-open", [href], () => {
       /* 忽略打开失败 */
     });
   }

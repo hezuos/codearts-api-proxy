@@ -332,7 +332,9 @@ function resolveSafeRedirect(target: string | undefined): string | undefined {
       (url.protocol === "http:" || url.protocol === "https:") &&
       redirectAllowedHosts.has(url.hostname.toLowerCase())
     ) {
-      return trimmed;
+      // 从已校验的 URL 对象重新序列化，而非回传原始用户输入——
+      // 断开污点流，使 CodeQL 能识别此值已被净化（CWE-601）。
+      return url.origin + url.pathname + url.search + url.hash;
     }
   } catch {
     // 非法 URL —— 按不安全处理
