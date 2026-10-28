@@ -323,7 +323,10 @@ function resolveSafeRedirect(target: string | undefined): string | undefined {
   if (!trimmed) return undefined;
 
   if (trimmed.startsWith("/") && !trimmed.startsWith("//") && !trimmed.startsWith("/\\")) {
-    return trimmed;
+    // 解析后仅取路径/查询/片段重新拼接——同源语义不变，同时
+    // 由 URL 规范化消除畸形序列并断开原始输入的污点流（CWE-601）。
+    const parsed = new URL(trimmed, "https://same-origin.invalid");
+    return parsed.pathname + parsed.search + parsed.hash;
   }
 
   try {
