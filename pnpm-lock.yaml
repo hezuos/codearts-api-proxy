@@ -27,8 +27,8 @@ importers:
         specifier: ^5.3.0
         version: 5.3.0
       express-rate-limit:
-        specifier: ^8.6.2
-        version: 8.6.2(express@5.3.0)
+        specifier: ^8.7.1
+        version: 8.7.1(express@5.3.0)
       jose:
         specifier: ^6.2.10
         version: 6.2.13
@@ -519,8 +519,8 @@ packages:
     resolution: {integrity: sha512-aIL5Fx7mawVa300al2BnEE4iNvo1qETxLrPI/o05L7z6go7fCw1J6EQmbK4FmJ2AS7kgVF/KEZWufBfdClMcPg==}
     engines: {node: '>= 0.6'}
 
-  express-rate-limit@8.6.2:
-    resolution: {integrity: sha512-YH4ru+eOJxQABscKFfRCy9R7x9QFGdezclVMwwgFFndzS2Xnm0uo6B0ABZsLhcpeptGv2qvuJVWlQr9gQZoC3A==}
+  express-rate-limit@8.7.1:
+    resolution: {integrity: sha512-2FXbqkygil3mZiXzEtM0IjE/UBmBNot0J1GEVrJT4JbrvwOSoEtqtO+wHbiMQELWe1eNvHoYRg2dkjOid+6JkA==}
     engines: {node: '>= 16'}
     peerDependencies:
       express: '>= 4.11'
@@ -1061,7 +1061,7 @@ snapshots:
 
   '@types/express-rate-limit@6.0.2(express@5.3.0)':
     dependencies:
-      express-rate-limit: 8.6.2(express@5.3.0)
+      express-rate-limit: 8.7.1(express@5.3.0)
     transitivePeerDependencies:
       - express
       - supports-color
@@ -1459,7 +1459,7 @@ snapshots:
 
   etag@1.8.1: {}
 
-  express-rate-limit@8.6.2(express@5.3.0):
+  express-rate-limit@8.7.1(express@5.3.0):
     dependencies:
       debug: 4.4.3
       express: 5.3.0
