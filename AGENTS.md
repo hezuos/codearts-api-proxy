@@ -61,7 +61,8 @@ src/
 ## ANTI-PATTERNS (THIS PROJECT)
 
 - **勿修改 `sign.ts`** — AK/SK HMAC-SHA256 签名算法，与华为云 API 严格绑定
-- **勿用 `randomUUID()` 生成 chat_id** — 必须用 SHA-256 哈希派生（providerAccountId + 首条消息内容）前32字符
+- **勿用 `randomUUID()` 生成对话标识** — 必须用 SHA-256 哈希派生前 32 字符，且**不含账号、不含系统提示词**（账号无关才能跨账号保持同一对话）；来源链为 `codearts.chat_id` → `X-Conversation-Id` 请求头 → 首条 user 消息指纹，三者均不可得时**不绑定任何标识**，不得以随机值冒充稳定标识
+- **链状态按 (对话标识, ProviderAccount) 组合索引** — 同一对话在不同账号上的上游消息标识互不污染；键用 `buildChainKey()` 生成
 - **勿用 `process.platform`** — `osVersion` 固定 `"win32"`
 - **勿用 `process.cwd()`** — `currentWorkingDirectory` 必须来自 `request.codearts.current_working_directory`
 - **勿创建第二个用户** — 单用户模式，`createUser()` 有硬守卫
@@ -74,13 +75,15 @@ src/
 ## UNIQUE STYLES
 
 - **三路径 Token 刷新降级链**: OAuth2 refresh → AK/SK 签名 → legacy refresh_token
-- **per-session 刷新调度**: 每个 session 独立调度，基于 expiresAt 精准计算（过期前 2h + 随机抖动）
+- **per-session 刷新调度**: 每个 **(Key, Account)** 会话独立调度，基于 expiresAt 精准计算（过期前 2h + 随机抖动）；账号级 Key 可绑定多账号、各自持有独立凭据，用户级 Key 无自有会话、不进入调度
 - **错误如实上报**: 上游错误直接映射为错误响应或 SSE error 事件，不合成工具调用、不伪造续传。
-- **模型缓存三级降级**: agent-center API → 文件缓存(1h TTL) → 静态列表
+- **模型缓存三级降级**: agent-center API → **按账号隔离**的文件缓存(1h TTL, `data/model-cache/{accountId}.json`) → 静态列表；不同账号可见的模型不同，共用一份缓存会让后取的账号拿到别人的模型列表
 - **SSE 畸形行容错**: 跳过而非断开整个流
 - **Admin 会话令牌每次重启随机生成**: 防止 cookie 伪造
 - **链分叉仅分类**: 分叉检测只用于日志与缓存估算，不改写历史、不触发修复重试。代理不做上下文压缩/折叠，历史逐字透传；超限（`ChatAgent.00001216` / HTTP 413）返回 `context_length_exceeded`，由客户端自行压缩。
 - **上游并发闸门**: v2 上游按**华为账号**限制 3 个并发会话（超出返回 HTTP 400 / `TM.00001041`），且该计数是账号级共享的 —— 官方 IDE、其他客户端同样占用，代理看不到外部在途数。官方客户端发送的 `x-session-affinity` 在该通道实测无效，它靠「同一会话本地拒绝并发」把在途数压到 1。代理侧按 `providerAccountId` FIFO 排队（`UPSTREAM_MAX_CONCURRENCY`，默认 3），撞限时自动下调有效上限至 `UPSTREAM_MIN_CONCURRENCY`（默认 1），连续 `UPSTREAM_CONCURRENCY_RECOVER_MS` 无撞限后逐级恢复；`UPSTREAM_QUEUE_WAIT_TIMEOUT_MS` 控制排队超时，`UPSTREAM_CONCURRENCY_RETRY_MAX` / `UPSTREAM_CONCURRENCY_RETRY_DELAY_MS` 控制撞限重试。被放弃的上游流会立即 `destroy()` 释放槽位。
+- **账号路由（用户级 Key）**: 用户级 Key 不持有自有凭据，按分配粒度在用户所属账号间选择：候选集 = 账号可用 ∧ 有未吊销账号级 Key ∧ 该 Key 有可用会话（每次请求重新求值）；**对话连续**按 `(用户级 Key, 对话标识)` 粘性绑定，**按请求**每请求轮询；撞限/凭证失效时标记账号冷却并换下一候选（同账号重试耗尽后才切换，每账号至多一次）。
+- **对话粘性保证以单个代理实例为边界**: 对话绑定表与轮询游标都是**进程内状态**，多实例部署时各实例独立分配——同一对话在不同实例上可能落到不同账号；同时每实例的并发闸门独立计数，多实例的有效并发是闸门上限的倍数。
 - **v2 通道（OpenAI 兼容）**: 所有模型请求统一走 `${HUAWEI_CHAT_HOST}${HUAWEI_V2_CHAT_PATH}`（默认 `/api/v2/chat/completions`），不再使用 CodeArts 原生 `/v1/chat/chat`。该通道是唯一支持 `glm-5.3` 的通道，且默认返回 `reasoning_content`（thinking）。请求体为 OpenAI 兼容形状（`model`/`max_tokens`/`tool_stream`/`stream`/`messages`/`tools`），无 `parent_message_id`，续传完全依赖链状态与客户端回传历史。子代理字段（`isSubAgent`/`subAgent_type`/`subAgent_prompt`）直接透传。详见 `openspec/changes/add-v2-chat-channel/`。
 
 ## COMMANDS
