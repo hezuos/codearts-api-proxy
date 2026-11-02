@@ -2,7 +2,12 @@
  * v2 无状态会话行为测试。
  *
  * v2 上游不保存会话状态：每个请求全量透传 messages，
- * chat_id 仅作为代理侧链状态/缓存追踪的索引（不会发送给上游）。
+ * 对话标识仅作为代理侧链状态/缓存追踪的索引（不会发送给上游）。
+ *
+ * 对话标识语义（add-account-routing）：
+ * - 账号无关、跨系统提示词稳定；
+ * - 来源链：codearts.chat_id → codearts.conversation_id → 首条 user 消息指纹；
+ * - 三个来源均不可得时不绑定任何标识（不以随机值冒充稳定标识）。
  */
 import assert from "assert";
 import type {
@@ -10,6 +15,7 @@ import type {
   OpenAIChatMessage,
 } from "../../types/openai";
 import { buildV2RequestBody } from "./chat-request";
+import { buildChainKey } from "./conversation-id";
 import type { StoredHuaweiSession } from "../../auth/huawei/session-store";
 
 const session = {
@@ -37,49 +43,85 @@ function request(
   };
 }
 
-function deriveChatId(messages: OpenAIChatMessage[]): string {
-  return buildV2RequestBody(request(messages), session).chatId;
+function deriveConversationId(messages: OpenAIChatMessage[]): string | undefined {
+  return buildV2RequestBody(request(messages), session).conversationId;
 }
 
 // ---------------------------------------------------------------------------
-// chat_id 派生
+// 对话标识派生
 // ---------------------------------------------------------------------------
 
-function testChatIdStableForSameConversation(): void {
+function testConversationIdStableForSameConversation(): void {
   const messages = [user("old"), user("next")];
   assert.equal(
-    deriveChatId(messages),
-    deriveChatId([...messages, user("later")]),
-    "同一会话（system + 首条 user 不变）应派生相同 chat_id",
+    deriveConversationId(messages),
+    deriveConversationId([...messages, user("later")]),
+    "同一会话（首条 user 不变）应派生相同对话标识",
   );
 }
 
-function testChatIdDiffersForDifferentFirstUserMessage(): void {
+function testConversationIdDiffersForDifferentFirstUserMessage(): void {
   const system = { role: "system" as const, content: "You are opencode.", refusal: null };
-  const a = deriveChatId([system, user("分析一下项目")]);
-  const b = deriveChatId([system, user("修一下这个 bug")]);
-  assert.notEqual(a, b, "首条 user 不同应派生不同 chat_id");
+  const a = deriveConversationId([system, user("分析一下项目")]);
+  const b = deriveConversationId([system, user("修一下这个 bug")]);
+  assert.notEqual(a, b, "首条 user 不同应派生不同对话标识");
 }
 
-function testChatIdFallsBackToSystemPrompt(): void {
-  const system = { role: "system" as const, content: "You are a title generator.", refusal: null };
+function testConversationIdIgnoresSystemPromptDrift(): void {
+  const first = { role: "system" as const, content: "You are opencode. cwd=/a", refusal: null };
+  const second = { role: "system" as const, content: "You are opencode. cwd=/b", refusal: null };
   assert.equal(
-    deriveChatId([system]),
-    deriveChatId([system]),
-    "无 user 时应能稳定地从 system prompt 派生",
+    deriveConversationId([first, user("同一个问题")]),
+    deriveConversationId([second, user("同一个问题")]),
+    "系统提示词漂移不应改变对话标识",
   );
 }
 
-function testChatIdIsRandomWithoutAnyContextMessage(): void {
-  const a = deriveChatId([]);
-  const b = deriveChatId([]);
-  assert.match(a, /^[0-9a-f]{32}$/, "无上下文时应生成 32 位十六进制 chat_id");
-  assert.notEqual(a, b, "无上下文每次应生成不同的 chat_id");
+function testConversationIdIgnoresAccountSwitch(): void {
+  const other = { ...session, providerAccountId: "other-provider" } as StoredHuaweiSession;
+  const messages = [user("同一个问题")];
+  const a = buildV2RequestBody(request(messages), session);
+  const b = buildV2RequestBody(request(messages), other);
+  assert.equal(a.conversationId, b.conversationId, "切换账号不应改变对话标识");
+  assert.notEqual(a.chainKey, b.chainKey, "但链状态键应按账号区分");
+}
+
+function testNoUserMessageMeansNoConversationId(): void {
+  const system = { role: "system" as const, content: "You are a title generator.", refusal: null };
+  const result = buildV2RequestBody(request([system]), session);
+  assert.equal(result.conversationId, undefined, "无 user 消息时不应派生对话标识");
+  assert.equal(result.chainKey, undefined, "无对话标识时不应维护链状态");
+  assert.equal(result.identitySource, "none");
+}
+
+function testNoMessagesAtAllMeansNoConversationId(): void {
+  const result = buildV2RequestBody(request([]), session);
+  assert.equal(result.conversationId, undefined, "无任何消息时不应派生对话标识");
+  assert.equal(result.identitySource, "none");
 }
 
 function testCallerChatIdOverrideWins(): void {
   const result = buildV2RequestBody(request([user("hi")], "pinned-chat-id"), session);
-  assert.equal(result.chatId, "pinned-chat-id", "调用方提供的 chat_id 应优先");
+  assert.equal(result.conversationId, "pinned-chat-id", "调用方提供的 chat_id 应优先");
+  assert.equal(result.identitySource, "body");
+}
+
+function testStableConversationKeyWinsOverFingerprint(): void {
+  const req: OpenAIChatCompletionRequest = {
+    model: "GLM-5.1",
+    messages: [user("hi")],
+    stream: false,
+    codearts: { conversation_id: "stable-key-1" },
+  };
+  const result = buildV2RequestBody(req, session);
+  assert.equal(result.identitySource, "stable-key");
+  assert.ok(result.conversationId, "稳定对话键应派生出标识");
+  assert.notEqual(result.conversationId, deriveConversationId([user("hi")]), "稳定对话键应不同于消息指纹");
+}
+
+function testChainKeyCombinesConversationAndAccount(): void {
+  const result = buildV2RequestBody(request([user("hi")], "chat-x"), session);
+  assert.equal(result.chainKey, buildChainKey("chat-x", "test-provider"));
 }
 
 // ---------------------------------------------------------------------------
@@ -108,11 +150,15 @@ function testToolContinuationDetection(): void {
 // Run
 // ---------------------------------------------------------------------------
 
-testChatIdStableForSameConversation();
-testChatIdDiffersForDifferentFirstUserMessage();
-testChatIdFallsBackToSystemPrompt();
-testChatIdIsRandomWithoutAnyContextMessage();
+testConversationIdStableForSameConversation();
+testConversationIdDiffersForDifferentFirstUserMessage();
+testConversationIdIgnoresSystemPromptDrift();
+testConversationIdIgnoresAccountSwitch();
+testNoUserMessageMeansNoConversationId();
+testNoMessagesAtAllMeansNoConversationId();
 testCallerChatIdOverrideWins();
+testStableConversationKeyWinsOverFingerprint();
+testChainKeyCombinesConversationAndAccount();
 testEveryRequestCarriesFullHistory();
 testToolContinuationDetection();
 

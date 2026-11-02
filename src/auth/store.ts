@@ -32,22 +32,36 @@ export {
 // ApiKey operations + AuthContext
 export {
   AuthContext,
+  AccountAuthContext,
+  AggregateAuthContext,
   issueApiKey,
   validateApiKey,
   getUserApiKey,
   revokeApiKey,
   listApiKeysByUser,
+  listBoundAccountIds,
+  resolveBalancingPolicy,
   getApiKey,
   getKeyLocation,
   getSessionByKeyId,
 } from "../store/api-key-store";
 
 // Session operations
-export { setSession } from "../store/hierarchical-store";
+export {
+  setSession,
+  getSession,
+  deleteSession,
+  listSessionEntries,
+  persistApiKey,
+  type SessionEntry,
+} from "../store/hierarchical-store";
 
 // Hierarchical store direct access (used by admin, web-ui)
 export {
   deleteKey,
   listAccounts,
   listKeys,
+  getAllApiKeys,
+  resolveKeyScope,
+  resolveBoundAccountIds,
 } from "../store/hierarchical-store";

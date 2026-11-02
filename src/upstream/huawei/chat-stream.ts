@@ -81,11 +81,11 @@ async function streamHuaweiChatToResponseInner(
   const chatUrl = getChatUrl();
 
   // ── Build initial request ────────────────────────────────────────────────
-  const { body: requestBody, json: body, divergence: initialDivergence, isToolContinuation, chatId } = buildV2RequestBody(request, session);
+  const { body: requestBody, json: body, divergence: initialDivergence, isToolContinuation, conversationId, chainKey, identitySource } = buildV2RequestBody(request, session);
   const headers = buildChatHeaders(chatUrl, body, credentials, traceId);
 
   // v2 无 parent_message_id；续传判定完全依赖链状态（按派生 chatId 索引）。
-  const hasContinuity = !!getLastResponseMessageId(chatId);
+  const hasContinuity = !!(chainKey && getLastResponseMessageId(chainKey));
 
   // ── Outgoing request log ──────────────────────────────────────────────────
   const msgArr = requestBody.messages as unknown[];
@@ -103,12 +103,15 @@ async function streamHuaweiChatToResponseInner(
   // ── Continuity info ───────────────────────────────────────────────────────
   // v2 请求体无 chat_id / parent_message_id；续传完全依赖客户端回传的 messages 与链状态。
   if (!request.codearts?.chat_id) {
-    log.info("chat_id derived from message hash (v2)");
+    log.info("conversation identity resolved", {
+      source: identitySource,
+      conversation_id: conversationId ?? "(none)",
+    });
   }
   if (isToolContinuation) {
     log.info("Tool continuation (v2)", {
       messagesCount: msgArr.length,
-      hasContinuity: !!getLastResponseMessageId(chatId),
+      hasContinuity: !!(chainKey && getLastResponseMessageId(chainKey)),
     });
   }
 
@@ -388,12 +391,13 @@ async function streamHuaweiChatToResponseInner(
 
   // ── Update response_message_id tracker ────────────────────────────────────
   if (!sseHadError && responseMetadata.response_message_id) {
-    // v2 上游事件不含 chat_id；使用构建侧派生的 chatId 维护链状态。
-    const cid = chatId;
-    if (cid) {
-      const prevValue = getLastResponseMessageId(cid);
+    // v2 上游事件不含 chat_id；使用构建侧派生的 (对话标识, 账号) 组合维护链状态。
+    const cid = conversationId;
+    const ckey = chainKey;
+    if (cid && ckey) {
+      const prevValue = getLastResponseMessageId(ckey);
       const role = getChatIdRole(cid);
-      setLastResponseMessageId(cid, responseMetadata.response_message_id);
+      setLastResponseMessageId(ckey, responseMetadata.response_message_id);
       const assistantMessage: OpenAIChatMessage = {
         role: "assistant",
         content: responseContent,
@@ -401,7 +405,7 @@ async function streamHuaweiChatToResponseInner(
         tool_calls: normalizeToolCallsForChain(responseToolCalls),
       };
       const chain = computeChainForMessages(request.messages);
-      setChainState(cid, {
+      setChainState(ckey, {
         prefixChain: chain.hash,
         prefixLen: chain.length,
         lastReplyHash: createHash("sha256").update(normalizeForChain(assistantMessage)).digest("hex"),
@@ -420,10 +424,9 @@ async function streamHuaweiChatToResponseInner(
   // 先快照上一轮 prompt_tokens 供本轮缓存估算，再记录本轮值供下一轮用。
   // 必须先快照再 set——否则 getLastPromptTokens 读到的是本轮刚写入的值，
   // 导致 cacheHit 永远等于 promptTokens、cacheMiss 永远为 0。
-  const cid = chatId;
-  const prevPromptTokens = getLastPromptTokens(cid);
-  if (responseMetadata.response_message_id && promptTokens > 0) {
-    setLastPromptTokens(cid, promptTokens);
+  const prevPromptTokens = chainKey ? getLastPromptTokens(chainKey) : undefined;
+  if (chainKey && responseMetadata.response_message_id && promptTokens > 0) {
+    setLastPromptTokens(chainKey, promptTokens);
   }
 
   // ── Stream complete log ───────────────────────────────────────────────────

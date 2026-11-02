@@ -2,7 +2,7 @@
  * Chat request body construction and HTTP transport.
  */
 
-import { randomUUID, createHash } from "crypto";
+import { createHash } from "crypto";
 import https from "https";
 import { config, upstreamTimeoutMs } from "../../config";
 import { signRequest, type SigningCredentials } from "../../auth/huawei/credentials";
@@ -13,10 +13,14 @@ import type { OpenAIChatCompletionRequest, OpenAIChatMessage } from "../../types
 import {
   isToolContinuationRequest,
   resolveTools,
-  normalizeMessageContent,
   computeChainForMessages,
   normalizeForChain,
 } from "./chat-translate";
+import {
+  resolveConversationIdentity,
+  buildChainKey,
+  type ConversationIdSource,
+} from "./conversation-id";
 
 // ---------------------------------------------------------------------------
 // Model mapping
@@ -65,6 +69,14 @@ const chainStates = new Map<string, ChainState>();
 
 const chatIdRole = new Map<string, "main" | "sub">();
 
+/**
+ * 角色映射的 TTL 时间戳。
+ *
+ * 角色按**对话标识**索引（账号无关），链状态按 (对话标识, 账号) 索引，
+ * 两者键空间不同，因此各自维护清理节奏。
+ */
+const chatIdRoleTs = new Map<string, number>();
+
 // Periodic TTL cleanup
 const cleanupTimer = setInterval(() => {
   const now = Date.now();
@@ -73,8 +85,13 @@ const cleanupTimer = setInterval(() => {
       lastResponseMessageId.delete(key);
       lastResponseMessageTs.delete(key);
       chainStates.delete(key);
-      chatIdRole.delete(key);
       lastPromptTokens.delete(key);
+    }
+  }
+  for (const [key, ts] of chatIdRoleTs) {
+    if (now - ts > TTL_MS) {
+      chatIdRole.delete(key);
+      chatIdRoleTs.delete(key);
     }
   }
 }, CLEANUP_INTERVAL_MS);
@@ -227,29 +244,7 @@ export function getChatIdRole(chatId: string): "main" | "sub" | undefined {
 
 export function setChatIdRole(chatId: string, role: "main" | "sub"): void {
   chatIdRole.set(chatId, role);
-}
-
-// ---------------------------------------------------------------------------
-// Conversation ID derivation
-// ---------------------------------------------------------------------------
-
-function deriveConversationId(
-  messages: OpenAIChatMessage[],
-  providerAccountId: string,
-): string {
-  // Include system prompt in fingerprint to distinguish different opencode sessions.
-  // opencode's system prompt contains session/project/working-directory info,
-  // so different processes naturally produce different fingerprints even when
-  // sharing the same API key and sending similar first user messages.
-  const systemMsg = messages.find((m) => m.role === "system");
-  const firstUserMsg = messages.find((m) => m.role === "user");
-  if (!systemMsg && !firstUserMsg) return randomUUID().replace(/-/g, "");
-  const systemContent = systemMsg ? normalizeMessageContent(systemMsg.content) : "";
-  const userContent = firstUserMsg ? normalizeMessageContent(firstUserMsg.content) : "";
-  return createHash("sha256")
-    .update(`${providerAccountId}:${systemContent}:${userContent}`)
-    .digest("hex")
-    .slice(0, 32);
+  chatIdRoleTs.set(chatId, Date.now());
 }
 
 // ---------------------------------------------------------------------------
@@ -279,39 +274,63 @@ export const V2_DEFAULT_MAX_TOKENS = V2_MAX_TOKENS_LIMIT;
 export function buildV2RequestBody(
   request: OpenAIChatCompletionRequest,
   session: StoredHuaweiSession,
-): { body: Record<string, unknown>; json: string; divergence?: Divergence; suffixStart?: number; isToolContinuation: boolean; chatId: string } {
+): {
+  body: Record<string, unknown>;
+  json: string;
+  divergence?: Divergence;
+  suffixStart?: number;
+  isToolContinuation: boolean;
+  /** 账号无关的对话标识；undefined 表示本请求没有可用稳定标识。 */
+  conversationId?: string;
+  /** 链状态键 (对话标识, 账号)；undefined 表示不维护链状态。 */
+  chainKey?: string;
+  /** 对话标识来源，用于日志。 */
+  identitySource: ConversationIdSource;
+} {
   const isToolContinuation = isToolContinuationRequest(request.messages);
   const subAgent = request.codearts?.sub_agent;
 
   const tools = resolveTools(request);
   const modelId = resolveModelId(request);
 
-  const chatId =
-    request.codearts?.chat_id?.trim() || deriveConversationId(request.messages, session.providerAccountId);
+  // 对话标识：账号无关、跨系统提示词稳定；三个来源均不可得时不绑定任何标识。
+  const identity = resolveConversationIdentity(request);
+  const conversationId = identity.conversationId;
+  // 链状态按 (对话标识, 账号) 组合跟踪，同一对话在不同账号上的上游消息标识互不污染。
+  const chainKey = conversationId
+    ? buildChainKey(conversationId, session.providerAccountId)
+    : undefined;
+
+  if (!conversationId) {
+    logger.warn("[proxy→codearts] NO STABLE CONVERSATION ID", {
+      reason: "no codearts.chat_id / codearts.conversation_id / user message",
+      messagesCount: request.messages.length,
+    });
+  }
 
   // Sub-agent / main-agent chat_id collision detection
   const currentRole = subAgent ? "sub" : "main";
-  const previousRole = getChatIdRole(chatId);
-  setChatIdRole(chatId, currentRole);
+  const previousRole = conversationId ? getChatIdRole(conversationId) : undefined;
+  if (conversationId) setChatIdRole(conversationId, currentRole);
 
   if (previousRole && previousRole !== currentRole) {
     logger.warn("CHAT_ID COLLISION", {
-      chat_id: chatId,
+      chat_id: conversationId,
       previousRole,
       currentRole,
     });
   } else if (subAgent) {
-    logger.info("Sub-agent request", { chat_id: chatId, previousRole: previousRole ?? "none" });
+    logger.info("Sub-agent request", { chat_id: conversationId, previousRole: previousRole ?? "none" });
   } else if (isToolContinuation) {
     logger.info("Main-agent tool continuation", {
-      chat_id: chatId,
+      chat_id: conversationId,
       previousRole: previousRole ?? "none",
-      lastResponseMessageId: getLastResponseMessageId(chatId) ?? "(none)",
+      lastResponseMessageId: chainKey ? getLastResponseMessageId(chainKey) : undefined,
     });
   }
 
 
-  const chainState = getChainState(chatId);
+  const chainState = chainKey ? getChainState(chainKey) : undefined;
 
   // 分叉分类仅用于日志与缓存估算，不改变请求内容、不触发修复。
   // 工具续传与子代理请求旁路分类（与既有要求一致）。
@@ -360,7 +379,7 @@ export function buildV2RequestBody(
 
   if (divergence) {
     logger.info("[proxy→codearts] REQUEST context classification (v2)", {
-      chat_id: chatId,
+      conversation_id: conversationId,
       divergence,
       suffixStart,
       messagesCount: request.messages.length,
@@ -368,7 +387,16 @@ export function buildV2RequestBody(
     });
   }
 
-  return { body, json: JSON.stringify(body), divergence, suffixStart, isToolContinuation, chatId };
+  return {
+    body,
+    json: JSON.stringify(body),
+    divergence,
+    suffixStart,
+    isToolContinuation,
+    conversationId,
+    chainKey,
+    identitySource: identity.source,
+  };
 }
 
 /**

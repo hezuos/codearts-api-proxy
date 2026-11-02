@@ -3,7 +3,9 @@
  */
 
 export {
-  getSession as getSessionByKeyId,
+  getSession,
+  getSessionByKeyId,
+  listAllSessionEntries,
   refreshStoredSession,
   type StoredHuaweiSession,
 } from "../auth/huawei/session-store";

@@ -234,8 +234,8 @@ async function handleOAuth2AuthorizationCode(
       pkceCodeVerifier: flow.pkcePair.codeVerifier,
     });
 
-    // 启动动态刷新调度
-    scheduleSessionRefresh(apiKeyObj.id);
+    // 启动动态刷新调度（按 (Key, Account) 粒度）
+    scheduleSessionRefresh(apiKeyObj.id, accountId);
 
     logger.info(
       `[huawei-auth] OAuth2 login successful accountId=${accountId} userId=${userInfo.userId} userName=${userInfo.userName}`,
@@ -516,8 +516,8 @@ async function provisionNewIamLoginResult(
     `[huawei-auth] NewIamLogin session stored providerAccountId=${accountId} userId=${userId} userName=${userName} domainId=${domainId ?? "missing"} credentialFormat=new_iam`,
   );
 
-  // 启动动态刷新调度
-  scheduleSessionRefresh(apiKeyObj.id);
+  // 启动动态刷新调度（按 (Key, Account) 粒度）
+  scheduleSessionRefresh(apiKeyObj.id, accountId);
 
   return { accountId, apiKeyId: apiKeyObj.id, apiKey: rawKey };
 }
@@ -580,8 +580,8 @@ function provisionLegacyLoginResult(
     `[huawei-auth] login session stored providerAccountId=${accountId} userId=${result.userId ?? "missing"} userName=${result.userName ?? "missing"} domainId=${result.domainId ?? "missing"} businessToken=${maskValue(result.businessToken)} accessKey=${maskValue(result.credentials.accessKey)} securityToken=${maskValue(result.credentials.securityToken)} expiresAt=${result.credentials.expiresAt ?? "missing"}`,
   );
 
-  // 启动动态刷新调度
-  scheduleSessionRefresh(apiKeyObj.id);
+  // 启动动态刷新调度（按 (Key, Account) 粒度）
+  scheduleSessionRefresh(apiKeyObj.id, accountId);
 
   return { accountId, apiKeyId: apiKeyObj.id, apiKey: rawKey };
 }

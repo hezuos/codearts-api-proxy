@@ -69,11 +69,11 @@ async function sendHuaweiChatRequestInner(
   const log = logger.withTrace(traceId);
   const credentials = getCredentials(session);
   const chatUrl = getChatUrl();
-  const { body: requestBody, json: body, divergence, isToolContinuation, chatId } = buildV2RequestBody(request, session);
+  const { body: requestBody, json: body, divergence, isToolContinuation, conversationId, chainKey, identitySource } = buildV2RequestBody(request, session);
   const headers = buildChatHeaders(chatUrl, body, credentials, traceId);
 
   // v2 无 parent_message_id；续传判定完全依赖链状态（按派生 chatId 索引）。
-  const hasContinuity = !!getLastResponseMessageId(chatId);
+  const hasContinuity = !!(chainKey && getLastResponseMessageId(chainKey));
 
   // ── Outgoing request log ──────────────────────────────────────────────────
   const msgArr = requestBody.messages as unknown[];
@@ -89,7 +89,10 @@ async function sendHuaweiChatRequestInner(
 
   // ── Continuity info ───────────────────────────────────────────────────────
   if (!request.codearts?.chat_id) {
-    log.info("chat_id derived from message hash (v2)");
+    log.info("conversation identity resolved", {
+      source: identitySource,
+      conversation_id: conversationId ?? "(none)",
+    });
   }
 
   const { status: initialStatus, stream: initialStream } = await httpsPost(chatUrl, headers, body, signal);
@@ -216,12 +219,13 @@ async function sendHuaweiChatRequestInner(
 
   // Update response_message_id tracker only on successful turns
   if (responseMetadata.response_message_id) {
-    // v2 上游事件不含 chat_id；使用构建侧派生的 chatId 维护链状态。
-    const cid = chatId;
-    if (cid) {
-      const prevValue = getLastResponseMessageId(cid);
+    // v2 上游事件不含 chat_id；使用构建侧派生的 (对话标识, 账号) 组合维护链状态。
+    const cid = conversationId;
+    const ckey = chainKey;
+    if (cid && ckey) {
+      const prevValue = getLastResponseMessageId(ckey);
       const role = getChatIdRole(cid);
-      setLastResponseMessageId(cid, responseMetadata.response_message_id);
+      setLastResponseMessageId(ckey, responseMetadata.response_message_id);
       const assistantMessage: OpenAIChatMessage = {
         role: "assistant",
         content: fullContent,
@@ -232,7 +236,7 @@ async function sendHuaweiChatRequestInner(
         tool_calls: normalizeToolCallsForChain(toolCalls),
       };
       const chain = computeChainForMessages(request.messages);
-      setChainState(cid, {
+      setChainState(ckey, {
         prefixChain: chain.hash,
         prefixLen: chain.length,
         lastReplyHash: createHash("sha256").update(normalizeForChain(assistantMessage)).digest("hex"),
@@ -273,7 +277,7 @@ async function sendHuaweiChatRequestInner(
       }
     : computeCacheUsage(
         promptTokens,
-        getLastPromptTokens(chatId),
+        chainKey ? getLastPromptTokens(chainKey) : undefined,
         divergence,
         hasContinuity,
         isToolContinuation,
@@ -282,8 +286,8 @@ async function sendHuaweiChatRequestInner(
   // 记录本轮 prompt_tokens 供下一轮续传估算缓存命中（guard > 0 避免增量事件 0 值污染）。
   // 必须在 computeCacheUsage 之后调用——否则 getLastPromptTokens 读到的是本轮刚写入的值，
   // 导致 cacheHit 永远等于 promptTokens、cacheMiss 永远为 0。
-  if (responseMetadata.response_message_id && promptTokens > 0) {
-    setLastPromptTokens(chatId, promptTokens);
+  if (chainKey && responseMetadata.response_message_id && promptTokens > 0) {
+    setLastPromptTokens(chainKey, promptTokens);
   }
 
   return {

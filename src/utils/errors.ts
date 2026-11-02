@@ -66,6 +66,18 @@ export class UpstreamConcurrencyError extends AppError {
 }
 
 /**
+ * 鉴权上下文有效，但该 Key 的候选集为空（无可用账号）。
+ *
+ * 与"密钥无效"区分：密钥本身通过了认证，只是没有可承载请求的账号。
+ */
+export class NoUsableAccountError extends AppError {
+  constructor(message: string) {
+    super(message);
+    this.name = "NoUsableAccountError";
+  }
+}
+
+/**
  * 上游因 prompt/上下文长度超限拒绝请求（HTTP 413 或 ChatAgent.00001216）。
  * 代理不再改写历史，直接把这一语义透传给客户端，由其决定压缩或摘要。
  */

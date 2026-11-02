@@ -34,7 +34,7 @@ export { MODEL_MAP } from "./chat";
 // File-based cache (1 hour TTL based on file mtime)
 // ---------------------------------------------------------------------------
 
-const CACHE_FILE = "model-cache.json";
+const CACHE_DIR = "model-cache";
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 interface CacheFileContent {
@@ -42,13 +42,29 @@ interface CacheFileContent {
   fetchedAt: number;
 }
 
-function getCacheFilePath(): string {
-  return path.join(config.dataDir, CACHE_FILE);
+/**
+ * 缓存目录。
+ *
+ * 模型列表按**账号**隔离——不同账号可见的模型不同，共用一份缓存会让后取的
+ * 账号拿到前一个账号的模型列表。
+ */
+function getCacheDir(): string {
+  return path.join(config.dataDir, CACHE_DIR);
+}
+
+/** 账号 ID → 安全的缓存文件名。 */
+function cacheFileName(accountId: string): string {
+  const safe = (accountId || "unknown").replace(/[^a-zA-Z0-9._-]/g, "_");
+  return safe + ".json";
+}
+
+function getCacheFilePath(accountId: string): string {
+  return path.join(getCacheDir(), cacheFileName(accountId));
 }
 
 /** Check if cache file exists and is fresh (< 1 hour old) */
-function isCacheFileFresh(): boolean {
-  const filePath = getCacheFilePath();
+function isCacheFileFresh(accountId: string): boolean {
+  const filePath = getCacheFilePath(accountId);
   if (!fs.existsSync(filePath)) return false;
   try {
     const stat = fs.statSync(filePath);
@@ -59,8 +75,8 @@ function isCacheFileFresh(): boolean {
 }
 
 /** Read cache file, return null if not exists or invalid */
-function readCacheFile(): OpenAIModel[] | null {
-  const filePath = getCacheFilePath();
+function readCacheFile(accountId: string): OpenAIModel[] | null {
+  const filePath = getCacheFilePath(accountId);
   if (!fs.existsSync(filePath)) return null;
   try {
     const content = fs.readFileSync(filePath, "utf8");
@@ -75,12 +91,13 @@ function readCacheFile(): OpenAIModel[] | null {
 }
 
 /** Write models to cache file */
-function writeCacheFile(models: OpenAIModel[]): void {
-  const filePath = getCacheFilePath();
+function writeCacheFile(accountId: string, models: OpenAIModel[]): void {
+  const filePath = getCacheFilePath(accountId);
   try {
-    // Ensure data directory exists
-    if (!fs.existsSync(config.dataDir)) {
-      fs.mkdirSync(config.dataDir, { recursive: true });
+    // Ensure cache directory exists
+    const dir = getCacheDir();
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
     }
     const content: CacheFileContent = {
       models,
@@ -95,12 +112,12 @@ function writeCacheFile(models: OpenAIModel[]): void {
   }
 }
 
-/** Delete cache file (for force refresh) */
-function deleteCacheFile(): void {
-  const filePath = getCacheFilePath();
+/** 删除全部账号的缓存文件（用于强制刷新）。 */
+function deleteCacheFiles(): void {
   try {
-    if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
+    const dir = getCacheDir();
+    if (fs.existsSync(dir)) {
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   } catch {
     // Ignore deletion errors
@@ -108,7 +125,7 @@ function deleteCacheFile(): void {
 }
 
 export function invalidateCache(): void {
-  deleteCacheFile();
+  deleteCacheFiles();
 }
 
 // ---------------------------------------------------------------------------
@@ -343,10 +360,27 @@ async function fetchModelsForAgent(
 // HTTP GET helper
 // ---------------------------------------------------------------------------
 
+/** 测试钩子：替换 HTTP GET，便于模拟不同账号可见模型不同的场景。 */
+type HttpsGetOverride = (
+  urlStr: string,
+  headers: Record<string, string>,
+) => Promise<{ status: number; body: string }>;
+
+let httpsGetOverride: HttpsGetOverride | null = null;
+
+export const __testHooks = {
+  setHttpsGet(fn: HttpsGetOverride | null): void {
+    httpsGetOverride = fn;
+  },
+};
+
 function httpsGet(
   urlStr: string,
   headers: Record<string, string>,
 ): Promise<{ status: number; body: string }> {
+  if (httpsGetOverride) {
+    return httpsGetOverride(urlStr, headers);
+  }
   return new Promise((resolve, reject) => {
     const url = new URL(urlStr);
     const req = https.get(
@@ -431,14 +465,15 @@ function getStaticModels(): OpenAIModel[] {
  *   4. On failure: use cache file if exists (ignore time), else static fallback
  */
 export async function getModelList(
-  _accountId: string,
+  accountId: string,
   session: StoredHuaweiSession,
   traceId: string,
   forceRefresh = false,
 ): Promise<OpenAIModel[]> {
   // 1. Check cache file (skip if forceRefresh)
-  if (!forceRefresh && isCacheFileFresh()) {
-    const cached = readCacheFile();
+  // 缓存按账号隔离——不同账号可见的模型不同。
+  if (!forceRefresh && isCacheFileFresh(accountId)) {
+    const cached = readCacheFile(accountId);
     if (cached) {
       logger.info(`[${traceId}] Model list cache hit (file is fresh)`);
       return cached;
@@ -456,7 +491,7 @@ export async function getModelList(
     const models = buildModelList(dynamicIds);
 
     // 3. Write to cache file
-    writeCacheFile(models);
+    writeCacheFile(accountId, models);
 
     return models;
   } catch (error) {
@@ -465,7 +500,7 @@ export async function getModelList(
     });
 
     // 4. Try cache file (ignore time)
-    const cached = readCacheFile();
+    const cached = readCacheFile(accountId);
     if (cached) {
       logger.info(`[${traceId}] Using cached model list (dynamic fetch failed)`);
       return cached;

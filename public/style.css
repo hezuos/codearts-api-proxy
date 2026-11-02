@@ -976,3 +976,114 @@ tr:hover {
   padding: var(--space-xs) var(--space-sm);
   cursor: pointer;
 }
+
+/* --- 管理面板：用户级 Key 与多账号绑定 --- */
+
+.section-hint {
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+  margin: 0.25rem 0 0.75rem;
+}
+
+.policy-badge {
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-primary);
+  border-radius: var(--radius-sm);
+  color: var(--color-primary);
+  font-size: 0.72rem;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
+.health-badge {
+  border-radius: var(--radius-sm);
+  display: inline-block;
+  font-size: 0.75rem;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
+.health-badge.ok {
+  background: var(--color-status-active-bg);
+  color: var(--color-status-active-text);
+}
+
+.health-badge.cooling {
+  background: var(--color-status-expiring-bg);
+  color: var(--color-status-expiring-text);
+}
+
+.admin-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  text-align: left;
+}
+
+.admin-form select,
+.admin-form input[type="text"] {
+  padding: var(--space-xs) var(--space-sm);
+  width: 100%;
+}
+
+.radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.radio-item,
+.check-item {
+  align-items: center;
+  cursor: pointer;
+  display: flex;
+  font-weight: normal;
+  gap: 0.4rem;
+}
+
+.check-list {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  max-height: 180px;
+  overflow-y: auto;
+  padding: var(--space-sm);
+}
+
+.hint {
+  color: var(--color-text-muted);
+  font-size: 0.82rem;
+  margin: 0;
+}
+
+.hint-warning {
+  background: var(--color-status-expiring-bg);
+  border-left: 3px solid var(--color-warning);
+  color: var(--color-status-expiring-text);
+  font-size: 0.82rem;
+  padding: 0.45rem 0.6rem;
+}
+
+.raw-key-box {
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  margin: var(--space-sm) 0;
+  overflow-x: auto;
+  padding: var(--space-sm);
+}
+
+.raw-key-box code {
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.modal-actions {
+  display: flex;
+  gap: var(--space-sm);
+  justify-content: flex-end;
+  margin-top: var(--space-sm);
+}
+

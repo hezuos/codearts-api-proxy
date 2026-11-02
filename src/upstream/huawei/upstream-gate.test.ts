@@ -18,6 +18,7 @@ import {
   reportUpstreamSuccess,
   __testHooks,
 } from "./upstream-gate";
+import { UpstreamConcurrencyError } from "../../utils/errors";
 
 function tick(ms = 5): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -102,10 +103,20 @@ async function testQueueTimeout(): Promise<void> {
 
   const release1 = await acquireUpstreamSlot("acc-timeout");
   // 等待计时器未 ref，必须让 ref 的 tick 保持在途，否则进程会提前退出。
-  await Promise.all([
-    assert.rejects(acquireUpstreamSlot("acc-timeout"), /Timed out/i),
-    tick(60),
-  ]);
+  const timeoutError = await acquireUpstreamSlot("acc-timeout").then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  await tick(60);
+  assert.ok(
+    timeoutError instanceof UpstreamConcurrencyError,
+    "排队超时 SHALL 抛 UpstreamConcurrencyError（与撞限同语义）",
+  );
+  assert.match(
+    (timeoutError as Error).message,
+    /Timed out/i,
+    "排队超时错误信息 SHALL 保留超时语义",
+  );
   assert.deepEqual(__testHooks.stats("acc-timeout"), { active: 1, queued: 0, limit: 1 });
 
   release1();

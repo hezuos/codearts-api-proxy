@@ -8,6 +8,12 @@ export interface OpenAICodeArtsRequestOptions {
    * 缺失时按 system + 首条 user 内容哈希派生。
    */
   chat_id?: string | null;
+  /**
+   * 稳定对话键：账号无关、跨系统提示词稳定的对话标识来源。
+   * 通常由路由层从 `X-Conversation-Id` 请求头填充，也允许客户端直接在请求体提供。
+   * 缺失时回退到首条用户消息内容指纹。
+   */
+  conversation_id?: string | null;
   /** 覆盖上游 model_id（默认按请求 model 映射）。 */
   model_id?: string | null;
   sub_agent?: OpenAICodeArtsSubAgentOptions | null;

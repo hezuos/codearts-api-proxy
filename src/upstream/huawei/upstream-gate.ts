@@ -16,6 +16,7 @@
 
 import { config } from "../../config";
 import { logger } from "../../utils/logger";
+import { UpstreamConcurrencyError } from "../../utils/errors";
 
 const CONCURRENT_SESSION_ERROR_CODE = "TM.00001041";
 const CONCURRENT_SESSION_ERROR_TEXT = "并发会话数已达上限";
@@ -173,10 +174,13 @@ export function acquireUpstreamSlot(
         detach(waiter);
         removeWaiter(gate, waiter);
         if (gate.active === 0 && gate.waiters.length === 0) gates.delete(accountId);
+        // 排队超时与上游撞限语义相同（都是并发受限），统一为
+        // UpstreamConcurrencyError，使客户端只需处理一种并发错误码（429 + Retry-After）。
         reject(
-          new Error(
+          new UpstreamConcurrencyError(
             `Timed out after ${waitTimeout}ms waiting for an upstream slot ` +
               `(all ${gate.limit} slots busy for this account)`,
+            waitTimeout,
           ),
         );
       }, waitTimeout);

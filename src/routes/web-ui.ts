@@ -1,4 +1,6 @@
 import type { Request, Response } from "express";
+// 引入 Express 的全局类型增强（Request.uiAuth）——类型-only 导入会被擦除
+import type { UiAuthContext } from "../types/express";
 import { isProduction } from "../config";
 import { encryptString, tryDecryptString } from "../auth/crypto/encryption";
 import {
@@ -13,6 +15,9 @@ import {
   getSessionByKeyId,
   setSession,
   getApiKey,
+  resolveKeyScope,
+  resolveBoundAccountIds,
+  listSessionEntries,
 } from "../auth/store";
 import {
   getSession,
@@ -31,7 +36,7 @@ export function successPage(_req: Request, res: Response): void {
  * GET /api/ui/account - Get current user's account information
  */
 export function getAccountInfo(req: Request, res: Response): void {
-  const auth = req.uiAuth;
+  const auth: UiAuthContext | undefined = req.uiAuth;
   if (!auth) {
     res.status(401).json({ error: "Unauthorized" });
     return;
@@ -147,28 +152,44 @@ export function regenerateApiKey(req: Request, res: Response): void {
     ? getSessionByKeyId(currentKey.id)
     : null;
 
-  // Revoke all existing active keys for this user
+  // 吊销前先取出当前 Key 在各绑定账号下的会话
+  const currentSessions = currentKey
+    ? listSessionEntries().filter((e) => e.keyId === currentKey.id)
+    : [];
+
+  // 只吊销**账号级** Key——用户级 Key 由 Admin 管理，
+  // "重新生成账号密钥" SHALL NOT 连带吊销用户级 Key。
   for (const key of existingKeys) {
-    if (!key.revokedAt) {
+    if (!key.revokedAt && resolveKeyScope(key) === "account") {
       revokeStoreApiKey(key.id);
     }
   }
 
-  // Generate and issue new API key bound to the same account
+  // 生成并签发新 Key，沿用当前 Key 的绑定账号与首选账号
   const accounts = listProviderAccounts(auth.userId);
   const defaultAccount = accounts.find((a) => a.isDefault) ?? accounts[0];
   const accountId =
     currentKey?.providerAccountId ?? defaultAccount?.id ?? "";
+  const boundAccountIds = currentKey ? resolveBoundAccountIds(currentKey) : [];
   const newKey = `sk-${randomUUID()}`;
   const apiKey = issueApiKey({
     userId: auth.userId,
     providerAccountId: accountId,
+    providerAccountIds:
+      boundAccountIds.length > 0 ? boundAccountIds : undefined,
     name: "regenerated",
     rawKey: newKey,
   });
 
-  // Copy the current session to the new key (1:1)
-  if (currentSession) {
+  // 把当前 Key 在各绑定账号下的会话复制给新 Key
+  if (currentSessions.length > 0) {
+    for (const entry of currentSessions) {
+      setSession(apiKey.id, {
+        ...entry.session,
+        keyId: apiKey.id,
+      });
+    }
+  } else if (currentSession) {
     setSession(apiKey.id, {
       ...currentSession,
       keyId: apiKey.id,

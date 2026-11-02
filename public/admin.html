@@ -48,6 +48,7 @@
         </div>
 
         <h2>Accounts</h2>
+        <button onclick="openCreateAccountKeyModal()">创建账号级 Key</button>
         <table class="responsive-table">
           <thead>
             <tr>
@@ -55,6 +56,7 @@
               <th>Domain ID</th>
               <th>Provider</th>
               <th>Status</th>
+              <th>Health</th>
               <th>API Keys</th>
               <th>Actions</th>
             </tr>
@@ -62,6 +64,28 @@
           <tbody id="accounts-table"></tbody>
         </table>
         <div id="accounts-cards" class="mobile-cards"></div>
+
+        <h2>用户级 Key（跨账号分配）</h2>
+        <p class="section-hint">
+          用户级 Key 不绑定单一账号，按分配粒度在该用户所属账号之间自动分配。
+          原始密钥仅在创建时一次性返回，列表中只显示哈希。
+        </p>
+        <button onclick="openCreateUserKeyModal()">创建用户级 Key</button>
+        <table class="responsive-table">
+          <thead>
+            <tr>
+              <th>用户</th>
+              <th>名称</th>
+              <th>作用域</th>
+              <th>分配粒度</th>
+              <th>密钥</th>
+              <th>创建时间</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="user-keys-table"></tbody>
+        </table>
+        <div id="user-keys-cards" class="mobile-cards"></div>
 
         <h2>Users</h2>
         <table class="responsive-table">
@@ -92,6 +116,110 @@
         >
         <h2>Account Details</h2>
         <dl id="modal-details" class="account-info"></dl>
+      </div>
+    </div>
+
+    <!-- 用户级 Key 创建弹窗 -->
+    <div id="user-key-modal" class="modal-overlay" onclick="closeModal(event)">
+      <div class="modal">
+        <span
+          class="modal-close"
+          onclick="
+            document
+.getElementById('user-key-modal').classList.remove('active')
+          "
+          >&times;</span
+        >
+        <h2>创建用户级 Key</h2>
+        <div class="admin-form">
+          <label for="user-key-user">用户</label>
+          <select id="user-key-user"></select>
+
+          <label for="user-key-name">名称</label>
+          <input type="text" id="user-key-name" placeholder="可选，例如 default" />
+
+          <label>分配粒度</label>
+          <div class="radio-group">
+            <label class="radio-item">
+              <input type="radio" name="user-key-policy" value="conversation" checked />
+              <span>对话连续（推荐）</span>
+            </label>
+            <label class="radio-item">
+              <input type="radio" name="user-key-policy" value="request" onchange="updatePolicyHint()" />
+              <span>按请求</span>
+            </label>
+          </div>
+          <p class="hint" id="user-key-policy-hint">
+            对话连续：同一对话始终落在同一账号，保留上游缓存局部性。
+          </p>
+          <p class="hint-warning" id="user-key-policy-warning" style="display:none">
+            按请求：每个请求轮询账号，
+            <strong>会牺牲上游缓存局部性</strong>
+            ——同一对话的上下文前缀无法复用上游缓存，延迟与费用可能上升。
+          </p>
+
+          <div class="modal-actions">
+            <button onclick="submitCreateUserKey()">创建</button>
+            <button class="danger" onclick="closeUserKeyModal()">取消</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 账号级 Key 创建/编辑弹窗（多账号绑定） -->
+    <div id="account-key-modal" class="modal-overlay" onclick="closeModal(event)">
+      <div class="modal">
+        <span
+          class="modal-close"
+          onclick="
+            document
+.getElementById('account-key-modal').classList.remove('active')
+          "
+          >&times;</span
+        >
+        <h2 id="account-key-modal-title">创建账号级 Key</h2>
+        <div class="admin-form">
+          <label for="account-key-user">用户</label>
+          <select id="account-key-user" onchange="renderAccountKeyAccounts()"></select>
+
+          <label for="account-key-name">名称</label>
+          <input type="text" id="account-key-name" placeholder="可选" />
+
+          <label>绑定账号（可多选）</label>
+          <div class="check-list" id="account-key-accounts"></div>
+
+          <label for="account-key-preferred">首选账号</label>
+          <select id="account-key-preferred"></select>
+          <p class="hint">首选账号用于兼容单账号场景，默认由该账号转发请求。</p>
+
+          <div class="modal-actions">
+            <button onclick="submitSaveAccountKey()">保存</button>
+            <button class="danger" onclick="closeAccountKeyModal()">取消</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 原始密钥一次性展示弹窗 -->
+    <div id="raw-key-modal" class="modal-overlay" onclick="closeModal(event)">
+      <div class="modal">
+        <span
+          class="modal-close"
+          onclick="
+            document
+.getElementById('raw-key-modal').classList.remove('active')
+          "
+          >&times;</span
+        >
+        <h2>密钥已创建</h2>
+        <p class="hint-warning">
+          原始密钥仅显示这一次，关闭后无法再次查看——请立即复制保存。
+        </p>
+        <div class="raw-key-box"><code id="raw-key-value"></code></div>
+        <div class="modal-actions">
+          <button onclick="copyRawKey(this)">复制</button>
+          <button onclick="closeRawKeyModal()">我已保存</button>
+        </div>
       </div>
     </div>
 
@@ -127,6 +255,7 @@
           : `
               <button class="btn-sm btn-success" onclick="refreshKey('${k.id}', this)">Refresh</button>
               <button class="btn-sm btn-warn" onclick="revokeKey('${k.id}', this)">Revoke</button>
+              <button class="btn-sm btn-default" onclick="openEditKeyAccountsModal('${k.id}')">绑定账号</button>
               <button class="btn-sm btn-danger" onclick="deleteKey('${k.id}', this)">Delete</button>
             `;
 
@@ -215,12 +344,335 @@
         }
       }
 
+      // ---- 用户级 Key 与多账号绑定 ----
+
+      /** Admin 全量数据快照，供弹窗下拉与预览使用。 */
+      let adminUsers = [];
+      let adminAccounts = [];
+      /** 非空表示正在编辑既有账号级 Key 的绑定账号。 */
+      let editingKeyId = null;
+
+      function userDisplayName(userId) {
+        const u = adminUsers.find((x) => x.id === userId);
+        return u ? u.displayName || u.id : userId;
+      }
+
+      function userAccounts(userId) {
+        return adminAccounts.filter((a) => a.userId === userId);
+      }
+
+      function policyLabel(policy) {
+        return policy === "request" ? "按请求" : "对话连续";
+      }
+
+      function buildHealthBadge(health) {
+        if (!health) return "<em>N/A</em>";
+        if (health.cooldownMs > 0) {
+          const secs = Math.ceil(health.cooldownMs / 1000);
+          return (
+            '<span class="health-badge cooling" title="' +
+            (health.cooldownReason || "冷却中") +
+            '">冷却中 ' +
+            secs +
+            "s</span>"
+          );
+        }
+        return (
+          '<span class="health-badge ok" title="' +
+          (health.hasFreeSlot ? "有空闲并发槽位" : "并发槽位已满") +
+          '">' +
+          (health.hasFreeSlot ? "健康" : "繁忙") +
+          "</span>"
+        );
+      }
+
+      function userKeyActionHtml(k) {
+        const nextPolicy =
+          k.balancingPolicy === "request" ? "conversation" : "request";
+        const del =
+          '<button class="btn-sm btn-danger" onclick="deleteUserKey(\'' +
+          k.id +
+          "', this)\">Delete</button>";
+        if (k.revokedAt) return del;
+        return (
+          '<button class="btn-sm btn-default" onclick="switchKeyPolicy(\'' +
+          k.id +
+          "', '" +
+          nextPolicy +
+          "')\">切换粒度</button>" + del
+        );
+      }
+
+      function buildUserKeyRow(k) {
+        return (
+          '<div class="key-row" data-key-id="' +
+          k.id +
+          '">' +
+          '<span class="key-value" title="' +
+          k.keyHash +
+          '">' +
+          maskApiKey(k.keyHash) +
+          "</span>" +
+          (k.name ? '<span class="key-name">(' + k.name + ")</span>" : "") +
+          '<span class="policy-badge">' +
+          policyLabel(k.balancingPolicy) +
+          "</span>" +
+          (k.revokedAt
+            ? '<span class="session-badge revoked">Revoked</span>'
+            : "") +
+          "</div>"
+        );
+      }
+
+      function fillUserSelect(selectId) {
+        const sel = document.getElementById(selectId);
+        sel.innerHTML = "";
+        adminUsers.forEach((u) => {
+          const opt = document.createElement("option");
+          opt.value = u.id;
+          opt.textContent =
+            (u.displayName || u.id) + " (" + u.id.slice(0, 8) + "...)";
+          sel.appendChild(opt);
+        });
+      }
+
+      function openCreateUserKeyModal() {
+        fillUserSelect("user-key-user");
+        document.getElementById("user-key-name").value = "";
+        // 预选"对话连续"
+        const conversation = document.querySelector(
+          'input[name="user-key-policy"][value="conversation"]',
+        );
+        if (conversation) conversation.checked = true;
+        updatePolicyHint();
+        document.getElementById("user-key-modal").classList.add("active");
+      }
+
+      function closeUserKeyModal() {
+        document.getElementById("user-key-modal").classList.remove("active");
+      }
+
+      function updatePolicyHint() {
+        const request = document.querySelector(
+          'input[name="user-key-policy"][value="request"]',
+        );
+        const warning = document.getElementById("user-key-policy-warning");
+        const hint = document.getElementById("user-key-policy-hint");
+        if (!warning || !hint) return;
+        if (request && request.checked) {
+          warning.style.display = "block";
+          hint.style.display = "none";
+        } else {
+          warning.style.display = "none";
+          hint.style.display = "block";
+        }
+      }
+
+      async function submitCreateUserKey() {
+        const userId = document.getElementById("user-key-user").value;
+        const name = document.getElementById("user-key-name").value.trim();
+        const picked = document.querySelector(
+          'input[name="user-key-policy"]:checked',
+        );
+        try {
+          const result = await fetchJson(
+            "/admin/api/users/" + encodeURIComponent(userId) + "/user-keys",
+            {
+              method: "POST",
+              body: JSON.stringify({
+                name: name || undefined,
+                balancingPolicy: picked ? picked.value : "conversation",
+              }),
+            },
+          );
+          closeUserKeyModal();
+          showRawKey(result.apiKey);
+          loadAdminData();
+        } catch (error) {
+          showError("创建失败：" + error.message);
+        }
+      }
+
+      function showRawKey(rawKey) {
+        document.getElementById("raw-key-value").textContent = rawKey;
+        document.getElementById("raw-key-modal").classList.add("active");
+      }
+
+      function closeRawKeyModal() {
+        document.getElementById("raw-key-modal").classList.remove("active");
+        document.getElementById("raw-key-value").textContent = "";
+      }
+
+      async function copyRawKey(btn) {
+        const value = document.getElementById("raw-key-value").textContent;
+        if (!value) return;
+        await copyToClipboard(value, btn);
+      }
+
+      async function switchKeyPolicy(keyId, policy) {
+        try {
+          await fetchJson("/admin/api/keys/" + keyId + "/policy", {
+            method: "PATCH",
+            body: JSON.stringify({ balancingPolicy: policy }),
+          });
+          showSuccess("分配粒度已切换为" + policyLabel(policy));
+          loadAdminData();
+        } catch (error) {
+          showError("切换失败：" + error.message);
+        }
+      }
+
+      async function deleteUserKey(keyId) {
+        if (!confirmAction("删除该用户级 Key？此操作不可撤销。")) return;
+        try {
+          await fetchJson("/admin/api/keys/" + keyId, { method: "DELETE" });
+          showSuccess("用户级 Key 已删除");
+          loadAdminData();
+        } catch (error) {
+          showError("删除失败：" + error.message);
+        }
+      }
+
+      function openCreateAccountKeyModal() {
+        editingKeyId = null;
+        document.getElementById("account-key-modal-title").textContent =
+          "创建账号级 Key";
+        fillUserSelect("account-key-user");
+        document.getElementById("account-key-name").value = "";
+        renderAccountKeyAccounts();
+        document.getElementById("account-key-modal").classList.add("active");
+      }
+
+      function openEditKeyAccountsModal(keyId) {
+        editingKeyId = keyId;
+        document.getElementById("account-key-modal-title").textContent =
+          "编辑绑定账号";
+        fillUserSelect("account-key-user");
+
+        let owner = null;
+        let key = null;
+        for (const a of adminAccounts) {
+          const found = (a.apiKeys || []).find((k) => k.id === keyId);
+          if (found) {
+            owner = a;
+            key = found;
+            break;
+          }
+        }
+        if (owner) {
+          document.getElementById("account-key-user").value = owner.userId;
+        }
+        document.getElementById("account-key-name").value = key
+          ? key.name || ""
+          : "";
+        renderAccountKeyAccounts();
+
+        const bound =
+          key && key.providerAccountIds && key.providerAccountIds.length > 0
+            ? key.providerAccountIds
+            : key && key.providerAccountId
+              ? [key.providerAccountId]
+              : [];
+        document.querySelectorAll(".account-key-check").forEach((c) => {
+          c.checked = bound.indexOf(c.value) >= 0;
+        });
+        if (key && key.providerAccountId) {
+          document.getElementById("account-key-preferred").value =
+            key.providerAccountId;
+        }
+        document.getElementById("account-key-modal").classList.add("active");
+      }
+
+      function closeAccountKeyModal() {
+        document.getElementById("account-key-modal").classList.remove("active");
+        editingKeyId = null;
+      }
+
+      function renderAccountKeyAccounts() {
+        const userId = document.getElementById("account-key-user").value;
+        const accounts = userAccounts(userId);
+        const list = document.getElementById("account-key-accounts");
+        const preferred = document.getElementById("account-key-preferred");
+        list.innerHTML = "";
+        preferred.innerHTML = "";
+
+        if (accounts.length === 0) {
+          list.innerHTML = "<em>该用户没有可绑定的账号</em>";
+          return;
+        }
+
+        accounts.forEach((a) => {
+          const label = document.createElement("label");
+          label.className = "check-item";
+          const box = document.createElement("input");
+          box.type = "checkbox";
+          box.value = a.id;
+          box.className = "account-key-check";
+          const text = document.createElement("span");
+          text.textContent =
+            (a.providerUserName || a.displayName || a.id) +
+            " [" +
+            a.id.slice(0, 8) +
+            "...]";
+          label.appendChild(box);
+          label.appendChild(text);
+          list.appendChild(label);
+
+          const opt = document.createElement("option");
+          opt.value = a.id;
+          opt.textContent = text.textContent;
+          preferred.appendChild(opt);
+        });
+      }
+
+      async function submitSaveAccountKey() {
+        const userId = document.getElementById("account-key-user").value;
+        const name = document.getElementById("account-key-name").value.trim();
+        const checked = Array.from(
+          document.querySelectorAll(".account-key-check:checked"),
+        ).map((c) => c.value);
+        const preferred = document.getElementById("account-key-preferred").value;
+        const accountIds =
+          checked.length > 0 ? checked : preferred ? [preferred] : [];
+        try {
+          if (editingKeyId) {
+            await fetchJson("/admin/api/keys/" + editingKeyId + "/accounts", {
+              method: "PATCH",
+              body: JSON.stringify({
+                providerAccountId: preferred,
+                providerAccountIds: accountIds,
+              }),
+            });
+            showSuccess("绑定账号已更新");
+          } else {
+            const result = await fetchJson("/admin/api/keys", {
+              method: "POST",
+              body: JSON.stringify({
+                userId,
+                name: name || undefined,
+                providerAccountId: preferred,
+                providerAccountIds: accountIds,
+              }),
+            });
+            showRawKey(result.apiKey);
+          }
+          closeAccountKeyModal();
+          loadAdminData();
+        } catch (error) {
+          showError("保存失败：" + error.message);
+        }
+      }
+
       async function loadAdminData() {
         try {
           const [usersData, accountsData] = await Promise.all([
             fetchJson("/admin/api/users"),
             fetchJson("/admin/api/accounts"),
           ]);
+
+          // 供弹窗下拉与绑定预览使用
+          adminUsers = usersData.users;
+          adminAccounts = accountsData.accounts;
 
           // Update statistics
           document.getElementById("total-users").textContent =
@@ -258,6 +710,7 @@
             <td><code>${account.domainId || "N/A"}</code></td>
             <td>${account.provider}</td>
             <td class="${status.class}">${status.label}</td>
+            <td>${buildHealthBadge(account.health)}</td>
             <td>${apiKeyHtml}</td>
             <td>
               <div class="account-act-cell">
@@ -297,6 +750,7 @@
               <div class="card-field"><span class="card-label">Domain ID</span> <code>${account.domainId || "N/A"}</code></div>
               <div class="card-field"><span class="card-label">Provider</span> ${account.provider}</div>
               <div class="card-field"><span class="card-label">Status</span> <span class="${status.class}">${status.label}</span></div>
+              <div class="card-field"><span class="card-label">Health</span> ${buildHealthBadge(account.health)}</div>
               <div class="card-field card-field-stack"><span class="card-label">API Keys</span> ${apiKeyHtml}</div>
               <div class="card-actions">
                 <button onclick="viewAccount('${account.id}')">View</button>
@@ -336,6 +790,47 @@
               <div class="card-field"><span class="card-label">Accounts</span> ${user.accounts.length}</div>
             `;
             usersCards.appendChild(card);
+          });
+
+
+          // 渲染用户级 Key 分区（独立于账号密钥列表）
+          const userKeys = [];
+          usersData.users.forEach((user) => {
+            (user.userKeys || []).forEach((k) => {
+              userKeys.push(Object.assign({}, k, { userId: user.id }));
+            });
+          });
+
+          const userKeysTable = document.getElementById("user-keys-table");
+          userKeysTable.innerHTML = "";
+          userKeys.forEach((k) => {
+            const row = document.createElement("tr");
+            row.innerHTML = `
+            <td>${userDisplayName(k.userId)}</td>
+            <td>${k.name || "N/A"}</td>
+            <td><span class="policy-badge">用户级</span></td>
+            <td>${policyLabel(k.balancingPolicy)}</td>
+            <td>${buildUserKeyRow(k)}</td>
+            <td>${k.createdAt ? formatTimestamp(k.createdAt) : "N/A"}</td>
+            <td>${userKeyActionHtml(k)}</td>
+            `;
+            userKeysTable.appendChild(row);
+          });
+
+          const userKeysCards = document.getElementById("user-keys-cards");
+          userKeysCards.innerHTML = "";
+          userKeys.forEach((k) => {
+            const card = document.createElement("div");
+            card.className = "mobile-card";
+            card.innerHTML = `
+              <div class="card-field"><span class="card-label">用户</span> ${userDisplayName(k.userId)}</div>
+              <div class="card-field"><span class="card-label">名称</span> ${k.name || "N/A"}</div>
+              <div class="card-field"><span class="card-label">作用域</span> <span class="policy-badge">用户级</span></div>
+              <div class="card-field"><span class="card-label">分配粒度</span> ${policyLabel(k.balancingPolicy)}</div>
+              <div class="card-field"><span class="card-label">密钥</span> ${buildUserKeyRow(k)}</div>
+              <div class="card-actions">${userKeyActionHtml(k)}</div>
+            `;
+            userKeysCards.appendChild(card);
           });
 
           document.getElementById("loading").classList.add("hidden");

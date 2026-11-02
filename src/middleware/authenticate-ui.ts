@@ -1,21 +1,9 @@
 import type { Request, Response, NextFunction } from "express";
 import { validateApiKey } from "../auth/store";
 import { tryDecryptString } from "../auth/crypto/encryption";
+import type { UiAuthContext } from "../types/express";
 
-export interface UiAuthContext {
-  apiKeyId: string;
-  userId: string;
-  providerAccountId?: string;
-}
-
-declare global {
-  // eslint-disable-next-line @typescript-eslint/no-namespace
-  namespace Express {
-    interface Request {
-      uiAuth?: UiAuthContext;
-    }
-  }
-}
+export type { UiAuthContext };
 
 export function requireUiAuth(
   req: Request,
@@ -35,12 +23,20 @@ export function requireUiAuth(
   // Validate API key
   const authContext = validateApiKey(apiKey);
 
-  if (!authContext) {
+  // UI Cookie 认证只接受**账号级** Key。
+  //
+  // 用户级 Key 既不绑定账号也不持有会话，放行会让"重新生成密钥"签发出一个
+  // 没有会话、因而永远无法通过校验的新密钥，使操作者被立即踢出。
+  if (!authContext || authContext.kind !== "account") {
     res.redirect("/");
     return;
   }
 
   // Attach auth context to request
-  req.uiAuth = authContext;
+  req.uiAuth = {
+    apiKeyId: authContext.apiKeyId,
+    userId: authContext.userId,
+    providerAccountId: authContext.providerAccountId,
+  };
   next();
 }

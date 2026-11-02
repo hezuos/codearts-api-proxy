@@ -75,6 +75,21 @@ export function keyPath(
   );
 }
 
+/** data/users/{userId}/keys/ —— 用户级 Key 根目录（不绑定单一账号） */
+export function userKeysDir(userId: string): string {
+  return dataPath("users", userId, "keys");
+}
+
+/** data/users/{userId}/keys/{keyId}/ */
+export function userKeyDir(userId: string, keyId: string): string {
+  return dataPath("users", userId, "keys", keyId);
+}
+
+/** data/users/{userId}/keys/{keyId}/key.json */
+export function userKeyPath(userId: string, keyId: string): string {
+  return dataPath("users", userId, "keys", keyId, "key.json");
+}
+
 /** data/users/{userId}/accounts/{accountId}/keys/{keyId}/session.json */
 export function sessionPath(
   userId: string,

@@ -13,6 +13,8 @@ import type { OpenAIChatMessage, OpenAIChatCompletionRequest } from "../../types
 const chatRequest = require("./chat-request") as typeof import("./chat-request");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const translate = require("./chat-translate") as typeof import("./chat-translate");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const conversationId = require("./conversation-id") as typeof import("./conversation-id");
 
 const session = {
   keyId: "test-key",
@@ -52,12 +54,14 @@ function hash(message: OpenAIChatMessage): string {
 
 function seedChain(chatId: string, prefix: OpenAIChatMessage[], lastReply: OpenAIChatMessage): void {
   const chain = translate.computeChainForMessages(prefix);
-  chatRequest.setChainState(chatId, {
+  // 链状态按 (对话标识, 账号) 组合索引。
+  const key = conversationId.buildChainKey(chatId, session.providerAccountId);
+  chatRequest.setChainState(key, {
     prefixChain: chain.hash,
     prefixLen: chain.length,
     lastReplyHash: hash(lastReply),
   });
-  chatRequest.setLastResponseMessageId(chatId, "parent-1");
+  chatRequest.setLastResponseMessageId(key, "parent-1");
 }
 
 function request(

@@ -64,6 +64,8 @@ function mockRes(): { res: Response; writes: string[] } {
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const chatRequestModule = require("./chat-request");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const conversationIdModule = require("./conversation-id") as typeof import("./conversation-id");
 const originalHttpsPost = chatRequestModule.httpsPost;
 let mockFn: HttpsPostFn | null = null;
 let callCount = 0;
@@ -104,8 +106,10 @@ function hash(message: OpenAIChatMessage): string {
 }
 function seedChain(chatId: string, prefix: OpenAIChatMessage[], lastReply: OpenAIChatMessage): void {
   const chain = translate.computeChainForMessages(prefix);
-  chatRequestModule.setChainState(chatId, { prefixChain: chain.hash, prefixLen: chain.length, lastReplyHash: hash(lastReply) });
-  chatRequestModule.setLastResponseMessageId(chatId, "parent-1");
+  // 链状态按 (对话标识, 账号) 组合索引。
+  const key = conversationIdModule.buildChainKey(chatId, session.providerAccountId);
+  chatRequestModule.setChainState(key, { prefixChain: chain.hash, prefixLen: chain.length, lastReplyHash: hash(lastReply) });
+  chatRequestModule.setLastResponseMessageId(key, "parent-1");
 }
 function request(chatId: string, messages: OpenAIChatMessage[]): OpenAIChatCompletionRequest {
   return { model: "GLM-5.1", messages, stream: true, codearts: { chat_id: chatId } };

@@ -1,4 +1,10 @@
-import { getSessionByKeyId, setSession, getAllSessions } from "../../store/hierarchical-store";
+import {
+  getSessionByKeyId,
+  getSession as getSessionForAccount,
+  setSession,
+  listSessionEntries,
+  type SessionEntry,
+} from "../../store/hierarchical-store";
 import { refreshHuaweiSession, refreshHuaweiSessionByToken, refreshHuaweiSessionByOAuth2, type RefreshableHuaweiSession } from "./refresh";
 import { logger } from "../../utils/logger";
 import type { CredentialFormat } from "../../upstream/huawei/extract-credentials";
@@ -6,6 +12,9 @@ import type { DpopKeyPair } from "./dpop";
 
 // Re-export for consumers
 export type { CredentialFormat };
+
+/** 兼容导出：按 Key 取其首选账号下的会话。 */
+export { getSessionByKeyId };
 
 export interface StoredHuaweiSession {
   keyId: string;
@@ -34,10 +43,19 @@ export interface StoredHuaweiSession {
 // Session access (delegates to hierarchical store)
 // ---------------------------------------------------------------------------
 
+/**
+ * 取会话。
+ *
+ * 指定 accountId 时按 (Key, Account) 复合寻址；省略时取该 Key 首选账号下的会话
+ * （兼容账号级 Key 的既有语义）。
+ */
 export function getSession(
   keyId: string,
+  accountId?: string,
 ): StoredHuaweiSession | undefined {
-  return getSessionByKeyId(keyId);
+  return accountId
+    ? getSessionForAccount(keyId, accountId)
+    : getSessionByKeyId(keyId);
 }
 
 export function storeSession(
@@ -53,8 +71,9 @@ export function storeSession(
 
 export async function refreshStoredSession(
   keyId: string,
+  accountId?: string,
 ): Promise<StoredHuaweiSession | null> {
-  const stored = getSessionByKeyId(keyId);
+  const stored = getSession(keyId, accountId);
   if (!stored) {
     return null;
   }
@@ -242,14 +261,23 @@ async function applyRefreshResult(
 
 /** List all key IDs that have sessions */
 export function listSessionKeyIds(): string[] {
-  return Array.from(getAllSessions().keys());
+  const ids = new Set<string>();
+  for (const entry of listSessionEntries()) {
+    ids.add(entry.keyId);
+  }
+  return Array.from(ids);
+}
+
+/** 全部 (Key, Account) 会话条目。 */
+export function listAllSessionEntries(): SessionEntry[] {
+  return listSessionEntries();
 }
 
 /** Log diagnostic summary of the session cache. */
 export function logSessionCacheSummary(): void {
   const now = Date.now();
-  const allSessions = getAllSessions();
-  for (const [keyId, session] of allSessions.entries()) {
+  const allSessions = listSessionEntries();
+  for (const { keyId, accountId, session } of allSessions) {
     const expiresAt = session.expiresAt
       ? new Date(session.expiresAt).getTime()
       : NaN;
@@ -257,8 +285,8 @@ export function logSessionCacheSummary(): void {
       ? "unknown"
       : `${Math.round((expiresAt - now) / 60_000)}min`;
     logger.info(
-      `  session[key=${keyId.slice(0, 8)}...]: AK=${session.accessKey ? "yes" : "no"} expires=${remainingMin}`,
+      `  session[key=${keyId.slice(0, 8)}... acct=${accountId.slice(0, 8)}...]: AK=${session.accessKey ? "yes" : "no"} expires=${remainingMin}`,
     );
   }
-  logger.info(`Session cache total: ${allSessions.size} key sessions`);
+  logger.info(`Session cache total: ${allSessions.length} key-account sessions`);
 }

@@ -59,6 +59,11 @@ import {
   refreshApiKey,
   forceRefreshAccount,
   deleteAccount,
+  listUserScopedKeys,
+  createUserScopedKey,
+  createAccountApiKey,
+  updateKeyAccounts,
+  updateKeyPolicy,
 } from "./routes/admin";
 import { createOpenAIError } from "./utils/openai-error";
 import { logger, closeLogger } from "./utils/logger";
@@ -193,6 +198,26 @@ app.post("/admin/logout", verifyCsrfToken, adminLogout);
 app.get("/admin", requireAdminAuth, adminPanel);
 app.get("/admin/api/users", requireAdminAuth, getAllUsers);
 app.get("/admin/api/accounts", requireAdminAuth, getAllAccounts);
+app.get("/admin/api/user-keys", requireAdminAuth, listUserScopedKeys);
+app.post(
+  "/admin/api/users/:userId/user-keys",
+  requireAdminAuth,
+  verifyCsrfToken,
+  createUserScopedKey,
+);
+app.post("/admin/api/keys", requireAdminAuth, verifyCsrfToken, createAccountApiKey);
+app.patch(
+  "/admin/api/keys/:id/accounts",
+  requireAdminAuth,
+  verifyCsrfToken,
+  updateKeyAccounts,
+);
+app.patch(
+  "/admin/api/keys/:id/policy",
+  requireAdminAuth,
+  verifyCsrfToken,
+  updateKeyPolicy,
+);
 app.get("/admin/api/accounts/:id", requireAdminAuth, getAccountDetails);
 app.post("/admin/api/keys/:id/revoke", requireAdminAuth, verifyCsrfToken, revokeApiKey);
 app.delete("/admin/api/keys/:id", requireAdminAuth, verifyCsrfToken, deleteApiKey);

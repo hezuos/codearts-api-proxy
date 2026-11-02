@@ -63,6 +63,22 @@ export interface AppConfig {
    * 槽位是账号级共享的（官方 IDE / 其他客户端也会占用），无法预先感知。
    */
   upstreamConcurrencyRecoverMs: number;
+  /**
+   * 账号冷却时长——上游并发上限被拒后的冷却窗口（默认 60000ms）。
+   * 与闸门的自适应恢复窗口对齐。
+   */
+  routingCooldownConcurrencyMs: number;
+  /**
+   * 账号冷却时长——凭证失效后的冷却窗口（默认 300000ms）。
+   * 比撞限更长，避免反复撞同一个坏账号。
+   */
+  routingCooldownCredentialMs: number;
+  /** 账号冷却时长——模型不可用后的冷却窗口（默认 30000ms）。 */
+  routingCooldownModelMs: number;
+  /** 对话粘性绑定的空闲超时（默认 7200000ms，即 2 小时）。 */
+  routingStickyIdleMs: number;
+  /** 单个 Key 的对话粘性绑定表容量上限（默认 1000）。 */
+  routingStickyMaxEntries: number;
 }
 
 function requireEnv(name: string, fallback?: string, hint?: string): string {
@@ -122,6 +138,19 @@ export const config: AppConfig = {
   upstreamMinConcurrency: Number(process.env.UPSTREAM_MIN_CONCURRENCY ?? 1),
   upstreamConcurrencyRecoverMs: Number(
     process.env.UPSTREAM_CONCURRENCY_RECOVER_MS ?? 60_000,
+  ),
+  routingCooldownConcurrencyMs: Number(
+    process.env.ROUTING_COOLDOWN_CONCURRENCY_MS ?? 60_000,
+  ),
+  routingCooldownCredentialMs: Number(
+    process.env.ROUTING_COOLDOWN_CREDENTIAL_MS ?? 300_000,
+  ),
+  routingCooldownModelMs: Number(
+    process.env.ROUTING_COOLDOWN_MODEL_MS ?? 30_000,
+  ),
+  routingStickyIdleMs: Number(process.env.ROUTING_STICKY_IDLE_MS ?? 7_200_000),
+  routingStickyMaxEntries: Number(
+    process.env.ROUTING_STICKY_MAX_ENTRIES ?? 1000,
   ),
 };
 
