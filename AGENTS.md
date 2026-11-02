@@ -65,7 +65,7 @@ src/
 - **链状态按 (对话标识, ProviderAccount) 组合索引** — 同一对话在不同账号上的上游消息标识互不污染；键用 `buildChainKey()` 生成
 - **勿用 `process.platform`** — `osVersion` 固定 `"win32"`
 - **勿用 `process.cwd()`** — `currentWorkingDirectory` 必须来自 `request.codearts.current_working_directory`
-- **勿创建第二个用户** — 单用户模式，`createUser()` 有硬守卫
+- **用户显式创建** — 启动零自动创建，`createUser()` 仅做非空邮箱去重
 - **勿解绑最后一个 ProviderAccount** — 至少保留一个账号
 - **有 tool_calls 时 finish_reason 必须为 `"tool_calls"`** — 非 `"stop"`，否则客户端不执行工具
 - **生产环境必须设置 `ENCRYPTION_KEY`** — 无安全回退

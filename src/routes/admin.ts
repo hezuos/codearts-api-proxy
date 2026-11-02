@@ -27,6 +27,7 @@ import {
   setSession,
   deleteSession,
   getAllApiKeys,
+  createUser,
 } from "../auth/store";
 import {
   hasFreeSlot,
@@ -138,6 +139,8 @@ export function adminSetupPage(_req: Request, res: Response): void {
 
 /**
  * POST /admin/setup - Set admin password
+ *
+ * 同时显式创建首个用户：启动不再自动创建用户。displayName 必填，email 可选。
  */
 export function adminSetup(req: Request, res: Response): void {
   if (isAdminConfigured()) {
@@ -145,15 +148,38 @@ export function adminSetup(req: Request, res: Response): void {
     return;
   }
 
-  const { password } = req.body;
+  const body = req.body as { password?: string; displayName?: string; email?: string };
+  const { password } = body;
   if (!password || typeof password !== "string" || password.length < 8) {
     res.status(400).json({ error: "Password must be at least 8 characters" });
     return;
   }
 
+  const displayName = (body.displayName ?? "").trim();
+  if (!displayName) {
+    res.status(400).json({ error: "displayName is required" });
+    return;
+  }
+  const email = body.email?.trim() ? body.email.trim() : undefined;
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    res.status(400).json({ error: "Invalid email format" });
+    return;
+  }
+
+  let userId: string | undefined;
+  try {
+    // 已有用户时 setup 不再重复创建（老实例升级路径）
+    if (listAllUsers().length === 0) {
+      userId = createUser({ displayName, email }).id;
+    }
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : "Failed to create user" });
+    return;
+  }
+
   saveAdminConfig(password);
   setAdminSession(res);
-  res.json({ success: true });
+  res.json({ success: true, userId: userId ?? listAllUsers()[0]?.id });
 }
 
 /**
@@ -628,6 +654,53 @@ export function updateKeyPolicy(req: Request, res: Response): void {
 
   logger.info(`[admin] User-scoped key policy updated: ${keyId} -> ${policy}`);
   res.json({ success: true, keyId, balancingPolicy: policy });
+}
+
+/**
+ * POST /admin/api/users - 创建用户（显式，需 displayName，可选 email）
+ */
+export function createAdminUser(req: Request, res: Response): void {
+  const body = req.body as { displayName?: string; email?: string };
+  const displayName = (body.displayName ?? "").trim();
+  if (!displayName) {
+    res.status(400).json({ error: "displayName is required" });
+    return;
+  }
+  const email = body.email?.trim() ? body.email.trim() : undefined;
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    res.status(400).json({ error: "Invalid email format" });
+    return;
+  }
+  try {
+    const user = createUser({ displayName, email });
+    logger.info(`[admin] User created: ${user.id}`);
+    res.json({ id: user.id, email: user.email ?? null, displayName: user.displayName, createdAt: user.createdAt });
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : "Failed to create user" });
+  }
+}
+
+/**
+ * POST /admin/api/users/:id/invite - 为指定用户签发一次性绑定口令
+ *
+ * 明文口令仅此一次返回，后续不再可查。
+ */
+export function issueUserInvite(req: Request, res: Response): void {
+  const userId = String(req.params.id);
+  const user = listAllUsers().find((u) => u.id === userId);
+  if (!user) {
+    res.status(404).json({ error: "User not found" });
+    return;
+  }
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const inviteStore = require("../store/invite-store") as typeof import("../store/invite-store");
+    const { token, expiresAt } = inviteStore.issueInviteToken(userId);
+    logger.info(`[admin] Invite issued for user: ${userId}`);
+    res.json({ token, expiresAt, userId });
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : "Failed to issue invite" });
+  }
 }
 
 export function deleteAccount(req: Request, res: Response): void {

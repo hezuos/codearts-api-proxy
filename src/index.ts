@@ -6,7 +6,7 @@ import cookieParser from "cookie-parser";
 import rateLimit from "express-rate-limit";
 import type { NextFunction, Request, Response } from "express";
 import { APP_VERSION, GIT_COMMIT, BUILD_TIME } from "./version";
-import { bootstrapDefaultAuth, loadPersistedAuthStore } from "./auth/store";
+import { loadPersistedAuthStore } from "./auth/store";
 import {
   startHuaweiRefreshTask,
   stopHuaweiRefreshTask,
@@ -64,6 +64,8 @@ import {
   createAccountApiKey,
   updateKeyAccounts,
   updateKeyPolicy,
+  createAdminUser,
+  issueUserInvite,
 } from "./routes/admin";
 import { createOpenAIError } from "./utils/openai-error";
 import { logger, closeLogger } from "./utils/logger";
@@ -88,7 +90,6 @@ const globalLimiter = rateLimit({
 app.use(globalLimiter);
 
 loadPersistedAuthStore();
-bootstrapDefaultAuth();
 loadAdminConfig();
 
 if (isDevEncryptionKey && fs.existsSync(config.dataDir) && fs.readdirSync(config.dataDir).length > 0) {
@@ -197,6 +198,8 @@ app.post("/admin/login", adminLimiter, verifyCsrfToken, adminLogin);
 app.post("/admin/logout", verifyCsrfToken, adminLogout);
 app.get("/admin", requireAdminAuth, adminPanel);
 app.get("/admin/api/users", requireAdminAuth, getAllUsers);
+app.post("/admin/api/users", requireAdminAuth, verifyCsrfToken, createAdminUser);
+app.post("/admin/api/users/:id/invite", requireAdminAuth, verifyCsrfToken, issueUserInvite);
 app.get("/admin/api/accounts", requireAdminAuth, getAllAccounts);
 app.get("/admin/api/user-keys", requireAdminAuth, listUserScopedKeys);
 app.post(

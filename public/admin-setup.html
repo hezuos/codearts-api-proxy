@@ -11,8 +11,31 @@
       <h1>Admin Setup <span class="version-badge"></span> <button class="theme-toggle" onclick="toggleTheme()" title="Toggle dark mode">&#9790;</button></h1>
 
       <p>Set up the admin password for the first time.</p>
+      <p class="hint">同时创建首个用户：启动不再自动创建用户，首个用户需在此显式创建。</p>
 
       <form id="setup-form" onsubmit="return setupAdmin(event);">
+        <div>
+          <label for="display-name">Display Name:</label>
+          <input
+            type="text"
+            id="display-name"
+            name="displayName"
+            required
+            minlength="1"
+            placeholder="例如 管理员"
+          />
+        </div>
+
+        <div>
+          <label for="email">Email (optional):</label>
+          <input
+            type="email"
+            id="email"
+            name="email"
+            placeholder="可选，用于去重"
+          />
+        </div>
+
         <div>
           <label for="password">Password:</label>
           <input
@@ -79,9 +102,16 @@
       async function setupAdmin(event) {
         event.preventDefault();
 
+        const displayName = document.getElementById("display-name").value.trim();
+        const email = document.getElementById("email").value.trim();
         const password = document.getElementById("password").value;
         const confirmPassword =
           document.getElementById("confirm-password").value;
+
+        if (!displayName) {
+          showError("Display name is required");
+          return false;
+        }
 
         if (password !== confirmPassword) {
           showError("Passwords do not match");
@@ -96,7 +126,7 @@
         try {
           await fetchJson("/admin/setup", {
             method: "POST",
-            body: JSON.stringify({ password }),
+            body: JSON.stringify({ password, displayName, email: email || undefined }),
           });
 
           showSuccess("Admin password set successfully! Redirecting...");

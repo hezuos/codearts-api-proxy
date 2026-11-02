@@ -4,10 +4,10 @@
 TBD - created by archiving change ticketed-web-login-flow. Update Purpose after archive.
 ## Requirements
 ### Requirement: Browser login ticket creation
-The system SHALL provide a browser-oriented Huawei login start endpoint that creates a unique `ticket_id`, records a pending browser login flow, and returns enough information for the Web UI to launch the upstream Huawei login while tracking that specific ticket.
+The system SHALL provide a browser-oriented Huawei login start endpoint that creates a unique `ticket_id`, records a pending browser login flow bound to an explicit user, and returns enough information for the Web UI to launch the upstream Huawei login while tracking that specific ticket.
 
 #### Scenario: Create browser login ticket
-- **WHEN** an authenticated Web UI requests a new Huawei browser login flow
+- **WHEN** a Web UI holding an authenticated session or a valid binding token requests a new Huawei browser login flow
 - **THEN** the system returns a unique `ticket_id`, a Huawei `login_url`, and an expiration timestamp for that ticket
 
 #### Scenario: Track multiple browser login tickets independently
@@ -30,7 +30,7 @@ The system SHALL expose ticket status for browser login flows so the Web UI can 
 - **THEN** the system returns a terminal failed or expired status and a user-displayable reason
 
 ### Requirement: Ticket-bound callback completion
-The system SHALL complete browser login callbacks against the intended `ticket_id` instead of resolving browser flows by latest-flow heuristics.
+The system SHALL complete browser login callbacks against the intended `ticket_id` and its bound explicit user instead of resolving browser flows by latest-flow heuristics. The OAuth2 `code + state` callback SHALL follow the same ticket correlation.
 
 #### Scenario: Callback updates matching ticket
 - **WHEN** Huawei redirects the browser back for a specific browser login flow

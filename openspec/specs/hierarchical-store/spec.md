@@ -141,8 +141,8 @@ The system SHALL NOT create a default API Key at startup. API Keys SHALL only be
 #### Scenario: Startup without existing data
 
 - **WHEN** the system starts with no existing user data
-- **THEN** the system SHALL create a default user with no keys
-- **AND** the system SHALL NOT create any API Key or Session
+- **THEN** the system SHALL start with zero users and create nothing
+- **AND** the system SHALL NOT create any user, API Key or Session implicitly
 
 #### Scenario: API request without any key returns 401
 
@@ -172,6 +172,30 @@ The system SHALL remove API key entries from all in-memory indexes (including le
 - **AND** the system SHALL remove the key from `apiKeysByValue` Map (if present)
 - **AND** the system SHALL remove the key from `keyLocation` Map
 - **AND** the system SHALL remove the associated session from `sessions` Map
+
+### Requirement: Explicit multi-user creation
+
+The system SHALL allow creating multiple users through explicit admin operations. Email uniqueness SHALL be enforced only when a non-empty email is provided, compared case-insensitively after trimming. Users without email SHALL be allowed and SHALL NOT conflict with each other.
+
+#### Scenario: Create first user via setup
+
+- **WHEN** admin completes initial setup with user details
+- **THEN** the system creates the first user explicitly and creates nothing implicitly
+
+#### Scenario: Create additional user via admin
+
+- **WHEN** an authenticated admin creates another user with a new email
+- **THEN** the system creates the user with a fresh id
+
+#### Scenario: Duplicate email rejected
+
+- **WHEN** admin creates a user with an already used email, compared case-insensitively after trimming
+- **THEN** the system rejects the request with an explicit duplicate error
+
+#### Scenario: Users without email do not conflict
+
+- **WHEN** admin creates users without providing an email
+- **THEN** the system SHALL allow multiple such users and SHALL NOT treat missing emails as duplicates
 
 ### Requirement: Encryption key mandatory in production
 

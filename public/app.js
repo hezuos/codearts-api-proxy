@@ -287,6 +287,7 @@ async function startHuaweiBrowserLogin(options = {}) {
   const {
     launchMode = "iframe",
     container = null,
+    inviteToken = "",
     onStatusChange = null,
     onComplete = null,
     onError = null,
@@ -294,6 +295,7 @@ async function startHuaweiBrowserLogin(options = {}) {
 
   const result = await fetchJson("/auth/huawei/browser/start", {
     method: "POST",
+    body: JSON.stringify(inviteToken ? { invite_token: inviteToken } : {}),
   });
 
   if (typeof onStatusChange === "function") {

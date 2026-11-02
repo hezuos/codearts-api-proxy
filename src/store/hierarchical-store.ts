@@ -339,6 +339,8 @@ export function deleteAccount(userId: string, accountId: string): void {
  *
  * 用户级 Key 不在账号目录下，删除用户目录**不足以**把它从内存索引移除——
  * 残留条目将继续通过认证，因此必须显式清理。
+ * 同步 require 避免 invite-store ↔ hierarchical-store 顶层循环依赖
+ *（调用时两模块均已加载完成）。
  */
 export function deleteUser(userId: string): void {
   // Cascade: delete all accounts under this user
@@ -358,6 +360,15 @@ export function deleteUser(userId: string): void {
 
   // Update in-memory caches
   users.delete(userId);
+
+  // 作废该用户未消费的绑定口令
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const inviteStore = require("./invite-store") as typeof import("./invite-store");
+    inviteStore.invalidateInviteTokensForUser(userId);
+  } catch {
+    // 忽略清理错误
+  }
 }
 
 // ---------------------------------------------------------------------------

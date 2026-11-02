@@ -30,6 +30,12 @@
           Click the link below to login with your Huawei Cloud account and get
           your API key.
         </p>
+        <p style="font-size: 0.9em;">
+          首次绑定需填写管理员签发的一次性绑定口令（15 分钟有效，一次使用后失效）。
+        </p>
+        <p>
+          <input type="text" id="invite-token-input" placeholder="sk-invite-...（绑定口令）" style="width: 100%; font-family: monospace; font-size: 0.85em;" />
+        </p>
         <p><button onclick="launchHuaweiLogin()">Login with Huawei Cloud</button></p>
         <div id="login-status" class="hidden login-panel">
           <p id="login-status-text">Preparing Huawei login...</p>
@@ -87,11 +93,19 @@ openai chat.completions.create \
         const statusPanel = document.getElementById("login-status");
         const statusText = document.getElementById("login-status-text");
         statusPanel.classList.remove("hidden");
+        const inviteToken = (document.getElementById("invite-token-input") || {}).value
+          ? document.getElementById("invite-token-input").value.trim()
+          : "";
+        if (!inviteToken) {
+          statusText.textContent = "请先填写管理员签发的一次性绑定口令。";
+          return;
+        }
         statusText.textContent = "Opening Huawei login popup...";
 
         try {
           await startHuaweiBrowserLogin({
             launchMode: "popup",
+            inviteToken,
             onStatusChange(status) {
               statusText.textContent = `Login status: ${status.status || "pending"}`;
             },

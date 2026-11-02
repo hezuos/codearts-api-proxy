@@ -88,6 +88,7 @@
         <div id="user-keys-cards" class="mobile-cards"></div>
 
         <h2>Users</h2>
+        <button onclick="openCreateUserModal()">创建用户</button>
         <table class="responsive-table">
           <thead>
             <tr>
@@ -96,6 +97,7 @@
               <th>Display Name</th>
               <th>Created</th>
               <th>Accounts</th>
+              <th>Actions</th>
             </tr>
           </thead>
           <tbody id="users-table"></tbody>
@@ -196,6 +198,57 @@
             <button onclick="submitSaveAccountKey()">保存</button>
             <button class="danger" onclick="closeAccountKeyModal()">取消</button>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 用户创建弹窗 -->
+    <div id="user-create-modal" class="modal-overlay" onclick="closeModal(event)">
+      <div class="modal">
+        <span
+          class="modal-close"
+          onclick="
+            document
+.getElementById('user-create-modal').classList.remove('active')
+          "
+          >&times;</span
+        >
+        <h2>创建用户</h2>
+        <div class="admin-form">
+          <label for="new-user-display-name">Display Name</label>
+          <input type="text" id="new-user-display-name" placeholder="必填" />
+
+          <label for="new-user-email">Email（可选）</label>
+          <input type="email" id="new-user-email" placeholder="可选，用于去重" />
+
+          <div class="modal-actions">
+            <button onclick="submitCreateUser()">创建</button>
+            <button class="danger" onclick="document.getElementById('user-create-modal').classList.remove('active')">取消</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 绑定口令一次性展示弹窗 -->
+    <div id="invite-modal" class="modal-overlay" onclick="closeModal(event)">
+      <div class="modal">
+        <span
+          class="modal-close"
+          onclick="
+            document
+.getElementById('invite-modal').classList.remove('active')
+          "
+          >&times;</span
+        >
+        <h2>绑定口令已签发</h2>
+        <p class="hint-warning">
+          口令仅显示这一次，关闭后无法再次查看——请立即复制发给用户。15 分钟内有效，一次使用后失效。
+        </p>
+        <div class="raw-key-box"><code id="invite-token-value"></code></div>
+        <p class="hint" id="invite-token-expiry"></p>
+        <div class="modal-actions">
+          <button onclick="copyInviteToken(this)">复制</button>
+          <button onclick="document.getElementById('invite-modal').classList.remove('active'); document.getElementById('invite-token-value').textContent = '';">我已保存</button>
         </div>
       </div>
     </div>
@@ -772,6 +825,7 @@
             <td>${user.displayName || "N/A"}</td>
             <td>${user.createdAt ? formatTimestamp(user.createdAt) : "N/A"}</td>
             <td>${user.accounts.length}</td>
+            <td><button class="btn-sm btn-default" onclick="issueInvite('${user.id}', this)">签发绑定口令</button></td>
           `;
             usersTable.appendChild(row);
           });
@@ -788,6 +842,7 @@
               <div class="card-field"><span class="card-label">Display Name</span> ${user.displayName || "N/A"}</div>
               <div class="card-field"><span class="card-label">Created</span> ${user.createdAt ? formatTimestamp(user.createdAt) : "N/A"}</div>
               <div class="card-field"><span class="card-label">Accounts</span> ${user.accounts.length}</div>
+              <div class="card-actions"><button onclick="issueInvite('${user.id}', this)">签发绑定口令</button></div>
             `;
             usersCards.appendChild(card);
           });
@@ -905,6 +960,53 @@
         } catch (error) {
           showError("Failed to load account details: " + error.message);
         }
+      }
+
+      function openCreateUserModal() {
+        document.getElementById("new-user-display-name").value = "";
+        document.getElementById("new-user-email").value = "";
+        document.getElementById("user-create-modal").classList.add("active");
+      }
+
+      async function submitCreateUser() {
+        const displayName = document.getElementById("new-user-display-name").value.trim();
+        const email = document.getElementById("new-user-email").value.trim();
+        if (!displayName) {
+          showError("Display name is required");
+          return;
+        }
+        try {
+          await fetchJson("/admin/api/users", {
+            method: "POST",
+            body: JSON.stringify({ displayName, email: email || undefined }),
+          });
+          document.getElementById("user-create-modal").classList.remove("active");
+          showSuccess("用户已创建");
+          loadAdminData();
+        } catch (error) {
+          showError("创建失败：" + error.message);
+        }
+      }
+
+      async function issueInvite(userId, btn) {
+        try {
+          const result = await fetchJson("/admin/api/users/" + encodeURIComponent(userId) + "/invite", {
+            method: "POST",
+          });
+          document.getElementById("invite-token-value").textContent = result.token;
+          document.getElementById("invite-token-expiry").textContent =
+            "过期时间：" + (result.expiresAt ? formatTimestamp(result.expiresAt) : "N/A");
+          document.getElementById("invite-modal").classList.add("active");
+          loadAdminData();
+        } catch (error) {
+          showError("签发失败：" + error.message);
+        }
+      }
+
+      async function copyInviteToken(btn) {
+        const value = document.getElementById("invite-token-value").textContent;
+        if (!value) return;
+        await copyToClipboard(value, btn);
       }
 
       function closeModal(event) {

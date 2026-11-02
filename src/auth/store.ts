@@ -17,7 +17,7 @@ export {
   getUser,
   getDefaultUser,
   listAllUsers,
-  bootstrapDefaultAuth,
+  INVITE_TOKEN_TTL_MS,
 } from "../store/user-store";
 
 // ProviderAccount operations

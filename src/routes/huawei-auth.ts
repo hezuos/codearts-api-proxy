@@ -9,12 +9,13 @@ import { getRequestAuth } from "../middleware/authenticate-api-key";
 import { getTraceId } from "../middleware/request-context";
 import { logger } from "../utils/logger";
 import {
-  getDefaultUser,
   validateApiKey,
   upsertProviderAccount,
   listProviderAccounts,
+  getProviderAccount,
   issueApiKey,
 } from "../auth/store";
+import { consumeInviteToken } from "../store/invite-store";
 import {
   waitForHuaweiTicketExchange,
   type HuaweiTicketExchangeResponse,
@@ -126,17 +127,30 @@ function getPendingApiLoginFlow(ticketId?: string): LoginFlowRecord | null {
 }
 
 /**
- * 获取任何类型的 pending 登录流程（API 或 browser）。
- * 用于 OAuth2 回调处理，因为 UI 使用 browser 流程。
+ * 按 OAuth2 `state` 精确匹配 pending 登录流程。
+ *
+ * `state` 即建 flow 时的 `ticketId`，多用户并发时不再按过期时间挑最近 flow。
  */
-function getAnyPendingLoginFlow(): LoginFlowRecord | null {
+function getPendingLoginFlowByState(state: string): LoginFlowRecord | null {
   clearExpiredLoginFlows();
+  const now = Date.now();
+  for (const flow of loginFlows.values()) {
+    if (flow.expiresAt <= now) continue;
+    if (flow.state === state || flow.ticketId === state) return flow;
+  }
+  return null;
+}
 
-  const pending = Array.from(loginFlows.values())
-    .filter((flow) => flow.expiresAt > Date.now())
-    .sort((left, right) => right.expiresAt - left.expiresAt);
 
-  return pending[0] ?? null;
+
+/** 跨用户抢账号检查：已属他人的华为账号不允许静默抢绑。 */
+function assertAccountNotOwnedByOtherUser(accountId: string, flowUserId: string): void {
+  const existing = getProviderAccount(accountId);
+  if (existing && existing.userId !== flowUserId) {
+    const error = new Error(`Huawei account ${accountId} already bound to another user`) as Error & { code?: string };
+    error.code = "account_conflict";
+    throw error;
+  }
 }
 
 /**
@@ -189,6 +203,8 @@ async function handleOAuth2AuthorizationCode(
     const accountId = userInfo.domainId
       ? `huawei-${userInfo.domainId}`
       : `huawei-${Date.now()}`;
+
+    assertAccountNotOwnedByOtherUser(accountId, flow.userId);
 
     // 确定是否为默认账号
     const existingAccounts = listProviderAccounts(flow.userId);
@@ -266,6 +282,25 @@ async function handleOAuth2AuthorizationCode(
       user_name: userInfo.userName,
     });
   } catch (error) {
+    if ((error as { code?: string }).code === "account_conflict") {
+      logger.warn("[huawei-auth] OAuth2 login rejected: account owned by another user", {
+        ticketId: maskValue(flow.ticketId),
+      });
+      if (flow.kind === "browser") {
+        loginFlows.set(flow.ticketId, {
+          ...flow,
+          browserStatus: "failed",
+          completedAt: Date.now(),
+          error: error instanceof Error ? error.message : "Account conflict",
+        });
+      }
+      res.status(409).json(createOpenAIError(
+        error instanceof Error ? error.message : "Account conflict",
+        "invalid_request_error",
+        "account_conflict",
+      ));
+      return;
+    }
     logger.error("[huawei-auth] OAuth2 authorization code processing failed", {
       error: error instanceof Error ? error.message : String(error),
     });
@@ -385,7 +420,15 @@ function clearBrowserLoginTicketCookie(res: Response): void {
   });
 }
 
-function resolveBrowserLoginUserId(req: Request): string | null {
+type InviteResolveResult = { ok: true; userId: string } | { ok: false; code: string; message: string };
+
+/**
+ * 解析浏览器登录归属：已鉴权 cookie 优先，否则消费 `invite_token`。
+ *
+ * 匿名无口令 → binding_required；口令无效/过期 → 对应 400。
+ * 不再回退默认用户（多用户下无法猜归属）。
+ */
+function resolveInviteUserId(req: Request): InviteResolveResult {
   // cookie 中的 API Key 为 AES-256-GCM 密文，需先解开再校验。
   const cookieApiKey = tryDecryptString(
     typeof req.cookies.auth_key === "string" ? req.cookies.auth_key : undefined,
@@ -393,12 +436,27 @@ function resolveBrowserLoginUserId(req: Request): string | null {
   if (cookieApiKey) {
     const auth = validateApiKey(cookieApiKey);
     if (auth) {
-      return auth.userId;
+      return { ok: true, userId: auth.userId };
     }
   }
 
-  return getDefaultUser()?.id ?? null;
+  const body = (req.body ?? {}) as { invite_token?: string };
+  const token =
+    (typeof req.query.invite_token === "string" ? req.query.invite_token : undefined) ??
+    (typeof body.invite_token === "string" ? body.invite_token : undefined);
+  const consumed = consumeInviteToken(token);
+  if (consumed.ok) {
+    return { ok: true, userId: consumed.userId };
+  }
+  if (consumed.reason === "missing") {
+    return { ok: false, code: "binding_required", message: "Login requires a binding invite token" };
+  }
+  if (consumed.reason === "expired") {
+    return { ok: false, code: "token_expired", message: "Binding invite token has expired" };
+  }
+  return { ok: false, code: "token_invalid", message: "Invalid binding invite token" };
 }
+
 
 async function createBrowserLoginFlow(userId: string, callbackPort: number): Promise<LoginFlowRecord> {
   const flow = await createHuaweiLoginFlow(callbackPort);
@@ -468,6 +526,8 @@ async function provisionNewIamLoginResult(
     ? `huawei-${domainId}`
     : `huawei-${Date.now()}`;
 
+  assertAccountNotOwnedByOtherUser(accountId, flow.userId);
+
   // Determine isDefault: true if this is the first account for the user,
   // or if this account already exists and was previously the default
   const existingAccounts = listProviderAccounts(flow.userId);
@@ -531,6 +591,8 @@ function provisionLegacyLoginResult(
   const accountId = result.domainId
     ? `huawei-${result.domainId}`
     : `huawei-${Date.now()}`;
+
+  assertAccountNotOwnedByOtherUser(accountId, flow.userId);
 
   // Determine isDefault: true if this is the first account for the user,
   // or if this account already exists and was previously the default
@@ -686,11 +748,12 @@ export async function initiateHuaweiLogin(req: Request, res: Response): Promise<
 export async function authorizeHuaweiLogin(req: Request, res: Response): Promise<void> {
   clearExpiredLoginFlows();
 
-  const userId = resolveBrowserLoginUserId(req);
-  if (!userId) {
-    res.status(500).json(createOpenAIError("No default user configured"));
+  const resolved = resolveInviteUserId(req);
+  if (!resolved.ok) {
+    res.status(400).json(createOpenAIError(resolved.message, "invalid_request_error", resolved.code));
     return;
   }
+  const userId = resolved.userId;
 
   const callbackPort = Number(req.query.callback_port) || config.callbackPort;
   const flow = await createBrowserLoginFlow(userId, callbackPort);
@@ -706,11 +769,12 @@ export async function authorizeHuaweiLogin(req: Request, res: Response): Promise
 export async function startBrowserHuaweiLogin(req: Request, res: Response): Promise<void> {
   clearExpiredLoginFlows();
 
-  const userId = resolveBrowserLoginUserId(req);
-  if (!userId) {
-    res.status(500).json(createOpenAIError("No default user configured"));
+  const resolved = resolveInviteUserId(req);
+  if (!resolved.ok) {
+    res.status(400).json(createOpenAIError(resolved.message, "invalid_request_error", resolved.code));
     return;
   }
+  const userId = resolved.userId;
 
   const callbackPort = Number(req.query.callback_port) || config.callbackPort;
   const flow = await createBrowserLoginFlow(userId, callbackPort);
@@ -784,38 +848,23 @@ export async function handleHuaweiCallback(
         ? req.cookies.huawei_login_ticket
         : undefined;
 
-  // 新版 OAuth2 回调（code + state）
+  // 新版 OAuth2 回调（code + state）：state 即建 flow 时的 ticketId，按票据精确归属。
   if (code && state) {
     logger.info(
       `[huawei-auth] OAuth2 callback received code=${maskValue(code)} state=${maskValue(state)}`,
     );
 
-    // 打印当前所有 login flows 用于调试
-    const allFlows = Array.from(loginFlows.entries()).map(([id, f]) => ({
-      ticketId: maskValue(id),
-      kind: f.kind,
-      expiresAt: new Date(f.expiresAt).toISOString(),
-      expired: f.expiresAt <= Date.now(),
-      hasPkcePair: !!f.pkcePair,
-      hasDpopKeyPair: !!f.dpopKeyPair,
-    }));
-    logger.info(`[huawei-auth] Current login flows: ${allFlows.length}`, { flows: allFlows });
-
-    // 上游实现不使用 state 来匹配登录流程
-    // 它只是使用当前活跃的登录流程（通过 running promise）
-    // 我们使用类似的方式：找到最近的 pending 流程（API 或 browser）
-    const flow = getAnyPendingLoginFlow();
-
+    const flow = getPendingLoginFlowByState(state);
     if (!flow) {
       logger.warn(
-        `[huawei-auth] OAuth2 callback: no active login flow found`,
+        `[huawei-auth] OAuth2 callback: no matching login flow for state`,
       );
-      res.status(400).json(createOpenAIError("No active login flow. Please start a new login."));
+      res.status(400).json(createOpenAIError("Unknown or expired login flow. Please start a new login."));
       return;
     }
 
     logger.info(
-      `[huawei-auth] OAuth2 callback: using active flow ticketId=${maskValue(flow.ticketId)} kind=${flow.kind}`,
+      `[huawei-auth] OAuth2 callback: matched flow ticketId=${maskValue(flow.ticketId)} kind=${flow.kind}`,
     );
 
     // 处理 OAuth2 授权码
